@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Youtube-Lyrics — full-screen display preview</title>
+<style>
+  :root {
+    --bg-top: #0a0a12; --bg-bottom: #171226;
+    --accent: #7c5cff; --text: #f4f2ff;
+    --stage-w: 1920px; --stage-h: 1080px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: #06060a; color: #e8e8f2;
+    font-family: "Segoe UI", "Segoe UI Variable Text", system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; align-items: center; }
+
+  .bar { width: 100%; max-width: 1400px; padding: 14px 18px 6px;
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; }
+  .bar .spacer { flex: 1; }
+  .bar button { background: #1b1b26; color: #dcdce8; border: 1px solid #2e2e3e;
+    border-radius: 8px; padding: 7px 12px; font-size: 13px; cursor: pointer; }
+  .bar button:hover { background: #24242f; border-color: #3d3d52; }
+  .bar button.on { background: #2c2350; border-color: #6a52d8; color: #fff; }
+  .bar .hint { opacity: .55; }
+
+  .frame { width: 100%; max-width: 1400px; padding: 0 18px 18px; }
+  .stage-wrap { position: relative; width: 100%; aspect-ratio: 16 / 9;
+    border-radius: 14px; overflow: hidden; box-shadow: 0 24px 70px rgba(0,0,0,.7); }
+  .stage { position: absolute; top: 0; left: 0; width: var(--stage-w); height: var(--stage-h);
+    transform-origin: 0 0; overflow: hidden; }
+
+  /* ---------- background ---------- */
+  .bg { position: absolute; inset: 0;
+    background: linear-gradient(180deg, var(--bg-top), var(--bg-bottom)); }
+  .glow { position: absolute; border-radius: 50%; filter: blur(70px); opacity: .85; }
+  .glow.a { width: 1188px; height: 907px; left: -180px; top: -190px;
+    background: radial-gradient(closest-side, rgba(124,92,255,.42), rgba(124,92,255,0)); }
+  .glow.b { width: 1080px; height: 864px; right: -190px; bottom: -230px;
+    background: radial-gradient(closest-side, rgba(124,92,255,.30), rgba(124,92,255,0)); }
+  .cover { position: absolute; inset: -8%; opacity: 0; transition: opacity .4s;
+    background:
+      radial-gradient(40% 45% at 32% 38%, #6b4bd0 0%, rgba(0,0,0,0) 70%),
+      radial-gradient(45% 50% at 70% 62%, #d05b8a 0%, rgba(0,0,0,0) 72%),
+      radial-gradient(50% 60% at 55% 25%, #2a7fb8 0%, rgba(0,0,0,0) 70%),
+      linear-gradient(135deg, #12101d, #241a33 55%, #0d0b14);
+    filter: blur(26px) saturate(1.1); }
+  .stage.cover .cover { opacity: 1; }
+  .stage.cover .bg { opacity: .25; }
+  .scrim-dark { position: absolute; inset: 0; background: rgba(6,6,12,.66);
+    opacity: 0; transition: opacity .4s; }
+  .stage.cover .scrim-dark { opacity: 1; }
+  .vignette { position: absolute; inset: 0;
+    background: radial-gradient(120% 140% at 50% 50%, rgba(0,0,0,0) 42%, rgba(0,0,0,.62) 100%); }
+  .scrim-top { position: absolute; left: 0; right: 0; top: 0; height: 16%;
+    background: linear-gradient(180deg, rgba(0,0,0,.55), rgba(0,0,0,0)); }
+  .scrim-bottom { position: absolute; left: 0; right: 0; bottom: 0; height: 14%;
+    background: linear-gradient(0deg, rgba(0,0,0,.6), rgba(0,0,0,0)); }
+
+  /* ---------- header ---------- */
+  .header { position: absolute; left: 0; right: 0; top: 30px; text-align: center; }
+  .artist { font-size: 16px; letter-spacing: .02em; color: rgba(244,242,255,.60); }
+  .title { font-size: 22px; font-weight: 600; color: rgba(244,242,255,.88); margin-top: 6px; }
+
+  /* ---------- lyrics ---------- */
+  .lyrics { position: absolute; left: 260px; width: 1400px; top: 0; bottom: 0; }
+  .row { position: absolute; left: 0; width: 100%; height: 68px; display: flex;
+    align-items: center; justify-content: center; will-change: transform, opacity; }
+  .row .txt { font-size: 45px; font-weight: 400; color: var(--text);
+    white-space: nowrap; position: relative; transition: font-size .12s ease-out; }
+  .row.active .txt { font-size: 55px; font-weight: 600; }
+  .row .dim { color: rgba(244,242,255,.40); }
+  .row .fill { position: absolute; left: 0; top: 0; overflow: hidden;
+    width: 0; white-space: nowrap; }
+  .row.active .halo { position: absolute; left: 50%; top: 50%;
+    width: 1400px; height: 72px; transform: translate(-50%,-50%);
+    background: radial-gradient(50% 100% at 50% 50%, rgba(124,92,255,.16), rgba(124,92,255,0) 75%); }
+
+  /* ---------- chrome ---------- */
+  .track-line { position: absolute; left: 0; bottom: 4px; height: 3px; width: 100%;
+    background: rgba(255,255,255,.18); }
+  .track-fill { position: absolute; left: 0; bottom: 4px; height: 3px; width: 0;
+    background: linear-gradient(90deg, var(--accent), rgba(124,92,255,.82)); }
+  .track-dot { position: absolute; bottom: 2px; width: 7px; height: 7px; border-radius: 50%;
+    background: #fff; left: 0; }
+  .times { position: absolute; right: 18px; bottom: 12px; font-size: 16px;
+    color: rgba(255,255,255,.56); }
+  .source { position: absolute; left: 18px; bottom: 12px; font-size: 15px;
+    color: rgba(255,255,255,.40); }
+  .toast { position: absolute; left: 50%; bottom: 56px; transform: translateX(-50%);
+    padding: 12px 24px; border-radius: 22px; font-size: 20px; color: #f0f0f5;
+    background: rgba(20,20,32,.86); border: 1px solid rgba(124,92,255,.35);
+    opacity: 0; transition: opacity .25s; }
+  .toast.show { opacity: 1; }
+
+  /* ---------- help overlay ---------- */
+  .help { position: absolute; inset: 0; background: rgba(4,4,8,.77); display: none;
+    align-items: center; justify-content: center; }
+  .help.show { display: flex; }
+  .panel { width: 760px; border-radius: 18px; background: rgba(14,14,24,.94);
+    border: 1px solid rgba(255,255,255,.12); padding: 34px 40px 26px; }
+  .panel h2 { margin: 0 0 18px; font-size: 36px; font-weight: 600; }
+  .panel table { width: 100%; border-collapse: collapse; font-size: 21px; }
+  .panel td { padding: 8px 0; }
+  .panel td:first-child { width: 32%; text-align: right; padding-right: 34px;
+    font-weight: 600; color: #e8e8f2; }
+  .panel td:last-child { color: rgba(240,240,248,.62); }
+  .panel .diag { margin-top: 18px; font-family: Consolas, monospace; font-size: 13px;
+    color: rgba(200,200,216,.45); word-break: break-all; }
+
+  /* ---------- empty states ---------- */
+  .empty { position: absolute; inset: 0; display: none; flex-direction: column;
+    align-items: center; justify-content: center; text-align: center; }
+  .empty.show { display: flex; }
+  .empty h1 { font-size: 56px; font-weight: 600; margin: 0 0 22px; }
+  .empty .sub { font-size: 26px; color: rgba(244,242,255,.66); margin-bottom: 8px; }
+  .empty p { font-size: 21px; color: rgba(244,242,255,.55); margin: 5px 0; }
+</style>
+</head>
+<body>
+
+<div class="bar">
+  <button id="play">⏸ Pause</button>
+  <button id="restart">⟲ Restart</button>
+  <button data-jump="0">Start</button>
+  <button data-jump="72">Chorus</button>
+  <button id="theme">Theme: Midnight</button>
+  <button id="cover">Cover art</button>
+  <button id="wipe" class="on">Karaoke wipe</button>
+  <button id="helpBtn">F1 Help</button>
+  <button id="stateBtn">Idle / not-found states</button>
+  <span class="spacer"></span>
+  <span class="hint">Browser mock of the native renderer — same type sizes, colours and timing maths.</span>
+</div>
+
+<div class="frame">
+  <div class="stage-wrap" id="wrap">
+    <div class="stage" id="stage">
+      <div class="bg"></div>
+      <div class="cover"></div>
+      <div class="scrim-dark"></div>
+      <div class="glow a"></div>
+      <div class="glow b"></div>
+      <div class="vignette"></div>
+      <div class="scrim-top"></div>
+      <div class="scrim-bottom"></div>
+
+      <div class="header">
+        <div class="artist">Linkin Park</div>
+        <div class="title">In the End</div>
+      </div>
+
+      <div class="lyrics" id="lyrics"></div>
+
+      <div class="track-line"></div>
+      <div class="track-fill" id="trackFill"></div>
+      <div class="track-dot" id="trackDot"></div>
+      <div class="times" id="times">0:00 / 3:36</div>
+      <div class="source">via chrome.exe</div>
+      <div class="toast" id="toast"></div>
+
+      <div class="empty" id="empty">
+        <h1 id="emptyTitle">Waiting for music…</h1>
+        <div class="sub" id="emptySub"></div>
+        <p id="empty1">Play a song anywhere — YouTube Music, Spotify, any player.</p>
+        <p id="empty2">This window follows along on its own, even in the background.</p>
+        <p id="empty3">F1 for shortcuts · Ctrl+Alt+L shows or hides this window</p>
+      </div>
+
+      <div class="help" id="help">
+        <div class="panel">
+          <h2>Youtube-Lyrics</h2>
+          <table>
+            <tr><td>F11</td><td>Full screen / windowed</td></tr>
+            <tr><td>Esc</td><td>Leave full screen, then hide to tray</td></tr>
+            <tr><td>A</td><td>Always on top</td></tr>
+            <tr><td>↑ / ↓</td><td>Bigger / smaller text</td></tr>
+            <tr><td>← / →</td><td>Nudge lyric timing by 0.25 s</td></tr>
+            <tr><td>R</td><td>Look the lyrics up again</td></tr>
+            <tr><td>C</td><td>Cover art background on / off</td></tr>
+            <tr><td>K</td><td>Karaoke wipe on / off</td></tr>
+            <tr><td>T</td><td>Theme</td></tr>
+            <tr><td>F1 / H</td><td>Show / hide this help</td></tr>
+            <tr><td>Ctrl+Alt+L</td><td>Show / hide from any app</td></tr>
+            <tr><td>Q</td><td>Quit</td></tr>
+          </table>
+          <div class="diag">media helper: {"ok":1,"status":"playing","title":"In the End","artist":"Linkin Park","album":"Hybrid Theory","pos":12.4,"dur":216,"app":"Chrome","art":"…"}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ---- the lyric sheet (LRCLIB-synced LRC, as the app would receive it) ----
+const LRC = `
+[00:06.40](It starts with one)
+[00:12.34]One thing, I don't know why
+[00:15.10]It doesn't even matter how hard you try
+[00:18.20]Keep that in mind
+[00:20.00]I designed this rhyme
+[00:22.40]To explain in due time
+[00:25.00]All I know
+[00:27.60]Time is a valuable thing
+[00:30.10]Watch it fly by as the pendulum swings
+[00:33.00]Watch it count down to the end of the day
+[00:36.40]The clock ticks life away
+[00:39.00]It's so unreal
+[00:41.20]Didn't look out below
+[00:44.00]Watch the time go right out the window
+[00:47.20]Trying to hold on, didn't even know
+[00:50.10]I wasted it all just to watch you go
+[00:53.00]I kept everything inside
+[00:55.40]And even though I tried, it all fell apart
+[00:58.60]What it meant to me will eventually
+[01:01.20]Be a memory of a time when
+[01:05.60]I tried so hard and got so far
+[01:10.10]But in the end, it doesn't even matter
+[01:13.90]I had to fall to lose it all
+[01:17.50]But in the end, it doesn't even matter
+[01:40.00]One thing, I don't know why
+[01:42.80]It doesn't even matter how hard you try
+[01:45.60]Keep that in mind
+[01:47.60]I designed this rhyme to remind myself how
+[01:50.90]I tried so hard
+[01:53.20]In spite of the way you were mocking me
+[01:56.00]Acting like I was part of your property
+[01:58.90]Remembering all the times you fought with me
+[02:01.70]I'm surprised it got so far
+[02:04.40]Things aren't the way they were before
+[02:07.20]You wouldn't even recognize me anymore
+[02:10.00]Not that you knew me back then
+[02:12.60]But it all comes back to me in the end
+[02:15.60]You kept everything inside
+[02:18.20]And even though I tried, it all fell apart
+[02:21.40]What it meant to me will eventually
+[02:24.00]Be a memory of a time when
+[02:27.60]I tried so hard and got so far
+[02:32.10]But in the end, it doesn't even matter
+[02:35.90]I had to fall to lose it all
+[02:39.50]But in the end, it doesn't even matter
+`.trim();
+
+const DURATION = 216;   // 3:36
+const lines = LRC.split('\n').map((raw) => {
+  const m = raw.match(/^\[(\d+):(\d+)\.(\d+)\](.*)$/);
+  const t = (+m[1]) * 60000 + (+m[2]) * 1000 + (+m[3]) * 10;
+  return { t, text: m[4].trim() };
+});
+
+// ---- layout constants mirroring src/win/render.cc & src/core/core.cc ----
+const STAGE_W = 1920, STAGE_H = 1080;
+const BASE = Math.min(Math.max(STAGE_H * 0.042, 16), 88);   // 45.36 px
+const BOX_H = BASE * 1.5;                                   // 68 px
+const ROW_GAP_EXTRA = BASE * 0.55;
+const GAP_MS = 3000;
+const COL_W = Math.min(STAGE_W * 0.80, 1400);
+
+const rows = [];
+let y = 0;
+lines.forEach((line, i) => {
+  if (i > 0 && line.text && line.t - lines[i - 1].t >= GAP_MS) y += ROW_GAP_EXTRA;
+  rows.push({ ...line, top: y, h: BOX_H });
+  y += BOX_H;
+});
+const TOTAL_H = y;
+
+const lyricsEl = document.getElementById('lyrics');
+rows.forEach((row, i) => {
+  const el = document.createElement('div');
+  el.className = 'row';
+  el.style.transform = `translateY(${row.top}px)`;
+  el.innerHTML = `<div class="halo"></div><div class="txt">${row.text}</div>`;
+  lyricsEl.appendChild(el);
+  row.el = el;
+  row.txtEl = el.querySelector('.txt');
+});
+const rowEls = rows.map((r) => r.el);
+
+// ---- playback simulation ----
+let pos = 0;             // ms
+let playing = true;
+let scroll = 0;
+let wipe = true;
+let last = performance.now();
+let stateOverride = null;  // 'idle' | 'notfound' | null
+
+function activeIndex(p) {
+  if (!rows.length) return -1;
+  if (p < rows[0].t) return -1;
+  let lo = 0, hi = rows.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (rows[mid].t <= p) lo = mid + 1; else hi = mid;
+  }
+  return lo - 1;
+}
+
+function lineProgress(index, p) {
+  if (index < 0 || index >= rows.length) return 0;
+  const row = rows[index];
+  const end = index + 1 < rows.length ? rows[index + 1].t : row.t + 6000;
+  let span = end - row.t;
+  if (span <= 0) return 1;
+  if (span > 9000) span = 9000;
+  return Math.min(1, Math.max(0, (p - row.t) / span));
+}
+
+function scrollTarget(a) {
+  if (!TOTAL_H) return 0;
+  if (a < 0) return Math.max(0, (STAGE_H - TOTAL_H) * 0.5);
+  const want = STAGE_H * 0.42 - (rows[a].top + rows[a].h * 0.5);
+  let minScroll = STAGE_H * 0.72 - TOTAL_H;
+  const maxScroll = STAGE_H * 0.40;
+  if (minScroll > maxScroll) minScroll = maxScroll;
+  return Math.min(maxScroll, Math.max(minScroll, want));
+}
+
+function fmt(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+const trackFill = document.getElementById('trackFill');
+const trackDot = document.getElementById('trackDot');
+const timesEl = document.getElementById('times');
+const emptyEl = document.getElementById('empty');
+
+function frame(now) {
+  const dt = Math.min(0.25, (now - last) / 1000);
+  last = now;
+  if (playing && !stateOverride) {
+    pos += dt * 1000;
+    if (pos > DURATION * 1000) pos = 0;
+  }
+
+  const a = stateOverride ? -1 : activeIndex(pos);
+  const target = stateOverride ? 0 : scrollTarget(a);
+  const alpha = 1 - Math.exp(-dt / 0.13);
+  scroll += (target - scroll) * alpha;
+  if (Math.abs(target - scroll) < 0.4) scroll = target;
+
+  rows.forEach((row, i) => {
+    const active = i === a;
+    const dist = a >= 0 ? Math.abs(i - a) : 99;
+    const el = row.el;
+    el.style.transform = `translateY(${row.top + scroll}px)`;
+    el.style.opacity = active ? 1 : Math.max(0.20, (208 - dist * 30) / 255);
+    el.classList.toggle('active', active);
+    if (active) {
+      el.style.zIndex = 2;
+      const p = wipe ? lineProgress(a, pos) : 1;
+      const txt = row.txtEl;
+      // Dim base + bright clipped fill = the karaoke wipe.
+      txt.innerHTML = wipe
+        ? `<span class="dim">${row.text}</span><span class="fill" style="width:${p * 100}%"><span style="color:var(--text)">${row.text}</span></span>`
+        : row.text;
+      if (wipe) {
+        // the fill span must be clipped to its own width, not the text's
+        txt.querySelector('.fill').style.whiteSpace = 'nowrap';
+      }
+    } else {
+      el.style.zIndex = 1;
+      if (row.txtEl.dataset.wiped === '1') { row.txtEl.innerHTML = row.text; row.txtEl.dataset.wiped = ''; }
+      else if (row.txtEl.querySelector('.fill')) { row.txtEl.innerHTML = row.text; }
+    }
+    if (active && wipe) row.txtEl.dataset.wiped = '1';
+  });
+
+  const frac = Math.min(1, Math.max(0, pos / (DURATION * 1000)));
+  trackFill.style.width = `${frac * 100}%`;
+  trackDot.style.left = `calc(${frac * 100}% - 3px)`;
+  timesEl.textContent = `${fmt(pos)} / ${fmt(DURATION * 1000)}`;
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// ---- scaling the 1920x1080 stage into whatever the window is ----
+function fitStage() {
+  const wrap = document.getElementById('wrap');
+  const stage = document.getElementById('stage');
+  const scale = wrap.clientWidth / STAGE_W;
+  stage.style.transform = `scale(${scale})`;
+  wrap.style.height = `${STAGE_H * scale}px`;
+}
+window.addEventListener('resize', fitStage);
+fitStage();
+
+// ---- controls ----
+const playBtn = document.getElementById('play');
+playBtn.onclick = () => {
+  playing = !playing;
+  playBtn.textContent = playing ? '⏸ Pause' : '▶ Play';
+};
+document.getElementById('restart').onclick = () => { pos = 0; scroll = scrollTarget(activeIndex(0)); };
+document.querySelectorAll('[data-jump]').forEach((b) => {
+  b.onclick = () => { pos = (+b.dataset.jump) * 1000; scroll = scrollTarget(activeIndex(pos)); };
+});
+
+const themes = [
+  { name: 'Midnight', top: '#0a0a12', bottom: '#171226', accent: '#7c5cff', text: '#f4f2ff' },
+  { name: 'Aurora',   top: '#04121a', bottom: '#0a2030', accent: '#35d0ba', text: '#eafbf8' },
+  { name: 'Ember',    top: '#140f0c', bottom: '#26180f', accent: '#ff8a5b', text: '#fff4ec' },
+  { name: 'Mono',     top: '#0b0b0b', bottom: '#191919', accent: '#ffffff', text: '#ffffff' },
+];
+let themeIndex = 0;
+const themeBtn = document.getElementById('theme');
+themeBtn.onclick = () => {
+  themeIndex = (themeIndex + 1) % themes.length;
+  const t = themes[themeIndex];
+  const root = document.documentElement.style;
+  root.setProperty('--bg-top', t.top);
+  root.setProperty('--bg-bottom', t.bottom);
+  root.setProperty('--accent', t.accent);
+  root.setProperty('--text', t.text);
+  document.querySelectorAll('.glow').forEach((g) => {
+    g.style.background = `radial-gradient(closest-side, ${t.accent}6b, ${t.accent}00)`;
+  });
+  themeBtn.textContent = `Theme: ${t.name}`;
+  toast(`Theme: ${t.name}`);
+};
+
+const coverBtn = document.getElementById('cover');
+coverBtn.onclick = () => {
+  const on = document.getElementById('stage').classList.toggle('cover');
+  coverBtn.classList.toggle('on', on);
+  toast(on ? 'Cover art background: on' : 'Cover art background: off');
+};
+
+const wipeBtn = document.getElementById('wipe');
+wipeBtn.onclick = () => {
+  wipe = !wipe;
+  wipeBtn.classList.toggle('on', wipe);
+  toast(wipe ? 'Karaoke wipe: on' : 'Karaoke wipe: off');
+};
+
+const helpEl = document.getElementById('help');
+document.getElementById('helpBtn').onclick = () => helpEl.classList.toggle('show');
+
+const stateBtn = document.getElementById('stateBtn');
+const emptyTitle = document.getElementById('emptyTitle');
+const emptySub = document.getElementById('emptySub');
+stateBtn.onclick = () => {
+  if (!stateOverride) {
+    stateOverride = 'idle';
+    emptyTitle.textContent = 'Waiting for music…';
+    emptySub.textContent = '';
+    stateBtn.textContent = 'State: nothing playing';
+  } else if (stateOverride === 'idle') {
+    stateOverride = 'notfound';
+    emptyTitle.textContent = 'No lyrics found';
+    emptySub.textContent = 'Linkin Park — In the End';
+    stateBtn.textContent = 'State: lyrics missing';
+  } else {
+    stateOverride = null;
+    stateBtn.textContent = 'Idle / not-found states';
+  }
+  emptyEl.classList.toggle('show', !!stateOverride);
+  document.querySelector('.header').style.display = stateOverride ? 'none' : '';
+};
+
+let toastTimer = null;
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 1800);
+}
+</script>
+</body>
+</html>
