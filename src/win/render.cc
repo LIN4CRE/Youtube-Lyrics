@@ -19,11 +19,14 @@ struct Theme {
   const wchar_t* name;
 };
 
+// The first entry is the brand theme and the default: ink and warm paper with
+// one amber accent, the same five values the logo and the README are drawn in.
+// The rest are genuinely different moods, not hue-rotations of each other.
 const Theme kThemes[] = {
-    {0xFF0A0A12, 0xFF171226, 0xFF7C5CFF, 0xFFF4F2FF, L"Midnight"},
-    {0xFF04121A, 0xFF0A2030, 0xFF35D0BA, 0xFFEAFBF8, L"Aurora"},
-    {0xFF140F0C, 0xFF26180F, 0xFFFF8A5B, 0xFFFFF4EC, L"Ember"},
-    {0xFF0B0B0B, 0xFF191919, 0xFFFFFFFF, 0xFFFFFFFF, L"Mono"},
+    {0xFF0B0A0F, 0xFF17151D, 0xFFF5A524, 0xFFF3EFE6, L"Midnight"},
+    {0xFF070D14, 0xFF0E2230, 0xFF5CC8D8, 0xFFEAF7F9, L"Aurora"},
+    {0xFF120C08, 0xFF241509, 0xFFE07A3C, 0xFFFFF1E3, L"Ember"},
+    {0xFF0B0B0B, 0xFF171717, 0xFFEDEAE3, 0xFFF5F2EC, L"Mono"},
 };
 const int kThemeCount = static_cast<int>(sizeof(kThemes) / sizeof(kThemes[0]));
 

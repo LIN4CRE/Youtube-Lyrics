@@ -78,40 +78,66 @@ HBITMAP make_icon_bitmap(int size) {
     g.Clear(Color(0, 0, 0, 0));
     g.SetCompositingMode(CompositingModeSourceOver);
 
-    Gdiplus::RectF r(0.5f, 0.5f, static_cast<REAL>(size - 1),
-                     static_cast<REAL>(size - 1));
+    // The brand mark: a lyric sheet on a paper tile. Kept numerically in step
+    // with draw_mark() in scripts/brand.py, which draws the same figure for
+    // the exe icon and the README artwork.
+    const bool small = size <= 48;
+    const REAL s = static_cast<REAL>(size);
+
+    // GraphicsPath is not copyable, so the outline is written into a path the
+    // caller owns.
+    auto tile = [&](Gdiplus::GraphicsPath& p, REAL x, REAL y, REAL w, REAL h,
+                    REAL radius) {
+      REAL d = radius * 2;
+      if (d > w) d = w;
+      if (d > h) d = h;
+      p.Reset();
+      p.AddArc(x, y, d, d, 180, 90);
+      p.AddArc(x + w - d, y, d, d, 270, 90);
+      p.AddArc(x + w - d, y + h - d, d, d, 0, 90);
+      p.AddArc(x, y + h - d, d, d, 90, 90);
+      p.CloseFigure();
+    };
+
     Gdiplus::GraphicsPath path;
-    REAL d = size * 0.46f;
-    path.AddArc(r.X, r.Y, d, d, 180, 90);
-    path.AddArc(r.X + r.Width - d, r.Y, d, d, 270, 90);
-    path.AddArc(r.X + r.Width - d, r.Y + r.Height - d, d, d, 0, 90);
-    path.AddArc(r.X, r.Y + r.Height - d, d, d, 90, 90);
-    path.CloseFigure();
+    tile(path, 0, 0, s, s, s * 0.235f);
+    Gdiplus::SolidBrush paper(Color(255, 243, 239, 230));
+    g.FillPath(&paper, &path);
 
-    Gdiplus::LinearGradientBrush bg(r, Color(255, 124, 92, 255),
-                                    Color(255, 60, 40, 150),
-                                    LinearGradientModeForwardDiagonal);
-    g.FillPath(&bg, &path);
+    // The margin rule every line of the song hangs from.
+    {
+      REAL rx = s * (small ? 0.150f : 0.134f);
+      REAL rw = s * (small ? 0.052f : 0.022f);
+      tile(path, rx, s * 0.215f, rw, s * 0.570f, rw * 0.5f);
+      Gdiplus::SolidBrush ink(Color(small ? 170 : 96, 11, 10, 15));
+      g.FillPath(&ink, &path);
+    }
 
-    // Four equaliser bars.
-    Gdiplus::SolidBrush white(Color(255, 255, 255, 255));
-    REAL bar_w = size * 0.105f;
-    REAL gap = size * 0.075f;
-    REAL total = 4 * bar_w + 3 * gap;
-    REAL x = (size - total) * 0.5f;
-    REAL heights[4] = {0.30f, 0.52f, 0.40f, 0.62f};
-    for (int i = 0; i < 4; ++i) {
-      REAL h = size * heights[i];
-      REAL y = (size - h) * 0.5f;
-      Gdiplus::GraphicsPath bar;
-      REAL rr = bar_w * 0.5f;
-      bar.AddArc(x, y, rr * 2, rr * 2, 180, 90);
-      bar.AddArc(x + bar_w - rr * 2, y, rr * 2, rr * 2, 270, 90);
-      bar.AddArc(x + bar_w - rr * 2, y + h - rr * 2, rr * 2, rr * 2, 0, 90);
-      bar.AddArc(x, y + h - rr * 2, rr * 2, rr * 2, 90, 90);
-      bar.CloseFigure();
-      g.FillPath(&white, &bar);
-      x += bar_w + gap;
+    // Three lines of text; the middle one is the line being sung, part amber.
+    struct Bar { REAL width, centre_y, height; bool lit; };
+    const REAL thin = s * (small ? 0.120f : 0.075f);
+    const REAL mid = s * (small ? 0.175f : 0.125f);
+    const Bar bars[3] = {
+        {small ? 0.350f : 0.340f, 0.345f, thin, false},
+        {small ? 0.580f : 0.600f, 0.500f, mid, true},
+        {small ? 0.265f : 0.265f, 0.655f, thin, false},
+    };
+    const REAL x0 = s * (small ? 0.268f : 0.240f);
+    for (int i = 0; i < 3; ++i) {
+      REAL w = s * bars[i].width;
+      REAL h = bars[i].height;
+      REAL y = s * bars[i].centre_y - h * 0.5f;
+      tile(path, x0, y, w, h, h * 0.5f);
+      if (bars[i].lit) {
+        Gdiplus::SolidBrush unsung(Color(86, 11, 10, 15));
+        g.FillPath(&unsung, &path);
+        tile(path, x0, y, w * 0.68f, h, h * 0.5f);
+        Gdiplus::SolidBrush amber(Color(255, 245, 165, 36));
+        g.FillPath(&amber, &path);
+      } else {
+        Gdiplus::SolidBrush ink(Color(small ? 170 : 104, 11, 10, 15));
+        g.FillPath(&ink, &path);
+      }
     }
   }
 
