@@ -12,7 +12,7 @@ namespace ytl {
 
 // LRCLIB asks API clients to identify themselves.
 static const wchar_t* kUserAgent =
-    L"YoutubeLyrics/1.3 (https://github.com/LIN4CRE/Youtube-Lyrics)";
+    L"YoutubeLyrics/1.4.0 (https://github.com/LIN4CRE/Youtube-Lyrics)";
 
 namespace {
 std::mutex g_http_handle_mu;

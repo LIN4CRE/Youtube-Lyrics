@@ -1,0 +1,5 @@
+#pragma once
+
+#define IDR_WALLPAPER_CITY 201
+#define IDR_WALLPAPER_MOUNTAIN 202
+#define IDR_WALLPAPER_FOREST 203

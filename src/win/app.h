@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "../core/core.h"
+#include "resource.h"
 
 namespace ytl {
 
@@ -21,7 +22,14 @@ enum : UINT {
   WM_APP_MEDIA = WM_APP + 1,   // media thread: new song state available
   WM_APP_LYRICS = WM_APP + 2,  // lyrics thread: lookup finished
   WM_APP_TRAY = WM_APP + 3,    // tray icon callback
+  WM_APP_UPDATE_AVAILABLE = WM_APP + 4,
+  WM_APP_UPDATE_PROGRESS = WM_APP + 5,
+  WM_APP_UPDATE_READY = WM_APP + 6,
+  WM_APP_UPDATE_ERROR = WM_APP + 7,
+  WM_APP_UPDATE_NONE = WM_APP + 8,
 };
+
+constexpr int kWallpaperCount = 3;
 
 enum class LyricsState { Idle, Loading, Ready, NotFound, Error };
 
@@ -55,6 +63,11 @@ struct Config {
   // other window, ignores mouse input entirely and never takes focus, so it can
   // stay up permanently without getting in the way.
   bool wallpaper = true;
+  int wallpaper_index = 0;
+  bool wallpaper_random_start = true;
+  bool wallpaper_auto_rotate = true;
+  int wallpaper_interval_minutes = 30;
+  int wallpaper_dim = 12;  // percent, subtle by default
 
   void load();
   void save() const;
@@ -70,10 +83,19 @@ struct View {
   int bg_h = 0;
   std::string bg_art;
   int bg_theme = -1;
+  int bg_wallpaper = -1;
+  int bg_dim = -1;
+  int64_t wallpaper_changed_at = 0;
 
   // cover art image
   Gdiplus::Image* art = nullptr;
   std::string art_path;
+
+  // One selected embedded wallpaper; keep its stream alive for GDI+ and never
+  // cache all decoded backgrounds at once.
+  Gdiplus::Image* wallpaper_image = nullptr;
+  IStream* wallpaper_stream = nullptr;
+  int wallpaper_loaded_index = -1;
 
   // font cache, keyed by (pixels, weight)
   std::map<std::pair<int, int>, Gdiplus::Font*> fonts;
@@ -143,6 +165,7 @@ struct App {
   View view;
 
   bool helper_heard = false;  // has the media helper reported anything yet?
+  bool session_present = false;  // current SMTC observation is watchable
   int64_t started_at = 0;
 
   // Track-change debounce. A stale session can report one song for a single
@@ -157,6 +180,10 @@ struct App {
   // Parent HWND for true WorkerW wallpaper mode (behind desktop icons).
   HWND desktop_host = nullptr;
   bool desktop_parented = false;
+  HWND update_progress_hwnd = nullptr;
+  HWND update_progress_bar = nullptr;
+  HWND update_progress_label = nullptr;
+  std::string update_prompted_version;
   bool windowed = false;      // currently a normal window (not full screen)
   RECT windowed_rect{};
   bool hidden_to_tray = false;
@@ -184,6 +211,11 @@ struct App {
   void toggle_fullscreen();
   void toggle_topmost();
   void toggle_theme();
+  void next_wallpaper();
+  void toggle_wallpaper_rotation();
+  void cycle_wallpaper_interval();
+  void cycle_wallpaper_dim();
+  void toggle_random_wallpaper_start();
   void nudge_offset(int delta_ms);
   void set_font_scale(double scale);
   void show_toast(const std::string& text, int ms = 1800);
@@ -206,6 +238,7 @@ void refresh_art(App& app);
 double scroll_target(const App& app, int h);
 Gdiplus::Font* get_font(App& app, int px, int weight);
 const wchar_t* theme_name(int index);
+const wchar_t* wallpaper_name(int index);
 
 // Implemented in media.cc
 bool media_start(App& app);      // spawns the helper thread

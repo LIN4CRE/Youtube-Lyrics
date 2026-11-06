@@ -8,3 +8,4 @@ mkdir -p .build
   -fsanitize=address,undefined -fno-omit-frame-pointer \
   src/core/core.cc tests/core_test.cc -o .build/core_test
 ./.build/core_test
+python3 tests/release_test.py

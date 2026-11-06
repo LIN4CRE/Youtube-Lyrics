@@ -149,6 +149,13 @@ void scrim(Graphics& g, const RectF& r, Color from, Color to) {
 
 const wchar_t* theme_name(int index) { return theme(index).name; }
 
+const wchar_t* wallpaper_name(int index) {
+  static const wchar_t* names[kWallpaperCount] = {
+      L"Rainfall District", L"Midnight Range", L"Stillwood"};
+  if (index < 0 || index >= kWallpaperCount) index = 0;
+  return names[index];
+}
+
 Gdiplus::Font* get_font(App& app, int px, int weight) {
   auto key = std::make_pair(px, weight >= 600 ? 600 : (weight <= 300 ? 300 : 400));
   auto it = app.view.fonts.find(key);
@@ -179,18 +186,76 @@ void refresh_art(App& app) {
   }
 }
 
+void load_wallpaper(App& app, int index) {
+  View& v = app.view;
+  if (index < 0 || index >= kWallpaperCount) index = 0;
+  if (v.wallpaper_loaded_index == index) return;
+
+  if (v.wallpaper_image) {
+    delete v.wallpaper_image;
+    v.wallpaper_image = nullptr;
+  }
+  if (v.wallpaper_stream) {
+    v.wallpaper_stream->Release();
+    v.wallpaper_stream = nullptr;
+  }
+  v.wallpaper_loaded_index = index;
+
+  const int resource_ids[kWallpaperCount] = {
+      IDR_WALLPAPER_CITY, IDR_WALLPAPER_MOUNTAIN, IDR_WALLPAPER_FOREST};
+  HRSRC resource = FindResourceW(app.inst, MAKEINTRESOURCEW(resource_ids[index]), RT_RCDATA);
+  if (!resource) return;
+  HGLOBAL loaded = LoadResource(app.inst, resource);
+  const DWORD size = SizeofResource(app.inst, resource);
+  const void* bytes = loaded ? LockResource(loaded) : nullptr;
+  if (!bytes || size == 0 || size > (2u << 20)) return;
+
+  IStream* stream = nullptr;
+  if (FAILED(CreateStreamOnHGlobal(nullptr, TRUE, &stream)) || !stream) return;
+  ULONG written = 0;
+  if (FAILED(stream->Write(bytes, size, &written)) || written != size) {
+    stream->Release();
+    return;
+  }
+  LARGE_INTEGER start{};
+  if (FAILED(stream->Seek(start, STREAM_SEEK_SET, nullptr))) {
+    stream->Release();
+    return;
+  }
+  Image* image = Image::FromStream(stream, FALSE);
+  if (!image || image->GetLastStatus() != Ok || image->GetWidth() < 8 ||
+      image->GetHeight() < 8) {
+    delete image;
+    stream->Release();
+    return;
+  }
+  v.wallpaper_stream = stream;
+  v.wallpaper_image = image;
+  v.wallpaper_loaded_index = index;
+}
+
 // --------------------------------------------------------------- background
 
 void ensure_background(App& app, int w, int h) {
   View& v = app.view;
   if (w < 8 || h < 8) return;
-  std::string art_sig = v.art ? v.art_path : std::string();
+  load_wallpaper(app, app.cfg.wallpaper_index);
+  const std::string art_sig = (app.cfg.cover && v.art) ? v.art_path : std::string();
   if (v.bg && v.bg_w == w && v.bg_h == h && v.bg_theme == app.cfg.theme &&
+      v.bg_wallpaper == app.cfg.wallpaper_index && v.bg_dim == app.cfg.wallpaper_dim &&
       v.bg_art == art_sig) {
     return;
   }
 
-  Bitmap* bg = new Bitmap(w, h, PixelFormat32bppRGB);
+  // Cap the cached background to about two megapixels. The display back buffer
+  // remains native-resolution for crisp lyrics, but the cinematic still does
+  // not allocate another full 4K/8K bitmap in memory.
+  const double cache_scale = std::min(
+      1.0, std::min(1920.0 / static_cast<double>(w),
+                    1080.0 / static_cast<double>(h)));
+  const int bw = std::max(1, static_cast<int>(std::lround(w * cache_scale)));
+  const int bh = std::max(1, static_cast<int>(std::lround(h * cache_scale)));
+  Bitmap* bg = new Bitmap(bw, bh, PixelFormat32bppRGB);
   if (!bg || bg->GetLastStatus() != Ok) {
     delete bg;
     return;
@@ -199,59 +264,87 @@ void ensure_background(App& app, int w, int h) {
   g.SetSmoothingMode(SmoothingModeAntiAlias);
   g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
   g.SetPixelOffsetMode(PixelOffsetModeHalf);
-
   const Theme& th = theme(app.cfg.theme);
-  RectF full(0, 0, static_cast<REAL>(w), static_cast<REAL>(h));
+  RectF full(0, 0, static_cast<REAL>(bw), static_cast<REAL>(bh));
 
-  // Base gradient.
-  LinearGradientBrush base(full, Color(th.bg_top), Color(th.bg_bottom),
-                           LinearGradientModeVertical);
-  g.FillRectangle(&base, full);
-
-  if (v.art) {
-    // Aspect-fill the cover art, heavily darkened.
-    double iw = static_cast<double>(v.art->GetWidth());
-    double ih = static_cast<double>(v.art->GetHeight());
-    double scale = std::max(w / iw, h / ih);
-    double dw = iw * scale, dh = ih * scale;
-    g.DrawImage(v.art, RectF(static_cast<REAL>((w - dw) / 2),
-                             static_cast<REAL>((h - dh) / 2), static_cast<REAL>(dw),
-                             static_cast<REAL>(dh)));
-    SolidBrush dark(Color(168, 6, 6, 12));
-    g.FillRectangle(&dark, full);
-    scrim(g, full, Color(110, 8, 8, 14), Color(226, 4, 4, 8));
+  if (v.wallpaper_image) {
+    const double iw = static_cast<double>(v.wallpaper_image->GetWidth());
+    const double ih = static_cast<double>(v.wallpaper_image->GetHeight());
+    const double scale = std::max(bw / iw, bh / ih);
+    const double dw = iw * scale, dh = ih * scale;
+    g.DrawImage(v.wallpaper_image,
+                RectF(static_cast<REAL>((bw - dw) / 2),
+                      static_cast<REAL>((bh - dh) / 2), static_cast<REAL>(dw),
+                      static_cast<REAL>(dh)));
   } else {
-    // Two soft accent glows.
-    ARGB accent = th.accent;
-    int ar = (accent >> 16) & 0xFF, ag = (accent >> 8) & 0xFF, ab = accent & 0xFF;
-    glow(g, w * 0.18, h * 0.16, h * 0.55, h * 0.42, (0x38 << 24) | (ar << 16) | (ag << 8) | ab);
-    glow(g, w * 0.86, h * 0.88, h * 0.50, h * 0.40, (0x2A << 24) | (ar << 16) | (ag << 8) | ab);
+    LinearGradientBrush base(full, Color(th.bg_top), Color(th.bg_bottom),
+                             LinearGradientModeVertical);
+    g.FillRectangle(&base, full);
   }
 
-  // Vignette.
+  if (app.cfg.cover && v.art) {
+    // Cover art is an optional, low-opacity tint; the selected cinematic image
+    // remains the permanent visual foundation rather than being replaced.
+    const double iw = static_cast<double>(v.art->GetWidth());
+    const double ih = static_cast<double>(v.art->GetHeight());
+    const double scale = std::max(bw / iw, bh / ih);
+    const double dw = iw * scale, dh = ih * scale;
+    ColorMatrix matrix{};
+    matrix.m[0][0] = 1.0f;
+    matrix.m[1][1] = 1.0f;
+    matrix.m[2][2] = 1.0f;
+    matrix.m[3][3] = 0.16f;
+    matrix.m[4][4] = 1.0f;
+    ImageAttributes attributes;
+    attributes.SetColorMatrix(&matrix, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
+    g.DrawImage(v.art,
+                RectF(static_cast<REAL>((bw - dw) / 2),
+                      static_cast<REAL>((bh - dh) / 2), static_cast<REAL>(dw),
+                      static_cast<REAL>(dh)),
+                0, 0, static_cast<REAL>(iw), static_cast<REAL>(ih), UnitPixel,
+                &attributes);
+  }
+
+  const int dim = std::max(0, std::min(60, app.cfg.wallpaper_dim));
+  if (dim > 0) {
+    SolidBrush dark(Color(static_cast<BYTE>(dim * 255 / 100), 0, 0, 0));
+    g.FillRectangle(&dark, full);
+  }
+
+  // A restrained theme-coloured haze unifies the chosen art with the lyric
+  // palette without turning it into a generic gradient wallpaper.
+  const ARGB accent = th.accent;
+  const int ar = (accent >> 16) & 0xFF, ag = (accent >> 8) & 0xFF,
+            ab = accent & 0xFF;
+  glow(g, bw * 0.18, bh * 0.16, bh * 0.42, bh * 0.32,
+       (0x1A << 24) | (ar << 16) | (ag << 8) | ab);
+  glow(g, bw * 0.86, bh * 0.88, bh * 0.36, bh * 0.30,
+       (0x16 << 24) | (ar << 16) | (ag << 8) | ab);
+
+  // Soft edge vignette and readability scrims, cached once per wallpaper/settings change.
   GraphicsPath vig_path;
-  vig_path.AddEllipse(RectF(-static_cast<REAL>(w) * 0.18f,
-                            -static_cast<REAL>(h) * 0.28f,
-                            static_cast<REAL>(w) * 1.36f,
-                            static_cast<REAL>(h) * 1.56f));
+  vig_path.AddEllipse(RectF(-static_cast<REAL>(bw) * 0.18f,
+                            -static_cast<REAL>(bh) * 0.28f,
+                            static_cast<REAL>(bw) * 1.36f,
+                            static_cast<REAL>(bh) * 1.56f));
   PathGradientBrush vign(&vig_path);
   vign.SetCenterColor(Color(0, 0, 0, 0));
-  Color surround(160, 0, 0, 0);
+  Color surround(112, 0, 0, 0);
   int one = 1;
   vign.SetSurroundColors(&surround, &one);
   g.FillPath(&vign, &vig_path);
-
-  // Legibility scrims for the header and progress bar.
-  scrim(g, RectF(0, 0, static_cast<REAL>(w), h * 0.16f), Color(130, 0, 0, 0),
+  scrim(g, RectF(0, 0, static_cast<REAL>(bw), bh * 0.15f), Color(82, 0, 0, 0),
         Color(0, 0, 0, 0));
-  scrim(g, RectF(0, h * 0.86f, static_cast<REAL>(w), h * 0.14f),
-        Color(0, 0, 0, 0), Color(150, 0, 0, 0));
+  scrim(g, RectF(0, bh * 0.84f, static_cast<REAL>(bw), bh * 0.16f),
+        Color(0, 0, 0, 0), Color(112, 0, 0, 0));
 
   if (v.bg) delete v.bg;
   v.bg = bg;
   v.bg_w = w;
   v.bg_h = h;
   v.bg_theme = app.cfg.theme;
+  v.bg_wallpaper = app.cfg.wallpaper_index;
+  v.bg_dim = app.cfg.wallpaper_dim;
   v.bg_art = art_sig;
 }
 
@@ -692,9 +785,11 @@ void paint_help(App& app, Graphics& g, int w, int h) {
       {L"↑ / ↓", L"Bigger / smaller text"},
       {L"← / →", L"Nudge lyric timing by 0.25 s"},
       {L"R", L"Look the lyrics up again"},
-      {L"C", L"Cover art background on / off"},
+      {L"C", L"Subtle cover-art tint on / off"},
+      {L"B", L"Next cinematic wallpaper"},
       {L"K", L"Karaoke wipe on / off"},
       {L"T", L"Theme"},
+      {L"Ctrl+Alt+W", L"Toggle desktop wallpaper mode"},
       {L"F1  /  H", L"Show / hide this help"},
       {L"Ctrl+Alt+L", L"Show / hide from any app"},
       {L"Q", L"Quit"},
@@ -847,52 +942,61 @@ void render_frame(App& app, Graphics& g, int w, int h) {
 
   ensure_background(app, w, h);
   if (app.view.bg) {
-    g.DrawImage(app.view.bg, RectF(0, 0, static_cast<REAL>(w), static_cast<REAL>(h)));
+    g.DrawImage(app.view.bg,
+                RectF(0, 0, static_cast<REAL>(w), static_cast<REAL>(h)));
   } else {
     SolidBrush black(Color(0xFF101018));
-    g.FillRectangle(&black, RectF(0, 0, static_cast<REAL>(w), static_cast<REAL>(h)));
+    g.FillRectangle(&black, RectF(0, 0, static_cast<REAL>(w),
+                                  static_cast<REAL>(h)));
   }
 
-  const Theme& th = theme(app.cfg.theme);
-
-  switch (app.lstate) {
-    case LyricsState::Ready:
-      if (app.lyrics.synced || app.timing_estimated) {
-        paint_lyrics(app, g, w, h);
-      } else {
-        paint_plain(app, g, w, h);
-      }
-      break;
-    case LyricsState::Loading:
-      paint_centred_message(app, g, w, h, "Looking for lyrics…",
-                            track_label(app.current_track()), "", "", "");
-      break;
-    case LyricsState::NotFound:
-      paint_centred_message(app, g, w, h, "No lyrics found",
-                            track_label(app.current_track()), app.lmessage,
-                            "Press R to search again", "F1 for shortcuts");
-      break;
-    case LyricsState::Error:
-      paint_centred_message(app, g, w, h, "Lyrics lookup failed",
-                            track_label(app.current_track()), app.lmessage,
-                            "Press R to retry", "F1 for shortcuts");
-      break;
-    case LyricsState::Idle:
-    default: {
-      const bool listening = !app.current_track().title.empty();
-      const bool silent = !app.helper_heard && app.started_at > 0 &&
-                          app.now_ms() - app.started_at > 12000;
-      paint_idle_wallpaper(app, g, w, h, listening, silent);
-      break;
+  const bool desktop_wallpaper = app.cfg.wallpaper && !app.windowed;
+  const bool has_current_session = app.session_present &&
+                                   !app.active_track.title.empty();
+  if (desktop_wallpaper && !has_current_session) {
+    // In wallpaper mode the still image is the entire idle experience. No
+    // listening indicator, waiting text, stale lyric, or old track chrome.
+  } else {
+    switch (app.lstate) {
+      case LyricsState::Ready:
+        if (app.lyrics.synced || app.timing_estimated) {
+          paint_lyrics(app, g, w, h);
+        } else {
+          paint_plain(app, g, w, h);
+        }
+        break;
+      case LyricsState::Loading:
+        paint_centred_message(app, g, w, h, "Looking for lyrics…",
+                              track_label(app.current_track()), "", "", "");
+        break;
+      case LyricsState::NotFound:
+        if (!desktop_wallpaper)
+          paint_centred_message(app, g, w, h, "No lyrics found",
+                                track_label(app.current_track()), app.lmessage,
+                                "Press R to search again", "F1 for shortcuts");
+        break;
+      case LyricsState::Error:
+        if (!desktop_wallpaper)
+          paint_centred_message(app, g, w, h, "Lyrics lookup failed",
+                                track_label(app.current_track()), app.lmessage,
+                                "Press R to retry", "F1 for shortcuts");
+        break;
+      case LyricsState::Idle:
+      default:
+        if (!desktop_wallpaper) {
+          const bool listening = !app.current_track().title.empty();
+          const bool silent = !app.helper_heard && app.started_at > 0 &&
+                              app.now_ms() - app.started_at > 12000;
+          paint_idle_wallpaper(app, g, w, h, listening, silent);
+        }
+        break;
     }
   }
 
-  paint_chrome(app, g, w, h);
-  paint_hint(app, g, w, h);
+  if (!desktop_wallpaper || has_current_session) paint_chrome(app, g, w, h);
+  if (!desktop_wallpaper) paint_hint(app, g, w, h);
   paint_toast(app, g, w, h);
   paint_help(app, g, w, h);
-
-  (void)th;
 }
 
 }  // namespace ytl

@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1480 300"
+  role="img" aria-labelledby="title desc">
+  <title id="title">Youtube-Lyrics</title>
+  <desc id="desc">A lyric-sheet icon and the Youtube-Lyrics wordmark.</desc>
+  <defs><g id="lyric-mark">
+  <rect x="4" y="4" width="1016" height="1016" rx="240" fill="#f3efe6"
+        stroke="#0b0a0f" stroke-opacity=".16" stroke-width="6"/>
+  <rect x="137" y="220" width="23" height="584" rx="11.5"
+        fill="#0b0a0f" fill-opacity=".376"/>
+  <rect x="246" y="314" width="348" height="77" rx="38.5"
+        fill="#0b0a0f" fill-opacity=".408"/>
+  <rect x="246" y="448" width="614" height="128" rx="64"
+        fill="#0b0a0f" fill-opacity=".337"/>
+  <rect x="246" y="448" width="418" height="128" rx="64" fill="#f5a524"/>
+  <rect x="246" y="632" width="271" height="77" rx="38.5"
+        fill="#0b0a0f" fill-opacity=".408"/>
+</g></defs>
+  <g transform="translate(24 24) scale(0.24609375)">
+    <use href="#lyric-mark"/>
+  </g>
+  <text x="330" y="178" fill="#f3efe6"
+        font-family="Instrument Serif, Georgia, serif" font-size="154"
+        letter-spacing="-4">youtube</text>
+  <text x="835" y="178" fill="#f5a524"
+        font-family="Instrument Serif, Georgia, serif" font-size="154"
+        font-style="italic" letter-spacing="-4">lyrics</text>
+  <text x="340" y="240" fill="#8b8578"
+        font-family="JetBrains Mono, Consolas, monospace" font-size="19"
+        letter-spacing="3">FULL-SCREEN SYNCED LYRICS · WINDOWS 10 &amp; 11</text>
+</svg>

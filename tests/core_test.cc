@@ -110,6 +110,55 @@ static void test_json() {
   CHECK(!json_parse(invalid_utf8, v));
 }
 
+static void test_semantic_versions() {
+  StableVersion current, tag, higher, equal;
+  CHECK(parse_stable_version("1.3.1", current));
+  CHECK(parse_stable_version("v1.4.0", tag));
+  CHECK(parse_stable_version("1.3.1", equal));
+  CHECK_EQ(compare_stable_versions(tag, current), 1);
+  CHECK_EQ(compare_stable_versions(current, tag), -1);
+  CHECK_EQ(compare_stable_versions(current, equal), 0);
+  CHECK(parse_stable_version("2.0.0", higher));
+  CHECK_EQ(compare_stable_versions(higher, tag), 1);
+  CHECK(!parse_stable_version("", current));
+  CHECK(!parse_stable_version("1.4", current));
+  CHECK(!parse_stable_version("1.4.0-rc.1", current));
+  CHECK(!parse_stable_version("1.4.0+build", current));
+  CHECK(!parse_stable_version("01.4.0", current));
+  CHECK(!parse_stable_version("1.04.0", current));
+  CHECK(!parse_stable_version("1.4.00", current));
+  CHECK(!parse_stable_version("1.4.0junk", current));
+  CHECK(!parse_stable_version("18446744073709551616.0.0", current));
+}
+
+static void test_release_metadata() {
+  const std::string hash(64, 'a');
+  const std::string body =
+      R"JSON({"schema_version":1,"repository":"LIN4CRE/Youtube-Lyrics","tag":"v1.4.0","version":"1.4.0","channel":"stable","architecture":"x64","asset":"YoutubeLyrics.exe","size_bytes":567808,"sha256":")JSON" + hash + R"JSON("})JSON";
+  ReleaseMetadata metadata;
+  CHECK(parse_release_metadata(body, "LIN4CRE/Youtube-Lyrics", metadata));
+  CHECK_STR(metadata.tag, "v1.4.0");
+  CHECK_STR(metadata.version, "1.4.0");
+  CHECK_EQ(metadata.size_bytes, static_cast<uint64_t>(567808));
+  CHECK_STR(metadata.sha256, hash);
+  CHECK(!parse_release_metadata(body, "other/repository", metadata));
+  std::string bad = body;
+  const size_t tag = bad.find("v1.4.0");
+  bad.replace(tag, 6, "v1.4.1");
+  CHECK(!parse_release_metadata(bad, "LIN4CRE/Youtube-Lyrics", metadata));
+  bad = body;
+  const size_t arch = bad.find("x64");
+  bad.replace(arch, 3, "arm");
+  CHECK(!parse_release_metadata(bad, "LIN4CRE/Youtube-Lyrics", metadata));
+
+  std::string parsed_hash;
+  CHECK(parse_sha256_sidecar(hash + "  YoutubeLyrics.exe\n", parsed_hash));
+  CHECK_STR(parsed_hash, hash);
+  CHECK(parse_sha256_sidecar(hash + " *YoutubeLyrics.exe\r\n", parsed_hash));
+  CHECK(!parse_sha256_sidecar(hash + "  other.exe\n", parsed_hash));
+  CHECK(!parse_sha256_sidecar(std::string(63, 'a'), parsed_hash));
+}
+
 static void test_lrc() {
   std::vector<LyricLine> lines;
   std::string lrc =
@@ -610,6 +659,8 @@ static void test_extra_providers() {
 int main() {
   test_utf8();
   test_json();
+  test_semantic_versions();
+  test_release_metadata();
   test_lrc();
   test_clean_track();
   test_candidates();

@@ -25,6 +25,7 @@ Usage:  python3 scripts/brand.py
 from __future__ import annotations
 
 import os
+import shutil
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
@@ -175,6 +176,60 @@ def draw_mark(size: int, transparent: bool = False,
                      (x0, top, x1, bottom), radius=height / 2, fill=colour))
 
     return img.resize((size, size), Image.LANCZOS)
+
+
+def _mark_svg() -> str:
+    """Vector counterpart of draw_mark(), for crisp favicons and sharing."""
+    return '''<g id="lyric-mark">
+  <rect x="4" y="4" width="1016" height="1016" rx="240" fill="#f3efe6"
+        stroke="#0b0a0f" stroke-opacity=".16" stroke-width="6"/>
+  <rect x="137" y="220" width="23" height="584" rx="11.5"
+        fill="#0b0a0f" fill-opacity=".376"/>
+  <rect x="246" y="314" width="348" height="77" rx="38.5"
+        fill="#0b0a0f" fill-opacity=".408"/>
+  <rect x="246" y="448" width="614" height="128" rx="64"
+        fill="#0b0a0f" fill-opacity=".337"/>
+  <rect x="246" y="448" width="418" height="128" rx="64" fill="#f5a524"/>
+  <rect x="246" y="632" width="271" height="77" rx="38.5"
+        fill="#0b0a0f" fill-opacity=".408"/>
+</g>'''
+
+
+def build_vector_logos() -> None:
+    """Write a reusable square mark and wordmark from the project's palette."""
+    mark = _mark_svg()
+    mark_svg = f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"
+  role="img" aria-labelledby="title desc">
+  <title id="title">Youtube-Lyrics icon</title>
+  <desc id="desc">A lyric sheet with one amber line highlighted mid-song.</desc>
+  {mark}
+</svg>
+'''
+    logo_svg = f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1480 300"
+  role="img" aria-labelledby="title desc">
+  <title id="title">Youtube-Lyrics</title>
+  <desc id="desc">A lyric-sheet icon and the Youtube-Lyrics wordmark.</desc>
+  <defs>{mark}</defs>
+  <g transform="translate(24 24) scale(0.24609375)">
+    <use href="#lyric-mark"/>
+  </g>
+  <text x="330" y="178" fill="#f3efe6"
+        font-family="Instrument Serif, Georgia, serif" font-size="154"
+        letter-spacing="-4">youtube</text>
+  <text x="835" y="178" fill="#f5a524"
+        font-family="Instrument Serif, Georgia, serif" font-size="154"
+        font-style="italic" letter-spacing="-4">lyrics</text>
+  <text x="340" y="240" fill="#8b8578"
+        font-family="JetBrains Mono, Consolas, monospace" font-size="19"
+        letter-spacing="3">FULL-SCREEN SYNCED LYRICS · WINDOWS 10 &amp; 11</text>
+</svg>
+'''
+    with open(os.path.join(BRAND_DIR, "mark.svg"), "w", encoding="utf-8") as f:
+        f.write(mark_svg)
+    with open(os.path.join(BRAND_DIR, "logo.svg"), "w", encoding="utf-8") as f:
+        f.write(logo_svg)
+    print(f"wrote {os.path.join(BRAND_DIR, 'mark.svg')}")
+    print(f"wrote {os.path.join(BRAND_DIR, 'logo.svg')}")
 
 
 # ---------------------------------------------------------------------- banner
@@ -472,10 +527,12 @@ def build_display(path: str, w: int = 2560, h: int = 1440) -> None:
 def main() -> int:
     os.makedirs(BRAND_DIR, exist_ok=True)
     os.makedirs(os.path.join("docs", "img"), exist_ok=True)
+    build_vector_logos()
 
     icon_master = draw_mark(1024)
     icon_master.save(os.path.join(BRAND_DIR, "icon.png"), optimize=True)
-    print(f"wrote {os.path.join(BRAND_DIR, 'icon.png')}")
+    icon_master.save("icon.png", optimize=True)
+    print(f"wrote {os.path.join(BRAND_DIR, 'icon.png')} and icon.png")
 
     # Same mark, square, for the GitHub repo avatar / About panel.
     draw_mark(460).save(os.path.join(BRAND_DIR, "avatar.png"), optimize=True)
@@ -485,8 +542,11 @@ def main() -> int:
     draw_mark(512).save(".build/app-icon-512.png", optimize=True)
 
     build_banner(os.path.join(BRAND_DIR, "banner.png"))
+    shutil.copyfile(os.path.join(BRAND_DIR, "banner.png"), "banner.png")
     build_badge(os.path.join(BRAND_DIR, "badge-download.png"),
-                "download", "1.2 \u00b7 680 KB")
+                "download", "1.4.0 \u00b7 842 KiB")
+    build_badge(os.path.join(BRAND_DIR, "badge-support.png"),
+                "help me out", "paypal")
     build_badge(os.path.join(BRAND_DIR, "badge-platform.png"),
                 "runs on", "windows 10 / 11")
     build_badge(os.path.join(BRAND_DIR, "badge-licence.png"), "licence", "MIT")

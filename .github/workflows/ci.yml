@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  core-and-docs:
+    name: Core tests and documentation links
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Run sanitizer-backed core tests
+        run: ./scripts/test.sh
+      - name: Check static-page links
+        run: python3 scripts/check_docs.py
+
+  windows-x64-cross-build:
+    name: Cross-build Windows x64 executable
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pinned cross-build tools
+        run: python3 -m pip install --disable-pip-version-check ziglang==0.17.1 Pillow==13.0.0
+      - name: Build the Windows GUI executable
+        shell: bash
+        run: |
+          ZIG="$(python3 -c 'import pathlib, ziglang; print(pathlib.Path(ziglang.__file__).with_name("zig"))')"
+          ZIG="$ZIG" ./scripts/build.sh
+      - name: Verify the Windows PE target
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          image = Path('dist/YoutubeLyrics.exe').read_bytes()
+          assert image[:2] == b'MZ', 'missing DOS/PE header'
+          pe = int.from_bytes(image[0x3c:0x40], 'little')
+          assert image[pe:pe + 4] == b'PE\0\0', 'invalid PE signature'
+          machine = int.from_bytes(image[pe + 4:pe + 6], 'little')
+          assert machine == 0x8664, f'expected x86-64 PE, got 0x{machine:04x}'
+          print(f'validated x86-64 Windows executable ({len(image):,} bytes)')
+          PY

@@ -1,7 +1,10 @@
 // Youtube-Lyrics - window, tray, hotkeys, orchestration.
 #include "app.h"
+#include "update.h"
+#include "version.h"
 
 #include <dwmapi.h>
+#include <commctrl.h>
 #include <shellapi.h>
 #include <shlwapi.h>
 #include <knownfolders.h>
@@ -14,6 +17,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <string>
 
 namespace ytl {
@@ -23,6 +27,9 @@ using namespace Gdiplus;
 
 const wchar_t* kClassName = L"YoutubeLyricsWindow";
 const wchar_t* kAppName = L"Youtube-Lyrics";
+const wchar_t* kAppVersion = YTL_VERSION_WIDE;
+const wchar_t* kProjectUrl = L"https://github.com/LIN4CRE/Youtube-Lyrics";
+const wchar_t* kSupportUrl = L"https://paypal.me/delinacre16";
 const UINT_PTR kFrameTimer = 1;
 const int kHotkeyToggle = 1;
 const int kHotkeyWallpaper = 2;
@@ -253,6 +260,7 @@ void on_media(App& app) {
     m = app.media;
   }
   if (!m.raw.empty()) app.helper_heard = true;
+  app.session_present = m.have && !m.track.title.empty();
   const int64_t now = m.at_ms > 0 ? m.at_ms : app.now_ms();
 
   if (m.have && !m.track.title.empty()) {
@@ -417,10 +425,17 @@ void apply_fullscreen(App& app) {
 
   if (!app.windowed) {
     SetWindowLongPtrW(app.hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
-    SetWindowPos(app.hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
-                 mi.rcMonitor.right - mi.rcMonitor.left,
-                 mi.rcMonitor.bottom - mi.rcMonitor.top,
-                 SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
+    if (app.cfg.wallpaper) {
+      // Do not briefly raise a wallpaper window above ordinary applications.
+      SetWindowPos(app.hwnd, nullptr, 0, 0, 0, 0,
+                   SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE |
+                       SWP_NOZORDER | SWP_NOMOVE | SWP_NOSIZE);
+    } else {
+      SetWindowPos(app.hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+                   mi.rcMonitor.right - mi.rcMonitor.left,
+                   mi.rcMonitor.bottom - mi.rcMonitor.top,
+                   SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
+    }
   } else {
     SetWindowLongPtrW(app.hwnd, GWL_STYLE,
                       WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN);
@@ -457,14 +472,33 @@ void apply_desktop_mode(App& app) {
   const bool want_wallpaper = app.cfg.wallpaper && !app.windowed;
 
   if (want_wallpaper) {
+    // A wallpaper is never topmost. WorkerW is a shell-owned desktop surface
+    // below SHELLDLL_DefView (the icon view), not a transparent foreground HWND.
     if (!app.desktop_parented) {
-      HWND host = find_desktop_host();
-      if (host) {
-        SetLastError(0);
-        SetParent(app.hwnd, host);
-        if (GetLastError() == 0) {
+      SetWindowPos(app.hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    }
+    app.cfg.topmost = false;
+
+    if (app.desktop_parented &&
+        (!IsWindow(app.desktop_host) || GetParent(app.hwnd) != app.desktop_host)) {
+      SetLastError(ERROR_SUCCESS);
+      SetParent(app.hwnd, nullptr);
+      app.desktop_parented = false;
+      app.desktop_host = nullptr;
+    }
+    if (!app.desktop_parented) {
+      const HWND host = find_desktop_host();
+      if (host && IsWindow(host)) {
+        SetLastError(ERROR_SUCCESS);
+        const HWND previous = SetParent(app.hwnd, host);
+        const DWORD error = GetLastError();
+        if (previous || error == ERROR_SUCCESS) {
           app.desktop_host = host;
           app.desktop_parented = true;
+        } else {
+          logf("window: SetParent to WorkerW failed (error %lu)",
+               static_cast<unsigned long>(error));
         }
       }
     }
@@ -481,30 +515,43 @@ void apply_desktop_mode(App& app) {
       style |= WS_CHILD | WS_VISIBLE;
       SetWindowLongPtrW(app.hwnd, GWL_STYLE, style);
       RECT r{};
-      GetClientRect(app.desktop_host, &r);
+      if (!GetClientRect(app.desktop_host, &r) || r.right - r.left < 8 ||
+          r.bottom - r.top < 8) {
+        logf("window: WorkerW has no usable client area");
+        return;
+      }
+      // The WorkerW client rectangle is used instead of the primary monitor's
+      // dimensions, so Explorer's virtual-desktop surface can cover all displays.
       SetWindowPos(app.hwnd, HWND_TOP, 0, 0, r.right - r.left, r.bottom - r.top,
                    SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
-      logf("window: attached to desktop WorkerW %p", app.desktop_host);
+      logf("window: attached to desktop WorkerW %p (%ldx%ld)", app.desktop_host,
+           r.right - r.left, r.bottom - r.top);
     } else {
-      // Graceful fallback for Windows configurations where Explorer does not
-      // expose a WorkerW host.
-      MONITORINFO mi{};
-      mi.cbSize = sizeof(mi);
-      GetMonitorInfoW(MonitorFromWindow(app.hwnd, MONITOR_DEFAULTTONEAREST), &mi);
+      // Safe fallback only: remain at the very bottom of the non-topmost z-order
+      // and do not intercept input. This is not claimed as true WorkerW mode.
       LONG_PTR style = GetWindowLongPtrW(app.hwnd, GWL_STYLE);
       style &= ~WS_CHILD;
       style |= WS_POPUP | WS_VISIBLE;
       SetWindowLongPtrW(app.hwnd, GWL_STYLE, style);
+      MONITORINFO mi{};
+      mi.cbSize = sizeof(mi);
+      GetMonitorInfoW(MonitorFromWindow(app.hwnd, MONITOR_DEFAULTTONEAREST), &mi);
       SetWindowPos(app.hwnd, HWND_BOTTOM, mi.rcMonitor.left, mi.rcMonitor.top,
                    mi.rcMonitor.right - mi.rcMonitor.left,
                    mi.rcMonitor.bottom - mi.rcMonitor.top,
                    SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
-      logf("window: WorkerW unavailable; using bottom z-order fallback");
+      logf("window: WorkerW unavailable; safe bottom-z-order fallback only");
     }
   } else {
     if (app.desktop_parented) {
-      SetLastError(0);
-      SetParent(app.hwnd, nullptr);
+      SetLastError(ERROR_SUCCESS);
+      const HWND previous = SetParent(app.hwnd, nullptr);
+      const DWORD error = GetLastError();
+      if (!previous && error != ERROR_SUCCESS) {
+        logf("window: could not detach from WorkerW (error %lu)",
+             static_cast<unsigned long>(error));
+        return;
+      }
       app.desktop_parented = false;
       app.desktop_host = nullptr;
     }
@@ -527,14 +574,14 @@ void apply_desktop_mode(App& app) {
                    mi.rcMonitor.left, mi.rcMonitor.top,
                    mi.rcMonitor.right - mi.rcMonitor.left,
                    mi.rcMonitor.bottom - mi.rcMonitor.top,
-                   SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+                   SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
     } else {
       LONG_PTR style = GetWindowLongPtrW(app.hwnd, GWL_STYLE);
       style &= ~(WS_CHILD | WS_POPUP);
       style |= WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN;
       SetWindowLongPtrW(app.hwnd, GWL_STYLE, style);
       SetWindowPos(app.hwnd, HWND_TOP, 0, 0, 0, 0,
-                   SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
+                   SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED | SWP_NOACTIVATE);
     }
   }
   logf("window: desktop mode %s", want_wallpaper ? "on" : "off");
@@ -581,6 +628,109 @@ void remove_tray_icon(App& app) {
   Shell_NotifyIconW(NIM_DELETE, &nid);
 }
 
+constexpr wchar_t kUpdateProgressClass[] = L"YoutubeLyricsUpdateProgress";
+constexpr int kUpdateProgressBarId = 3101;
+constexpr int kUpdateProgressLabelId = 3102;
+constexpr int kUpdateProgressCancelId = 3103;
+
+LRESULT CALLBACK update_progress_proc(HWND hwnd, UINT msg, WPARAM wParam,
+                                      LPARAM lParam) {
+  App* app = reinterpret_cast<App*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+  if (msg == WM_NCCREATE) {
+    const CREATESTRUCTW* create = reinterpret_cast<const CREATESTRUCTW*>(lParam);
+    app = static_cast<App*>(create->lpCreateParams);
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(app));
+    if (app) app->update_progress_hwnd = hwnd;
+  }
+  switch (msg) {
+    case WM_COMMAND:
+      if (LOWORD(wParam) == kUpdateProgressCancelId) {
+        update_cancel_download();
+        if (app && app->update_progress_label)
+          SetWindowTextW(app->update_progress_label, L"Cancelling safely…");
+        EnableWindow(reinterpret_cast<HWND>(lParam), FALSE);
+        return 0;
+      }
+      break;
+    case WM_CLOSE:
+      update_cancel_download();
+      if (app && app->update_progress_label)
+        SetWindowTextW(app->update_progress_label, L"Cancelling safely…");
+      return 0;
+    case WM_NCDESTROY:
+      if (app) {
+        app->update_progress_hwnd = nullptr;
+        app->update_progress_bar = nullptr;
+        app->update_progress_label = nullptr;
+      }
+      break;
+    default:
+      break;
+  }
+  return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+void show_update_progress(App& app) {
+  if (app.update_progress_hwnd) {
+    ShowWindow(app.update_progress_hwnd, SW_SHOWNORMAL);
+    SetForegroundWindow(app.update_progress_hwnd);
+    return;
+  }
+  INITCOMMONCONTROLSEX controls{};
+  controls.dwSize = sizeof(controls);
+  controls.dwICC = ICC_PROGRESS_CLASS;
+  InitCommonControlsEx(&controls);
+
+  static bool registered = false;
+  if (!registered) {
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = update_progress_proc;
+    wc.hInstance = app.inst;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.lpszClassName = kUpdateProgressClass;
+    registered = RegisterClassExW(&wc) != 0 ||
+                 GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+  }
+  if (!registered) return;
+
+  const int width = 440, height = 164;
+  const int x = (GetSystemMetrics(SM_CXSCREEN) - width) / 2;
+  const int y = (GetSystemMetrics(SM_CYSCREEN) - height) / 2;
+  HWND dialog = CreateWindowExW(
+      WS_EX_DLGMODALFRAME | WS_EX_TOOLWINDOW, kUpdateProgressClass,
+      L"Updating Youtube-Lyrics", WS_CAPTION | WS_SYSMENU,
+      x, y, width, height, nullptr, nullptr, app.inst, &app);
+  if (!dialog) return;
+
+  app.update_progress_label = CreateWindowExW(
+      0, L"STATIC", L"Downloading and verifying the official GitHub release…",
+      WS_CHILD | WS_VISIBLE | SS_LEFT, 20, 20, 394, 24, dialog,
+      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kUpdateProgressLabelId)),
+      app.inst, nullptr);
+  app.update_progress_bar = CreateWindowExW(
+      0, PROGRESS_CLASSW, L"", WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
+      20, 57, 394, 22, dialog,
+      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kUpdateProgressBarId)),
+      app.inst, nullptr);
+  HWND cancel = CreateWindowExW(
+      0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+      width - 112, 96, 92, 28, dialog,
+      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kUpdateProgressCancelId)),
+      app.inst, nullptr);
+  if (app.update_progress_bar)
+    SendMessageW(app.update_progress_bar, PBM_SETRANGE32, 0, 100);
+  if (cancel) SetFocus(cancel);
+  ShowWindow(dialog, SW_SHOWNORMAL);
+  UpdateWindow(dialog);
+  SetForegroundWindow(dialog);
+}
+
+void close_update_progress(App& app) {
+  if (app.update_progress_hwnd) DestroyWindow(app.update_progress_hwnd);
+}
+
 void show_tray_menu(App& app) {
   HMENU menu = CreatePopupMenu();
   AppendMenuW(menu, MF_STRING, 1, L"Show lyrics\tCtrl+Alt+L");
@@ -591,12 +741,29 @@ void show_tray_menu(App& app) {
   AppendMenuW(menu, MF_STRING | (app.cfg.topmost ? MF_CHECKED : 0), 3,
               L"Always on top\tA");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(menu, MF_STRING, 13, L"Next cinematic wallpaper\tB");
+  AppendMenuW(menu, MF_STRING | (app.cfg.wallpaper_auto_rotate ? MF_CHECKED : 0),
+              14, L"Automatic wallpaper rotation");
+  AppendMenuW(menu, MF_STRING, 15,
+              (std::wstring(L"Rotation interval: ") +
+               std::to_wstring(app.cfg.wallpaper_interval_minutes) + L" min").c_str());
+  AppendMenuW(menu, MF_STRING, 16,
+              (std::wstring(L"Background darkness: ") +
+               std::to_wstring(app.cfg.wallpaper_dim) + L"%").c_str());
+  AppendMenuW(menu, MF_STRING | (app.cfg.wallpaper_random_start ? MF_CHECKED : 0),
+              17, L"Random wallpaper on launch");
+  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, 4, L"Reload lyrics\tR");
   AppendMenuW(menu, MF_STRING, 10, L"Reset sync offset");
   AppendMenuW(menu, MF_STRING | (app.view.help ? MF_CHECKED : 0), 5,
               L"Keyboard shortcuts\tF1");
   AppendMenuW(menu, MF_STRING, 8, L"Open local lyrics folder");
   AppendMenuW(menu, MF_STRING, 9, L"Clear automatic lyrics cache");
+  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(menu, MF_STRING, 18, L"Check for updates");
+  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(menu, MF_STRING, 11, L"About Youtube-Lyrics");
+  AppendMenuW(menu, MF_STRING, 12, L"Help out via PayPal");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, 6, L"Quit");
   SetMenuDefaultItem(menu, 1, FALSE);
@@ -621,6 +788,21 @@ void show_tray_menu(App& app) {
     case 7:
       toggle_wallpaper_mode(app);
       break;
+    case 13:
+      app.next_wallpaper();
+      break;
+    case 14:
+      app.toggle_wallpaper_rotation();
+      break;
+    case 15:
+      app.cycle_wallpaper_interval();
+      break;
+    case 16:
+      app.cycle_wallpaper_dim();
+      break;
+    case 17:
+      app.toggle_random_wallpaper_start();
+      break;
     case 4:
       app.request_lyrics(app.current_track(), true);
       invalidate_window(app);
@@ -641,6 +823,10 @@ void show_tray_menu(App& app) {
       }
       break;
     }
+    case 18:
+      app.show_toast("Checking GitHub for updates…", 2200);
+      update_request_check(app, true);
+      break;
     case 10:
       app.cfg.offset_ms = 0;
       app.cfg.save();
@@ -659,6 +845,26 @@ void show_tray_menu(App& app) {
       }
       break;
     }
+    case 11: {
+      const std::wstring about =
+          std::wstring(L"Youtube-Lyrics ") + kAppVersion +
+          L"\n\nA free, open-source Windows desktop lyrics display that follows "
+          L"Windows media sessions.\n\n"
+          L"No audio is recorded and no telemetry is sent. Lyric lookups use "
+          L"LRCLIB and lyrics.ovh.\n\n"
+          L"MIT licence\nProject: " + std::wstring(kProjectUrl) +
+          L"\nHelp out: paypal.me/delinacre16";
+      MessageBoxW(app.hwnd, about.c_str(), L"About Youtube-Lyrics",
+                  MB_OK | MB_ICONINFORMATION);
+      break;
+    }
+    case 12: {
+      const HINSTANCE result = ShellExecuteW(app.hwnd, L"open", kSupportUrl,
+                                             nullptr, nullptr, SW_SHOWNORMAL);
+      if (reinterpret_cast<INT_PTR>(result) <= 32)
+        app.show_toast("Could not open the PayPal support page.");
+      break;
+    }
     case 6:
       app.quitting = true;
       PostMessageW(app.hwnd, WM_CLOSE, 0, 0);
@@ -671,49 +877,54 @@ void show_tray_menu(App& app) {
 // ------------------------------------------------------------------ frame loop
 
 void on_timer(App& app) {
-  int64_t now = app.now_ms();
+  const int64_t now = app.now_ms();
   if (app.hidden_to_tray) {
     app.view.last_frame = now;
     SetTimer(app.hwnd, kFrameTimer, 1000, nullptr);
     return;
   }
+
+  if (app.cfg.wallpaper && app.cfg.wallpaper_auto_rotate) {
+    const int64_t interval = static_cast<int64_t>(app.cfg.wallpaper_interval_minutes) * 60 * 1000;
+    if (app.view.wallpaper_changed_at == 0) app.view.wallpaper_changed_at = now;
+    if (now - app.view.wallpaper_changed_at >= interval) {
+      app.cfg.wallpaper_index = (app.cfg.wallpaper_index + 1) % kWallpaperCount;
+      app.view.wallpaper_changed_at = now;
+      app.view.bg_wallpaper = -1;
+      app.cfg.save();
+      invalidate_window(app);
+    }
+  }
+
   double dt = app.view.last_frame ? (now - app.view.last_frame) / 1000.0 : 0.016;
   app.view.last_frame = now;
   if (dt > 0.25) dt = 0.25;
 
   RECT rc{};
   GetClientRect(app.hwnd, &rc);
-  int h = rc.bottom - rc.top;
+  const int h = rc.bottom - rc.top;
+  const int64_t pos = app.current_pos_ms();
+  const int new_active = (app.lyrics.synced || app.timing_estimated)
+                             ? active_index(app.disp, pos)
+                             : -1;
+  if (new_active != app.active) app.active = new_active;
 
-  int64_t pos = app.current_pos_ms();
-  int new_active = (app.lyrics.synced || app.timing_estimated)
-                       ? active_index(app.disp, pos)
-                       : -1;
-  if (new_active != app.active) {
-    app.active = new_active;
-  }
-
-  double target = scroll_target(app, h);
+  const double target = scroll_target(app, h);
   app.view.scroll = ease_towards(app.view.scroll, target, dt, 0.13);
   if (std::fabs(target - app.view.scroll) < 0.4) app.view.scroll = target;
-  bool animating = std::fabs(target - app.view.scroll) > 0.4;
+  const bool animating = std::fabs(target - app.view.scroll) > 0.4;
+  const bool lyric_progress = app.session_present && app.active_media.playing &&
+                              app.lstate == LyricsState::Ready;
+  const bool rapid_frame = animating || app.view.toast_until > now || lyric_progress;
 
-  const bool rapid_frame = animating || app.view.toast_until > now ||
-                           app.active_media.playing;
-  SetTimer(app.hwnd, kFrameTimer, rapid_frame ? 16u : 200u, nullptr);
+  // Static wallpaper idles at one cheap timer tick per second; only lyric motion,
+  // progress, or a toast requests a repaint. Automatic rotation is independent.
+  SetTimer(app.hwnd, kFrameTimer, rapid_frame ? 16u : 1000u, nullptr);
+  if (rapid_frame) invalidate_window(app);
 
-  // Idle wallpaper uses a low-rate pulse; static or paused views need no
-  // periodic repaint. The timer itself slows from ~60 Hz to 5 Hz when idle.
-  bool repaint = rapid_frame;
-  if (!rapid_frame && app.lstate == LyricsState::Idle &&
-      now - app.view.last_pulse_paint >= 180) {
-    app.view.last_pulse_paint = now;
-    repaint = true;
-  }
-  if (repaint) invalidate_window(app);
-  // Hide the mouse pointer when the display is left alone in full screen.
-  if (!app.view.cursor_hidden && !app.windowed && !app.view.help &&
-      now - app.view.last_mouse > 2500 && app.view.last_mouse > 0) {
+  if (!app.view.cursor_hidden && !app.windowed && !app.cfg.wallpaper &&
+      !app.view.help && now - app.view.last_mouse > 2500 &&
+      app.view.last_mouse > 0) {
     ShowCursor(FALSE);
     app.view.cursor_hidden = true;
   }
@@ -889,10 +1100,22 @@ void Config::load() {
       theme = (integer >= 0 && integer < 4) ? static_cast<int>(integer) : 0;
     } else if (k == "fullscreen") fullscreen = (v == "1");
     else if (k == "wallpaper") wallpaper = (v == "1");
+    else if (k == "wallpaper_index" && parse_config_integer(v, &integer))
+      wallpaper_index = static_cast<int>(std::max<int64_t>(0, std::min<int64_t>(kWallpaperCount - 1, integer)));
+    else if (k == "wallpaper_random_start") wallpaper_random_start = (v == "1");
+    else if (k == "wallpaper_auto_rotate") wallpaper_auto_rotate = (v == "1");
+    else if (k == "wallpaper_interval_minutes" && parse_config_integer(v, &integer))
+      wallpaper_interval_minutes = static_cast<int>(std::max<int64_t>(5, std::min<int64_t>(240, integer)));
+    else if (k == "wallpaper_dim" && parse_config_integer(v, &integer))
+      wallpaper_dim = static_cast<int>(std::max<int64_t>(0, std::min<int64_t>(60, integer)));
   }
   if (!std::isfinite(font_scale) || font_scale < 0.55 || font_scale > 2.2)
     font_scale = 1.0;
   if (theme < 0 || theme >= 4) theme = 0;
+  if (wallpaper_index < 0 || wallpaper_index >= kWallpaperCount) wallpaper_index = 0;
+  if (wallpaper_interval_minutes != 15 && wallpaper_interval_minutes != 30 &&
+      wallpaper_interval_minutes != 60) wallpaper_interval_minutes = 30;
+  if (wallpaper_dim < 0 || wallpaper_dim > 60) wallpaper_dim = 12;
   if (wallpaper) fullscreen = true;
 }
 void Config::save() const {
@@ -906,6 +1129,11 @@ void Config::save() const {
   data += "theme=" + std::to_string(theme) + "\n";
   data += std::string("fullscreen=") + (fullscreen ? "1" : "0") + "\n";
   data += std::string("wallpaper=") + (wallpaper ? "1" : "0") + "\n";
+  data += "wallpaper_index=" + std::to_string(wallpaper_index) + "\n";
+  data += std::string("wallpaper_random_start=") + (wallpaper_random_start ? "1" : "0") + "\n";
+  data += std::string("wallpaper_auto_rotate=") + (wallpaper_auto_rotate ? "1" : "0") + "\n";
+  data += "wallpaper_interval_minutes=" + std::to_string(wallpaper_interval_minutes) + "\n";
+  data += "wallpaper_dim=" + std::to_string(wallpaper_dim) + "\n";
   write_file_atomic(appdata_dir() + "\\config.ini", data);
 }
 
@@ -995,7 +1223,7 @@ void App::toggle_fullscreen() {
 }
 
 void App::toggle_topmost() {
-  if (cfg.wallpaper) {
+  if (cfg.wallpaper && !windowed) {
     show_toast("Always-on-top is unavailable in desktop mode");
     return;
   }
@@ -1014,6 +1242,58 @@ void App::toggle_theme() {
   std::string name = wide_to_utf8(theme_name(cfg.theme));
   show_toast("Theme: " + name);
   invalidate();
+}
+
+void App::next_wallpaper() {
+  cfg.wallpaper_index = (cfg.wallpaper_index + 1) % kWallpaperCount;
+  cfg.save();
+  view.wallpaper_changed_at = now_ms();
+  view.bg_wallpaper = -1;
+  show_toast("Wallpaper: " + wide_to_utf8(wallpaper_name(cfg.wallpaper_index)));
+  invalidate();
+}
+
+void App::toggle_wallpaper_rotation() {
+  cfg.wallpaper_auto_rotate = !cfg.wallpaper_auto_rotate;
+  view.wallpaper_changed_at = now_ms();
+  cfg.save();
+  show_toast(cfg.wallpaper_auto_rotate ? "Wallpaper rotation: on"
+                                       : "Wallpaper rotation: off");
+}
+
+void App::cycle_wallpaper_interval() {
+  if (cfg.wallpaper_interval_minutes == 15)
+    cfg.wallpaper_interval_minutes = 30;
+  else if (cfg.wallpaper_interval_minutes == 30)
+    cfg.wallpaper_interval_minutes = 60;
+  else
+    cfg.wallpaper_interval_minutes = 15;
+  view.wallpaper_changed_at = now_ms();
+  cfg.save();
+  show_toast("Wallpaper changes every " +
+             std::to_string(cfg.wallpaper_interval_minutes) + " minutes");
+}
+
+void App::cycle_wallpaper_dim() {
+  if (cfg.wallpaper_dim == 0)
+    cfg.wallpaper_dim = 12;
+  else if (cfg.wallpaper_dim == 12)
+    cfg.wallpaper_dim = 24;
+  else if (cfg.wallpaper_dim == 24)
+    cfg.wallpaper_dim = 36;
+  else
+    cfg.wallpaper_dim = 0;
+  cfg.save();
+  view.bg_dim = -1;
+  show_toast("Background darkness: " + std::to_string(cfg.wallpaper_dim) + "%");
+  invalidate();
+}
+
+void App::toggle_random_wallpaper_start() {
+  cfg.wallpaper_random_start = !cfg.wallpaper_random_start;
+  cfg.save();
+  show_toast(cfg.wallpaper_random_start ? "Random wallpaper on launch: on"
+                                        : "Random wallpaper on launch: off");
 }
 
 void App::nudge_offset(int delta_ms) {
@@ -1081,6 +1361,18 @@ void App::destroy_view_resources() {
     view.mem_dc = nullptr;
     view.mem_bmp = nullptr;
   }
+  delete view.bg;
+  view.bg = nullptr;
+  delete view.art;
+  view.art = nullptr;
+  delete view.wallpaper_image;
+  view.wallpaper_image = nullptr;
+  if (view.wallpaper_stream) {
+    view.wallpaper_stream->Release();
+    view.wallpaper_stream = nullptr;
+  }
+  for (auto& entry : view.fonts) delete entry.second;
+  view.fonts.clear();
 }
 
 // ------------------------------------------------------------------ painting
@@ -1141,13 +1433,16 @@ void handle_key(App& app, WPARAM key) {
     case 'T':
       app.toggle_theme();
       break;
+    case 'B':
+      app.next_wallpaper();
+      break;
     case 'C':
       app.cfg.cover = !app.cfg.cover;
       app.cfg.save();
       app.view.bg_theme = -1;
       refresh_art(app);
-      app.show_toast(app.cfg.cover ? "Cover art background: on"
-                                   : "Cover art background: off");
+      app.show_toast(app.cfg.cover ? "Subtle cover-art tint: on"
+                                   : "Subtle cover-art tint: off");
       app.invalidate();
       break;
     case 'K':
@@ -1234,7 +1529,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                      suggested->right - suggested->left,
                      suggested->bottom - suggested->top,
                      SWP_NOZORDER | SWP_NOACTIVATE);
-      } else if (!app->windowed && !app->cfg.wallpaper) {
+      } else if (!app->windowed && app->cfg.wallpaper) {
+        apply_desktop_mode(*app);
+      } else if (!app->windowed) {
         HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         MONITORINFO info{};
         info.cbSize = sizeof(info);
@@ -1251,7 +1548,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       return 0;
     }
     case WM_DISPLAYCHANGE:
-      if (!app->windowed && !app->cfg.wallpaper) {
+      if (!app->windowed && app->cfg.wallpaper) {
+        apply_desktop_mode(*app);
+      } else if (!app->windowed) {
         HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
         MONITORINFO info{};
         info.cbSize = sizeof(info);
@@ -1283,6 +1582,68 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       return 0;
     case WM_APP_LYRICS:
       on_lyrics(*app);
+      return 0;
+    case WM_APP_UPDATE_AVAILABLE: {
+      std::unique_ptr<UpdateRelease> release(
+          reinterpret_cast<UpdateRelease*>(lParam));
+      if (!release) return 0;
+      const bool manual_check = wParam != 0;
+      if (!manual_check && app->update_prompted_version == release->version) return 0;
+      app->update_prompted_version = release->version;
+      const std::wstring prompt =
+          L"A new version of Youtube-Lyrics is available!\n\n"
+          L"Installed version: " + widen(YTL_VERSION_STRING) +
+          L"\nAvailable version: " + widen(release->version) +
+          L"\n\nDownload and install this official GitHub release now?";
+      const int answer = MessageBoxW(nullptr, prompt.c_str(),
+                                     L"Youtube-Lyrics update",
+                                     MB_YESNO | MB_ICONINFORMATION | MB_SETFOREGROUND);
+      if (answer == IDYES) {
+        show_update_progress(*app);
+        update_request_download(*app, *release);
+      }
+      return 0;
+    }
+    case WM_APP_UPDATE_PROGRESS:
+      if (app->update_progress_bar && app->update_progress_label) {
+        if (wParam == 1000) {
+          SendMessageW(app->update_progress_bar, PBM_SETMARQUEE, TRUE, 35);
+          SetWindowTextW(app->update_progress_label,
+                         L"Connecting securely to the official GitHub release…");
+        } else {
+          SendMessageW(app->update_progress_bar, PBM_SETMARQUEE, FALSE, 0);
+          SendMessageW(app->update_progress_bar, PBM_SETPOS,
+                       std::min<WPARAM>(100, wParam), 0);
+          const std::wstring label = L"Downloading and verifying update… " +
+                                     std::to_wstring(std::min<WPARAM>(100, wParam)) + L"%";
+          SetWindowTextW(app->update_progress_label, label.c_str());
+        }
+      }
+      return 0;
+    case WM_APP_UPDATE_READY: {
+      std::unique_ptr<UpdateStage> stage(reinterpret_cast<UpdateStage*>(lParam));
+      close_update_progress(*app);
+      if (!stage) return 0;
+      std::string error;
+      if (update_apply_staged(*app, *stage, &error)) {
+        app->quitting = true;
+        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+      } else {
+        MessageBoxW(nullptr, widen(error).c_str(), L"Update could not be installed",
+                    MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
+      }
+      return 0;
+    }
+    case WM_APP_UPDATE_ERROR: {
+      std::unique_ptr<std::string> error(reinterpret_cast<std::string*>(lParam));
+      close_update_progress(*app);
+      if (error && wParam)
+        MessageBoxW(nullptr, widen(*error).c_str(), L"Youtube-Lyrics update",
+                    MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
+      return 0;
+    }
+    case WM_APP_UPDATE_NONE:
+      if (wParam) app->show_toast("You're using the latest stable version.", 2800);
       return 0;
     case WM_HOTKEY:
       if (wParam == kHotkeyToggle) {
@@ -1332,6 +1693,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       DestroyWindow(hwnd);
       return 0;
     case WM_DESTROY:
+      close_update_progress(*app);
+      update_stop();
       remove_tray_icon(*app);
       PostQuitMessage(0);
       return 0;
@@ -1387,8 +1750,16 @@ void enable_dark_titlebar(HWND hwnd) {
 
 // ------------------------------------------------------------------- WinMain
 
-int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show_cmd) {
+int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR command_line, int show_cmd) {
   using namespace ytl;
+
+  std::wstring launch_flag = command_line ? command_line : L"";
+  while (!launch_flag.empty() && (launch_flag.front() == L' ' || launch_flag.front() == L'\t'))
+    launch_flag.erase(launch_flag.begin());
+  while (!launch_flag.empty() && (launch_flag.back() == L' ' || launch_flag.back() == L'\t'))
+    launch_flag.pop_back();
+  const bool launched_after_update = launch_flag == L"--updated";
+  const bool launched_after_update_failure = launch_flag == L"--update-failed";
 
   set_dpi_awareness();
 
@@ -1416,6 +1787,14 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show_cmd) {
 
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   app.cfg.load();
+  if (app.cfg.wallpaper_random_start && kWallpaperCount > 1) {
+    const unsigned int seed = static_cast<unsigned int>(GetTickCount64()) ^
+                              static_cast<unsigned int>(GetCurrentProcessId());
+    const int step = 1 + static_cast<int>(seed % (kWallpaperCount - 1));
+    app.cfg.wallpaper_index = (app.cfg.wallpaper_index + step) % kWallpaperCount;
+  }
+  app.view.wallpaper_changed_at = app.now_ms();
+  app.cfg.save();
 
   WNDCLASSEXW wc{};
   wc.cbSize = sizeof(wc);
@@ -1471,6 +1850,11 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show_cmd) {
 
   app.taskbar_created_msg = RegisterWindowMessageW(L"TaskbarCreated");
   app.create_tray_icon();
+  if (launched_after_update) {
+    app.show_toast("Updated successfully to version " YTL_VERSION_STRING, 5000);
+  } else if (launched_after_update_failure) {
+    app.show_toast("Update failed; the previous version is still installed.", 6000);
+  }
   if (!RegisterHotKey(app.hwnd, kHotkeyToggle, MOD_CONTROL | MOD_ALT, 'L')) {
     logf("hotkey Ctrl+Alt+L could not be registered (another app owns it)");
   }
@@ -1485,6 +1869,7 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show_cmd) {
 
   media_start(app);
   lyrics_start(app);
+  update_start(app, !launched_after_update_failure);  // skip re-prompt after a failed replacement
   app.rebuild_layout(true);
   SetTimer(app.hwnd, kFrameTimer, 16, nullptr);
 

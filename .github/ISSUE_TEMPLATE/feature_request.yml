@@ -1,0 +1,29 @@
+name: Feature request
+description: Suggest a focused improvement to Youtube-Lyrics.
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the user problem first. The project aims to stay native, lightweight, privacy-conscious, and easy to distribute as one executable.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem should this solve?
+      placeholder: I have trouble when…
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to happen?
+      validations:
+        required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or trade-offs
+      description: Mention any effect on privacy, memory, compatibility, or the portable single-file build.
+    validations:
+      required: false
