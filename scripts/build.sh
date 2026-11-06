@@ -40,6 +40,7 @@ fi
 
 # 3. Cross compile.
 "$ZIG" c++ -target x86_64-windows-gnu -std=c++17 -O2 \
+  -DUNICODE -D_UNICODE \
   -municode -Wl,--subsystem,windows -Wl,--gc-sections \
   -fno-exceptions -fno-rtti -fno-strict-aliasing \
   -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type \
@@ -53,6 +54,9 @@ fi
   $RES_ARG \
   -lgdiplus -lgdi32 -luser32 -lole32 -luuid -lshell32 -lshlwapi -ldwmapi \
   -lwinhttp -lcomdlg32 -ladvapi32
+
+# Some Zig/MinGW versions leave an unused import archive beside the executable.
+rm -f "$OUT_DIR/core.lib"
 
 echo "built $OUT_DIR/YoutubeLyrics.exe"
 ls -la "$OUT_DIR/YoutubeLyrics.exe"

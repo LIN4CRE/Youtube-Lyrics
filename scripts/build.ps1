@@ -28,6 +28,7 @@ try {
 
 # 3. Cross/native compile (Zig drives the linker either way).
 & $zig c++ -target x86_64-windows-gnu -std=c++17 -O2 `
+    -DUNICODE -D_UNICODE `
     -municode -Wl,--subsystem,windows -Wl,--gc-sections `
     -fno-exceptions -fno-rtti -fno-strict-aliasing `
     -I.build -o dist/YoutubeLyrics.exe `
@@ -36,4 +37,5 @@ try {
     -lgdiplus -lgdi32 -luser32 -lole32 -luuid -lshell32 -lshlwapi -ldwmapi `
     -lwinhttp -lcomdlg32 -ladvapi32
 if ($LASTEXITCODE -ne 0) { throw 'compile failed' }
+Remove-Item -Force -ErrorAction SilentlyContinue dist/core.lib
 Write-Host "built dist\YoutubeLyrics.exe"

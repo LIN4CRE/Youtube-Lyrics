@@ -12,11 +12,11 @@ track actually playing in the background, and brings up its lyrics when it finds
 a confident match. It never takes focus or catches clicks; the desktop stays
 usable while the words sit quietly in the background.
 
-[![Download](docs/brand/badge-download.png)][releases]
+[![Download](docs/brand/badge-download.png)][download-page]
 [![Windows 10 / 11](docs/brand/badge-platform.png)](#requirements)
 [![MIT](docs/brand/badge-licence.png)](LICENSE)
 
-[**Download**][releases] · [See it running](docs/preview.html) · [Shortcuts](#keyboard) · [Troubleshooting](#if-something-is-off)
+[**Download YoutubeLyrics.exe**][download] · [Download page][download-page] · [See it running](docs/preview.html) · [Shortcuts](#keyboard) · [Troubleshooting](#if-something-is-off)
 
 </div>
 
@@ -59,15 +59,16 @@ never touches the browser.
 
 ## Install
 
-1. **[Download `YoutubeLyrics.exe`][releases]** — one file, about 680 KB.
+1. **[Download `YoutubeLyrics.exe`][download]** — one file, about 527 KiB.
+   Prefer to read first? Visit the [public download page][download-page].
 2. Put it anywhere: Desktop, `%LOCALAPPDATA%`, a USB stick. It is portable and
    writes nothing outside its own folder and `%LOCALAPPDATA%\YouTubeLyrics`.
-3. Double-click it, then play something.
+3. Double-click it, then play something. No terminal or installer is needed.
 
-Windows will show **"Windows protected your PC"** the first time, because the
-file is not code-signed (a certificate costs more per year than this project
-costs in total). Click **More info → Run anyway**. No administrator rights, no
-installer, no services, no registry changes, no account.
+Windows may show **"Windows protected your PC"** because the file is not
+code-signed. The source is public; continue only if you trust the download. If
+you choose to proceed, select **More info → Run anyway**. No administrator
+rights, services, or registry changes are required.
 
 <a id="requirements"></a>
 
@@ -134,9 +135,10 @@ src/core/          portable logic: LRC parsing, JSON, track-name cleaning,
 src/win/           Win32 window, tray, GDI+ renderer, WinHTTP, media listener
 src/win/smtc.ps1   the PowerShell media-session listener (embedded in the exe)
 scripts/build.sh   cross-compiles to dist/YoutubeLyrics.exe
+docs/index.html    no-terminal download page, published with GitHub Pages
 scripts/brand.py   draws the icon, banner and preview art from code
 scripts/test.sh    builds and runs the core tests under ASan/UBSan
-docs/preview.html  a browser mock of the display, for looking at it here
+docs/preview.html  an interactive browser mock of the display
 ```
 
 The portable half is deliberately free of Windows headers and has its own test
@@ -252,6 +254,8 @@ Space Grotesk, JetBrains Mono, Inter).
 <sub>Built for people who would rather look at the song than at a column.</sub>
 </div>
 
-[releases]: https://github.com/LIN4CRE/Youtube-Lyrics/releases/latest
+[download]: https://github.com/LIN4CRE/Youtube-Lyrics/releases/latest/download/YoutubeLyrics.exe
+[download-page]: https://lin4cre.github.io/Youtube-Lyrics/
+[releases]: https://github.com/LIN4CRE/Youtube-Lyrics/releases
 [lrclib]: https://lrclib.net
 [zig]: https://ziglang.org
