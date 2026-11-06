@@ -5,6 +5,7 @@
 // layer (src/win/*) only does drawing, input and I/O on top of this.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -50,16 +51,31 @@ struct JValue {
   double get_num(const char* key, double def = 0.0) const;
 };
 
-// Returns false on malformed input. Parsing is lenient about trailing garbage.
+// Returns false on malformed input, invalid UTF-8, or trailing non-whitespace.
 bool json_parse(const std::string& src, JValue& out);
 
 // ------------------------------------------------------------------- lyrics
 
+struct LyricSegment {
+  // Genuine Enhanced LRC timestamp for this segment, milliseconds from track start.
+  int64_t t_ms = 0;
+  // UTF-8 byte range within the owning line's normalized `text`.
+  size_t begin = 0;
+  size_t end = 0;
+};
+
 struct LyricLine {
+  LyricLine() = default;
+  LyricLine(int64_t start, std::string value,
+            std::vector<LyricSegment> timed_segments = {})
+      : t_ms(start), text(std::move(value)), segments(std::move(timed_segments)) {}
+
   // Start time of the line, milliseconds from the start of the track.
   int64_t t_ms = 0;
   // Line text, UTF-8.
   std::string text;
+  // Present only when the source contains inline Enhanced LRC timestamps.
+  std::vector<LyricSegment> segments;
 };
 
 struct Lyrics {
@@ -73,14 +89,16 @@ struct Lyrics {
   bool empty() const { return lines.empty() && plain.empty(); }
 };
 
-// Parses an LRC document. Supports [mm:ss.xx]/[mm:ss:xxx] stamps, multiple
-// stamps per line, [offset:+/-ms] and inline <mm:ss.xx> word tags (dropped).
-// Blank-text timestamps are kept, they act as instrumental gaps.
+// Parses an LRC document. Supports [mm:ss.xx]/[hh:mm:ss.xxx] stamps, multiple
+// stamps per line, [offset:+/-ms], and preserves genuine inline Enhanced LRC
+// segment timestamps. Blank-text timestamps are kept as instrumental gaps.
 bool lrc_parse(const std::string& lrc, std::vector<LyricLine>& out);
 
 // Turns a synced lyric list into plain text (used when a service only gives
 // unsynced text, or for the "plain" fallback view).
 std::string lyrics_to_plain(const std::vector<LyricLine>& lines);
+// Serializes line and genuine Enhanced LRC segment timestamps for local cache.
+std::string lyrics_to_lrc(const std::vector<LyricLine>& lines);
 
 // ----------------------------------------------------------- track matching
 
@@ -129,8 +147,8 @@ bool parse_lyrics_ovh_payload(const std::string& body, Lyrics& out);
 std::vector<LyricLine> pace_plain_lyrics(const std::string& plain, int64_t lead_ms,
                                          int64_t per_line_ms);
 
-// Normalises a hand-written LRC or plain-text lyric document (the user can drop
-// a .lrc next to a cached track to override the lookup).
+// Normalizes a hand-written LRC or plain-text lyric document loaded from the
+// user's local override folder.
 bool parse_local_lyrics(const std::string& text, Lyrics& out);
 
 // ------------------------------------------------------------------- layout
@@ -140,10 +158,18 @@ bool parse_local_lyrics(const std::string& text, Lyrics& out);
 using MeasureFn = std::function<double(const std::string& utf8, double px)>;
 
 struct DispLine {
+  DispLine() = default;
+  DispLine(int64_t start, int64_t end, std::string value, bool continuation = false,
+           std::vector<LyricSegment> timed_segments = {})
+      : start_ms(start), end_ms(end), text(std::move(value)), cont(continuation),
+        segments(std::move(timed_segments)) {}
+
   int64_t start_ms = 0;
   int64_t end_ms = 0;
   std::string text;      // may be empty (instrumental gap)
   bool cont = false;     // true for wrapped continuation of previous line
+  // Genuine inline timing, with byte ranges relative to this display row.
+  std::vector<LyricSegment> segments;
 };
 
 // Wraps long lyric lines to `max_w`. `px_for_line` yields the font size a line

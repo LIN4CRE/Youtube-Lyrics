@@ -6,6 +6,8 @@
 #include "app.h"
 #include "smtc_script.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -230,13 +232,21 @@ bool media_parse_line(const std::string& line, MediaState& out, int64_t now) {
   t.title = title;
   t.artist = artist;
   t.album = v.get_str("album");
-  t.duration_s = v.get_num("dur", 0);
+  constexpr double kMaxTrackDurationSeconds = 24.0 * 60.0 * 60.0;
+  const double reported_duration = v.get_num("dur", 0);
+  t.duration_s = (reported_duration > 0.0)
+                     ? std::min(reported_duration, kMaxTrackDurationSeconds)
+                     : 0.0;
   // Media metadata is authoritative. The generic cleaner still offers an
   // optional YouTube-title heuristic for callers that want it, but the live
   // listener never invents an artist from "Title - Something".
   out.track = clean_track(t, false);
   out.duration_s = t.duration_s;
-  out.pos_ms = static_cast<int64_t>(v.get_num("pos", 0) * 1000.0);
+  double position_s = v.get_num("pos", 0);
+  if (!std::isfinite(position_s) || position_s < 0.0) position_s = 0.0;
+  position_s = std::min(position_s, kMaxTrackDurationSeconds);
+  if (out.duration_s > 0.0) position_s = std::min(position_s, out.duration_s);
+  out.pos_ms = static_cast<int64_t>(position_s * 1000.0);
   out.art_path = v.get_str("art");
   out.app = v.get_str("app");
   out.key = track_key(out.track);
@@ -262,7 +272,9 @@ bool media_start(App& app) {
 void media_stop() {
   if (g_stop) SetEvent(g_stop);
   if (g_thread) {
-    WaitForSingleObject(g_thread, 4000);
+    // The worker owns a reference to App and may be in its bounded 2-second
+    // retry sleep. Never release App storage or its stop event before it exits.
+    WaitForSingleObject(g_thread, INFINITE);
     CloseHandle(g_thread);
     g_thread = nullptr;
   }

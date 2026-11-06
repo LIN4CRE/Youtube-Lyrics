@@ -135,7 +135,8 @@ struct App {
 
   // laid out display lines
   std::vector<DispLine> disp;
-  std::vector<LyricLine> pending_plain_lines;  // synthesised rows for unsynced text
+  std::vector<LyricLine> pending_plain_lines;  // estimated rows for untimed text
+  bool timing_estimated = false;  // display pacing, never source synchronization
   int active = -1;
   std::string current_key;  // track currently being displayed
 
@@ -218,6 +219,7 @@ void lyrics_start(App& app);
 void lyrics_stop();
 void lyrics_enqueue(const TrackInfo& track, int req_id, bool force);
 bool lyrics_take_result(int req_id, LyricsState* state, Lyrics* lyrics, std::string* msg);
+int lyrics_clear_cache();  // returns deleted file count, or -1 on failure
 
 // Implemented in app.cc, used by the other modules
 void logf(const char* fmt, ...);

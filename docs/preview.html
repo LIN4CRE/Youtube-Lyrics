@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Youtube-Lyrics — desktop wallpaper preview</title>
+<title>Youtube-Lyrics — simulated desktop layout preview</title>
 <style>
   :root {
     --bg-top: #0b0a0f; --bg-bottom: #17151d;
@@ -21,7 +21,10 @@
     border-radius: 8px; padding: 7px 12px; font-size: 13px; cursor: pointer; }
   .bar button:hover { background: #24212a; border-color: #61543e; }
   .bar button.on { background: #332819; border-color: #b47a22; color: #fff7e8; }
-  .bar .hint { opacity: .55; }
+  .bar .hint { opacity: .75; }
+  .preview-disclaimer { width: calc(100% - 36px); max-width: 1364px; margin: 4px 18px 12px;
+    padding: 11px 14px; border: 1px solid rgba(245,165,36,.35); border-radius: 8px;
+    color: #f3dfb6; background: rgba(80,54,18,.24); font-size: 13px; line-height: 1.5; }
 
   .frame { width: 100%; max-width: 1400px; padding: 0 18px 18px; }
   .stage-wrap { position: relative; width: 100%; aspect-ratio: 16 / 9;
@@ -171,8 +174,10 @@
   <button id="stateBtn">State: listening</button>
   <button id="wallpaperBtn" class="on">Desktop layer: on</button>
   <span class="spacer"></span>
-  <span class="hint">Native-renderer mock · desktop icons sit above the click-through lyric layer.</span>
+  <span class="hint">Illustrative HTML simulation</span>
 </div>
+
+<div class="preview-disclaimer" role="note"><strong>Illustrative simulation only.</strong> This page is a hand-built HTML playback mock-up, not a screenshot or the running Windows executable. Its sample track, lyrics, timing and desktop-layer behavior are simulated; this page is not evidence of runtime behavior.</div>
 
 <div class="frame">
   <div class="stage-wrap" id="wrap">

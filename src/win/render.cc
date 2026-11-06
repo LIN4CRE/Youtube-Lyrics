@@ -328,7 +328,9 @@ void relayout(App& app, int w, int h) {
   v.line_h = metrics.height;
   v.total_h = metrics.total;
   v.disp_rows = static_cast<int>(app.disp.size());
-  app.active = app.lyrics.synced ? active_index(app.disp, app.current_pos_ms()) : -1;
+  app.active = (app.lyrics.synced || app.timing_estimated)
+                   ? active_index(app.disp, app.current_pos_ms())
+                   : -1;
   v.last_active = app.active;
 }
 
@@ -344,6 +346,46 @@ double scroll_target(const App& app, int h) {
 // ------------------------------------------------------------------ painting
 
 namespace {
+
+double timed_segment_fill_width(Graphics& g, const DispLine& line,
+                                const std::string& utf8, Font* font,
+                                int64_t position_ms) {
+  double filled = 0.0;
+  size_t cursor = 0;
+  for (size_t i = 0; i < line.segments.size(); ++i) {
+    const LyricSegment& segment = line.segments[i];
+    const size_t begin = std::max(cursor, std::min(segment.begin, utf8.size()));
+    const size_t end = std::min(segment.end, utf8.size());
+    if (end <= begin) continue;
+    if (position_ms < segment.t_ms) return filled;
+
+    if (begin > cursor) {
+      const std::wstring gap = wide(utf8.substr(cursor, begin - cursor));
+      filled += measure_text(g, gap, font);
+    }
+    const std::wstring text = wide(utf8.substr(begin, end - begin));
+    const double segment_width = measure_text(g, text, font);
+    int64_t segment_end_ms = line.end_ms;
+    if (i + 1 < line.segments.size())
+      segment_end_ms = line.segments[i + 1].t_ms;
+    if (segment_end_ms < segment.t_ms) segment_end_ms = segment.t_ms;
+
+    if (segment_end_ms > segment.t_ms && position_ms < segment_end_ms) {
+      const double progress = std::max(
+          0.0, std::min(1.0, static_cast<double>(position_ms - segment.t_ms) /
+                                static_cast<double>(segment_end_ms - segment.t_ms)));
+      filled += segment_width * progress;
+      return filled;
+    }
+    filled += segment_width;
+    cursor = end;
+  }
+  if (cursor < utf8.size() && !line.segments.empty() &&
+      position_ms >= line.segments.back().t_ms) {
+    filled += measure_text(g, wide(utf8.substr(cursor)), font);
+  }
+  return std::max(0.0, filled);
+}
 
 void paint_lyrics(App& app, Graphics& g, int w, int h) {
   View& v = app.view;
@@ -365,13 +407,14 @@ void paint_lyrics(App& app, Graphics& g, int w, int h) {
     const double y = v.line_top[i] + v.scroll;
     if (y > h + 160) break;
     if (y + v.line_h[i] < -160) continue;
-    const bool is_active = app.lyrics.synced && (i == a);
+    const bool has_display_timing = app.lyrics.synced || app.timing_estimated;
+    const bool is_active = has_display_timing && (i == a);
     const bool is_gap = app.disp[i].text.empty();
     if (is_gap) continue;
 
     const int dist = (a >= 0) ? std::abs(i - a) : 99;
     int alpha = is_active ? 255 : static_cast<int>(std::max(52.0, 208.0 - dist * 30.0));
-    if (!app.lyrics.synced) alpha = 225;
+    if (!has_display_timing) alpha = 225;
 
     const int px = static_cast<int>(std::lround(is_active ? v.act_px : v.base_px));
     Font* font = get_font(app, px, is_active ? 600 : 400);
@@ -400,17 +443,27 @@ void paint_lyrics(App& app, Graphics& g, int w, int h) {
 
     ARGB base_color = (th.text & 0x00FFFFFF) | (static_cast<ARGB>(alpha) << 24);
 
-    if (is_active && app.cfg.wipe && progress < 0.999) {
-      // Dim pass, then the sung part clipped to a bright gradient.
-      ARGB dim = (th.text & 0x00FFFFFF) | (0x66 << 24);
-      draw_text(g, text, font, box, dim);
-      double full_w = measure_text(g, text, font);
-      double left = col_x + (v.col_w - full_w) * 0.5;
-      GraphicsState st = g.Save();
-      g.SetClip(RectF(static_cast<REAL>(left), box.Y - 4,
-                      static_cast<REAL>(full_w * progress), box.Height + 8));
-      draw_text(g, text, font, box, base_color);
-      g.Restore(st);
+    // Only real source timestamps drive a wipe. Enhanced LRC segments use
+    // their own markers; ordinary LRC uses a continuous line-level wipe.
+    if (is_active && app.lyrics.synced && app.cfg.wipe) {
+      const double full_w = measure_text(g, text, font);
+      const double filled_w = app.disp[i].segments.empty()
+                                  ? full_w * progress
+                                  : timed_segment_fill_width(
+                                        g, app.disp[i], app.disp[i].text, font, pos);
+      if (full_w > 0.0 && filled_w < full_w - 0.5) {
+        ARGB dim = (th.text & 0x00FFFFFF) | (0x66 << 24);
+        draw_text(g, text, font, box, dim);
+        const double left = col_x + (v.col_w - full_w) * 0.5;
+        GraphicsState st = g.Save();
+        g.SetClip(RectF(static_cast<REAL>(left), box.Y - 4,
+                        static_cast<REAL>(std::max(0.0, filled_w)),
+                        box.Height + 8));
+        draw_text(g, text, font, box, base_color);
+        g.Restore(st);
+      } else {
+        draw_text(g, text, font, box, base_color);
+      }
     } else {
       draw_text(g, text, font, box, base_color);
     }
@@ -545,6 +598,17 @@ void paint_chrome(App& app, Graphics& g, int w, int h) {
   if (app.lstate == LyricsState::Ready && !app.lyrics.source.empty()) {
     if (!status_line.empty()) status_line += "  \xC2\xB7  ";
     status_line += "lyrics: " + app.lyrics.source;
+    if (app.timing_estimated) {
+      status_line += "  \xC2\xB7  estimated scroll";
+    } else if (app.lyrics.synced) {
+      const bool enhanced = std::any_of(
+          app.lyrics.lines.begin(), app.lyrics.lines.end(),
+          [](const LyricLine& line) { return !line.segments.empty(); });
+      status_line += enhanced ? "  \xC2\xB7  Enhanced LRC"
+                              : "  \xC2\xB7  line-synced";
+    } else {
+      status_line += "  \xC2\xB7  untimed";
+    }
   }
   if (app.cfg.offset_ms != 0) {
     char buf[64];
@@ -793,7 +857,7 @@ void render_frame(App& app, Graphics& g, int w, int h) {
 
   switch (app.lstate) {
     case LyricsState::Ready:
-      if (app.lyrics.synced) {
+      if (app.lyrics.synced || app.timing_estimated) {
         paint_lyrics(app, g, w, h);
       } else {
         paint_plain(app, g, w, h);

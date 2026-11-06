@@ -1,28 +1,30 @@
 <div align="center">
 
-<img src="docs/brand/banner.png" alt="Youtube-Lyrics — full-screen synced lyrics for Windows 10 and 11" width="100%">
+<img src="docs/brand/banner.png" alt="Youtube-Lyrics — full-screen desktop lyrics for Windows 10 and 11" width="100%">
 
 <br>
 
 **YouTube Music gives you a thin strip of small text at the side of the screen.**
 **This gives you the whole screen, one lit line at a time.**
 
-A single Windows executable that lives behind your desktop icons, listens for a
-track actually playing in the background, and brings up its lyrics when it finds
-a confident match. It never takes focus or catches clicks; the desktop stays
-usable while the words sit quietly in the background.
+A single Windows executable that lives behind your desktop icons and follows
+Windows' current music session, prioritizing what is playing while retaining its
+current paused track. It never takes focus or catches clicks; the desktop stays
+usable while lyrics sit quietly in the background. LRCLIB search results are
+matched before display; lyrics.ovh is an untimed fallback without response-side
+track metadata.
 
 [![Download](docs/brand/badge-download.png)][download]
 [![Windows 10 / 11](docs/brand/badge-platform.png)](#requirements)
 [![MIT](docs/brand/badge-licence.png)](LICENSE)
 
-[**Download YoutubeLyrics.exe**][download] · [See it running](docs/preview.html) · [Shortcuts](#keyboard) · [Troubleshooting](#if-something-is-off)
+[**Download YoutubeLyrics.exe**][download] · [Interactive design preview (simulated)](docs/preview.html) · [Shortcuts](#keyboard) · [Troubleshooting](#if-something-is-off)
 
 </div>
 
-<img src="docs/img/display.png" alt="The full-screen display: the current line large and lit in amber, the sung words filled in, surrounding lines fading out." width="100%">
+<img src="docs/img/display.png" alt="Illustrative render of the lyrics layout: one amber-highlighted line with surrounding lines fading out." width="100%">
 
-<div align="center"><sub>The actual display, 2560 × 1440. No window chrome, no browser, no second screen required.</sub></div>
+<div align="center"><sub>Illustrative design render generated from the project's artwork — not a screenshot of the running Windows application. No runtime screenshot is claimed.</sub></div>
 
 <br>
 
@@ -45,13 +47,13 @@ never touches the browser.
 | | |
 | --- | --- |
 | **The line you are on, lit** | The active line is 22 % larger, bright, and has a soft amber spotlight behind it. Lines fade with distance so the eye lands in the right place instantly. |
-| **Karaoke wipe** | The sung part of each line fills in with colour, word by word, as the song plays — so you know where you are *inside* the line, not just which line. |
+| **Timing shown honestly** | Genuine Enhanced LRC timestamps fill timed word/lyric segments. Ordinary LRC gets a continuous line-level wipe. Untimed text can use estimated line navigation, clearly labeled as estimated, with no fake karaoke wipe. |
 | **Type you can read from the sofa** | Base size is 4.2 % of screen height and the column is capped at 1400 px. If a line would overflow, the whole layout steps down to fit rather than clipping. |
 | **Smooth, not twitchy** | Lines scroll on a spring, so a fast chorus glides instead of jolting. Gaps of 3 s or more get extra breathing room, so verses and choruses separate themselves. |
 | **Four themes, one of them honest** | Midnight (ink and amber, the default), Aurora, Ember, Mono. `T` cycles; the choice is remembered. |
 | **Cover art, if you want it** | The album cover, aspect-filled and heavily darkened behind the text. `C` toggles. |
 | **A real desktop layer** | Sits behind desktop icons and ordinary windows, without taking focus or intercepting clicks. `Ctrl+Alt+W` switches wallpaper mode; `Ctrl+Alt+L` hides or restores it. |
-| **Only the song that is playing** | Paused/stale SMTC sessions are ignored, track changes are confirmed across polls, and lyrics are matched against title, artist and duration before display. |
+| **The right media session** | A playing session takes priority; Windows' current known music session remains visible while paused, with its position frozen. Stopped sessions are ignored, track changes are confirmed across polls, and lyrics are checked against title, artist and duration. |
 | **Out of the way** | Runs in the tray; use the global hotkeys or the tray menu. Turn wallpaper mode off to use the normal full-screen/windowed display. |
 | **Offline after the first play** | Lyrics are cached per track on disk. Replay a song on a plane and it still works. |
 
@@ -59,7 +61,7 @@ never touches the browser.
 
 ## Install
 
-1. **[Download `YoutubeLyrics.exe`][download]** — one file, about 527 KiB.
+1. **[Download `YoutubeLyrics.exe`][download]** — one file, about 555 KiB.
 2. Put it anywhere: Desktop, `%LOCALAPPDATA%`, a USB stick. It is portable and
    writes nothing outside its own folder and `%LOCALAPPDATA%\YouTubeLyrics`.
 3. Double-click it, then play something. No terminal or installer is needed.
@@ -105,18 +107,27 @@ icon's right-click menu, and every setting is saved as you change it.
 
 ## Where the lyrics come from
 
-The app tries [LRCLIB][lrclib] first for a time-synced LRC sheet, then searches
-its broader query endpoint, then asks lyrics.ovh for untimed lyrics. Untimed
-results are paced across the reported song length so the display still follows
-along. Every candidate is checked against the track title, artist and duration;
-when the identity is uncertain, it shows no lyrics instead of confident-looking
-wrong ones. Results are cached on disk.
+The app tries [LRCLIB][lrclib] for an exact match, then broader and title-only
+searches; those candidate results are scored before display. It then asks
+lyrics.ovh for an untimed fallback. Standard LRC
+provides line timestamps, so its active line gets a continuous line-level wipe.
+When a source supplies Enhanced LRC inline timestamps, those genuine segment
+times drive the finer wipe. Untimed lyrics may be paced across the reported song
+length to aid navigation; the display labels that as **estimated scroll** and
+does not represent it as source synchronization.
 
-For songs neither catalogue has, add your own `.lrc` or `.txt` file under
-`%LOCALAPPDATA%\YouTubeLyrics\lyrics\` named `Artist - Title.lrc` (or `.txt`).
-A local sheet takes priority over cached and online results. No account or
-telemetry is used; only the title/artist search is sent to a lyrics provider.
-If no source has the song, the display says so, and `R` retries.
+LRCLIB search results are scored against the detected title, artist and
+available duration; weak matches are rejected. The lyrics.ovh fallback is
+queried with the detected artist/title, but its response contains no track
+identity metadata, so it cannot be independently verified and is a lower-confidence,
+untimed source. Automatic results are cached on disk. For songs neither source
+has (or when a result is wrong), add an
+`.lrc` or `.txt` file under `%LOCALAPPDATA%\YouTubeLyrics\lyrics\` named
+`Artist - Title.lrc` (or `.txt`). The tray menu can open that folder or clear the
+automatic lyrics cache; local sheets take priority and are not copied into the
+automatic cache. No account, audio capture, or telemetry is used. Lookups send
+the detected title and artist; LRCLIB's exact-match request also includes album
+and duration when Windows provides them. If no source has the song, `R` retries.
 
 <br>
 
@@ -135,6 +146,7 @@ src/win/           Win32 window, tray, GDI+ renderer, WinHTTP, media listener
 src/win/smtc.ps1   the PowerShell media-session listener (embedded in the exe)
 scripts/build.sh   cross-compiles to dist/YoutubeLyrics.exe
 docs/index.html    responsive no-terminal download page for GitHub Pages
+AUDIT.md           engineering audit, verification, release status and next steps
 docs/downloads/    direct download of the current Windows executable
 scripts/brand.py   draws the icon, banner and preview art from code
 scripts/test.sh    builds and runs the core tests under ASan/UBSan
@@ -165,11 +177,13 @@ it does on Windows. Icon and artwork generation additionally need Pillow and
 
 <br>
 
-The app reads Windows' media session and only accepts sessions Windows reports
-as playing. Paused tabs are ignored. Press `F1` in normal display mode: it shows
-the raw state the listener reported, including whether any session was found at
-all. Some players (a few portable builds, older foobar2000) never
-publish a session and cannot be supported.
+The app reads Windows' media session. Playing sessions take priority; when
+nothing is playing, the current known music session can remain visible while
+paused so lyrics do not disappear immediately. A stopped/closed session is
+ignored, and a paused non-current tab cannot mask another playing session. Press
+`F1` in normal display mode to see the raw state the listener reported. Some
+players (a few portable builds, older foobar2000) never publish a session and
+cannot be supported.
 
 </details>
 
@@ -180,9 +194,10 @@ publish a session and cannot be supported.
 
 Press `F1` in normal display mode to see the exact title and artist the app
 detected. YouTube Music sometimes reports `Artist - Topic` or a video suffix;
-the app cleans the noise, searches multiple sources, and refuses mismatched
-artists/titles rather than showing the wrong words. `R` retries. You can add a
-local `.lrc`/`.txt` override under `%LOCALAPPDATA%\YouTubeLyrics\lyrics\`.
+the app cleans the noise and scores LRCLIB results against the track metadata.
+The lyrics.ovh fallback does not return identity metadata, so it cannot be
+independently checked; if its result is wrong, add a local `.lrc`/`.txt`
+override under `%LOCALAPPDATA%\YouTubeLyrics\lyrics\`. `R` retries.
 
 </details>
 
@@ -192,10 +207,11 @@ local `.lrc`/`.txt` override under `%LOCALAPPDATA%\YouTubeLyrics\lyrics\`.
 <br>
 
 Some players report the playhead imprecisely, and some lyric files are just off
-against a particular recording. Nudge with `←` `→`; the offset is saved per app
-and can be reset from the tray menu. If a player publishes no playhead at all,
-the app runs its own clock from the moment the track started, which is usually
-within a second.
+against a particular recording. Nudge with `←` `→`; the single sync offset is
+saved globally (it is not per-app or per-track) and can be reset from the tray
+menu. If a player publishes no playhead at all, the app runs its own clock from
+the moment the track started, which is usually within a second. Untimed lyric
+scroll is separately labeled as an estimate.
 
 </details>
 
@@ -204,9 +220,10 @@ within a second.
 
 <br>
 
-Read `%LOCALAPPDATA%\YouTubeLyrics\ytlyrics.log`. Cached lyrics live beside it in
-`cache\`; local overrides go in `lyrics\`. Deleting `cache\` is always safe
-and costs you nothing but a re-download.
+Read `%LOCALAPPDATA%\YouTubeLyrics\ytlyrics.log`. Automatic cached lyrics live
+beside it in `cache\`; local overrides go in `lyrics\`. Use the tray menu to
+open the overrides folder or clear the automatic cache; deleting that cache
+costs nothing but a re-download.
 
 </details>
 

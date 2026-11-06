@@ -3,14 +3,44 @@
 
 #include <winhttp.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 
 namespace ytl {
 
 // LRCLIB asks API clients to identify themselves.
 static const wchar_t* kUserAgent =
-    L"YoutubeLyrics/1.2 (https://github.com/LIN4CRE/Youtube-Lyrics)";
+    L"YoutubeLyrics/1.3 (https://github.com/LIN4CRE/Youtube-Lyrics)";
+
+namespace {
+std::mutex g_http_handle_mu;
+HINTERNET g_active_http_request = nullptr;
+bool g_http_cancelled = false;
+
+void cancel_active_http_request() {
+  HINTERNET request = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(g_http_handle_mu);
+    g_http_cancelled = true;
+    request = g_active_http_request;
+    g_active_http_request = nullptr;
+  }
+  // Closing the active WinHTTP request cancels an in-flight synchronous call.
+  if (request) WinHttpCloseHandle(request);
+}
+
+void reset_http_cancellation() {
+  std::lock_guard<std::mutex> lock(g_http_handle_mu);
+  g_http_cancelled = false;
+}
+
+bool http_cancel_requested() {
+  std::lock_guard<std::mutex> lock(g_http_handle_mu);
+  return g_http_cancelled;
+}
+}  // namespace
 
 // ---------------------------------------------------------------------------
 // Minimal blocking HTTP GET (WinHTTP). Runs on the lyrics worker thread only.
@@ -42,6 +72,7 @@ std::string http_get(const std::wstring& url, int timeout_ms, int* status_out,
 
   // Keep lookups responsive when a provider is offline. The chain has fallbacks,
   // so one stalled host must not freeze the display for a minute.
+  timeout_ms = std::max(1000, std::min(timeout_ms, 30000));
   WinHttpSetTimeouts(session, timeout_ms, timeout_ms, timeout_ms, timeout_ms * 2);
 
   URL_COMPONENTS uc{};
@@ -50,89 +81,128 @@ std::string http_get(const std::wstring& url, int timeout_ms, int* status_out,
   uc.dwUrlPathLength = static_cast<DWORD>(-1);
   uc.dwExtraInfoLength = static_cast<DWORD>(-1);
   if (!WinHttpCrackUrl(url.c_str(), static_cast<DWORD>(url.size()), 0, &uc)) {
-    DWORD e = GetLastError();
+    const DWORD error = GetLastError();
     WinHttpCloseHandle(session);
-    return fail("WinHttpCrackUrl", e);
+    return fail("WinHttpCrackUrl", error);
   }
   std::wstring host(uc.lpszHostName, uc.dwHostNameLength);
   std::wstring path(uc.lpszUrlPath, uc.dwUrlPathLength);
-  if (uc.dwExtraInfoLength > 0) {
-    path.append(uc.lpszExtraInfo, uc.dwExtraInfoLength);
-  }
-  bool https = (uc.nScheme == INTERNET_SCHEME_HTTPS);
+  if (uc.dwExtraInfoLength > 0) path.append(uc.lpszExtraInfo, uc.dwExtraInfoLength);
+  const bool https = (uc.nScheme == INTERNET_SCHEME_HTTPS);
 
-  HINTERNET conn = WinHttpConnect(session, host.c_str(), uc.nPort, 0);
-  if (!conn) {
-    DWORD e = GetLastError();
+  HINTERNET connection = WinHttpConnect(session, host.c_str(), uc.nPort, 0);
+  if (!connection) {
+    const DWORD error = GetLastError();
     WinHttpCloseHandle(session);
-    return fail("WinHttpConnect", e);
+    return fail("WinHttpConnect", error);
   }
-  HINTERNET req = WinHttpOpenRequest(
-      conn, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER,
+  HINTERNET request = WinHttpOpenRequest(
+      connection, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER,
       WINHTTP_DEFAULT_ACCEPT_TYPES, https ? WINHTTP_FLAG_SECURE : 0);
-  if (!req) {
-    DWORD e = GetLastError();
-    WinHttpCloseHandle(conn);
+  if (!request) {
+    const DWORD error = GetLastError();
+    WinHttpCloseHandle(connection);
     WinHttpCloseHandle(session);
-    return fail("WinHttpOpenRequest", e);
+    return fail("WinHttpOpenRequest", error);
   }
+
+  {
+    std::lock_guard<std::mutex> lock(g_http_handle_mu);
+    if (g_http_cancelled) {
+      WinHttpCloseHandle(request);
+      WinHttpCloseHandle(connection);
+      WinHttpCloseHandle(session);
+      return fail("HTTP request cancelled", ERROR_OPERATION_ABORTED);
+    }
+    g_active_http_request = request;
+  }
+  auto close_request = [&]() {
+    bool should_close = false;
+    {
+      std::lock_guard<std::mutex> lock(g_http_handle_mu);
+      if (g_active_http_request == request) {
+        g_active_http_request = nullptr;
+        should_close = true;
+      }
+    }
+    // The stop path may already have closed this handle.
+    if (should_close) WinHttpCloseHandle(request);
+  };
+  auto close_handles = [&]() {
+    close_request();
+    WinHttpCloseHandle(connection);
+    WinHttpCloseHandle(session);
+  };
 
   DWORD protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
 #ifdef WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3
   protocols |= WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
 #endif
-  WinHttpSetOption(req, WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols,
+  WinHttpSetOption(request, WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols,
                    sizeof(protocols));
-  WinHttpAddRequestHeaders(req, L"Accept: application/json", static_cast<DWORD>(-1),
+  WinHttpAddRequestHeaders(request, L"Accept: application/json",
+                           static_cast<DWORD>(-1),
                            WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
 
-  if (!WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+  if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
                           WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
-    DWORD e = GetLastError();
-    WinHttpCloseHandle(req);
-    WinHttpCloseHandle(conn);
-    WinHttpCloseHandle(session);
-    return fail("WinHttpSendRequest", e);
+    const DWORD error = GetLastError();
+    close_handles();
+    return fail("WinHttpSendRequest", error);
   }
-  if (!WinHttpReceiveResponse(req, nullptr)) {
-    DWORD e = GetLastError();
-    WinHttpCloseHandle(req);
-    WinHttpCloseHandle(conn);
-    WinHttpCloseHandle(session);
-    return fail("WinHttpReceiveResponse", e);
+  if (!WinHttpReceiveResponse(request, nullptr)) {
+    const DWORD error = GetLastError();
+    close_handles();
+    return fail("WinHttpReceiveResponse", error);
   }
 
-  DWORD status = 0, len = sizeof(status);
-  WinHttpQueryHeaders(req,
-                      WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                      WINHTTP_HEADER_NAME_BY_INDEX, &status, &len,
-                      WINHTTP_NO_HEADER_INDEX);
+  DWORD status = 0;
+  DWORD length = sizeof(status);
+  if (!WinHttpQueryHeaders(request,
+                           WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                           WINHTTP_HEADER_NAME_BY_INDEX, &status, &length,
+                           WINHTTP_NO_HEADER_INDEX)) {
+    const DWORD error = GetLastError();
+    close_handles();
+    return fail("WinHttpQueryHeaders", error);
+  }
   if (status_out) *status_out = static_cast<int>(status);
 
+  constexpr size_t kMaxResponseBytes = 8u << 20;
+  DWORD read_error = ERROR_SUCCESS;
   for (;;) {
-    DWORD avail = 0;
-    if (!WinHttpQueryDataAvailable(req, &avail)) break;
-    if (avail == 0) break;
-    if (body.size() > (8u << 20)) break;  // sanity cap
-    char buf[8192];
-    DWORD want = avail < sizeof(buf) ? avail : sizeof(buf);
-    DWORD got = 0;
-    if (!WinHttpReadData(req, buf, want, &got) || got == 0) break;
-    body.append(buf, got);
+    DWORD available = 0;
+    if (!WinHttpQueryDataAvailable(request, &available)) {
+      read_error = GetLastError();
+      break;
+    }
+    if (available == 0) break;
+    if (body.size() >= kMaxResponseBytes) {
+      read_error = ERROR_FILE_TOO_LARGE;
+      break;
+    }
+    char buffer[8192];
+    const size_t remaining = kMaxResponseBytes - body.size();
+    const DWORD wanted = static_cast<DWORD>(std::min<size_t>(
+        std::min<size_t>(available, sizeof(buffer)), remaining));
+    DWORD received = 0;
+    if (!WinHttpReadData(request, buffer, wanted, &received) || received == 0) {
+      read_error = GetLastError();
+      if (read_error == ERROR_SUCCESS) read_error = ERROR_INVALID_DATA;
+      break;
+    }
+    body.append(buffer, received);
   }
 
-  WinHttpCloseHandle(req);
-  WinHttpCloseHandle(conn);
-  WinHttpCloseHandle(session);
+  close_handles();
+  if (read_error != ERROR_SUCCESS) return fail("WinHTTP response read", read_error);
   return body;
 }
 
-
 namespace {
 
-
-
 App* g_app_for_lyrics = nullptr;
+std::mutex g_lyrics_app_mu;
 
 HANDLE g_thread = nullptr;
 HANDLE g_stop = nullptr;
@@ -151,6 +221,7 @@ TrackInfo g_job_track;
 bool g_job_force = false;
 
 std::mutex g_result_mu;
+std::mutex g_cache_mu;
 struct Result {
   int id = 0;
   LyricsState state = LyricsState::Idle;
@@ -160,16 +231,19 @@ struct Result {
 Result g_result;
 
 bool ensure_cache_dir() {
-  static int state = 0;  // 0 unknown, 1 ok, -1 failed
-  if (state != 0) return state == 1;
-  std::string dir = appdata_dir();
-  if (dir.empty()) return !(state = -1);
-  std::string cache = dir + "\\cache";
-  CreateDirectoryW(utf8_to_wide(cache).c_str(), nullptr);
-  state = 1;
-  return true;
+  static std::once_flag once;
+  static bool ok = false;
+  std::call_once(once, []() {
+    const std::string dir = appdata_dir();
+    if (dir.empty()) return;
+    const std::string cache = dir + "\\cache";
+    if (CreateDirectoryW(utf8_to_wide(cache).c_str(), nullptr) ||
+        GetLastError() == ERROR_ALREADY_EXISTS) {
+      ok = true;
+    }
+  });
+  return ok;
 }
-
 std::string cache_path(const TrackInfo& t) {
   return appdata_dir() + "\\cache\\" + fnv_hex(track_key(t)) + ".txt";
 }
@@ -182,15 +256,7 @@ std::string serialize_lyrics(const Lyrics& l) {
   s += "source=" + l.source + "\n";
   s += std::string("synced=") + (l.synced ? "1" : "0") + "\n";
   s += "--lrc--\n";
-  for (const auto& line : l.lines) {
-    char stamp[32];
-    long long ms = static_cast<long long>(line.t_ms);
-    std::snprintf(stamp, sizeof(stamp), "[%02lld:%02lld.%02lld]",
-                  ms / 60000, (ms / 1000) % 60, (ms % 1000) / 10);
-    s += stamp;
-    s += line.text;
-    s += "\n";
-  }
+  s += lyrics_to_lrc(l.lines);
   s += "--plain--\n";
   s += l.plain;
   s += "\n";
@@ -205,7 +271,8 @@ bool parse_cache(const std::string& data, Lyrics& out) {
   std::string lrc_section, plain_section;
   size_t lrc_at = data.find("--lrc--\n");
   size_t plain_at = data.find("--plain--\n");
-  if (lrc_at == std::string::npos || plain_at == std::string::npos) return false;
+  if (lrc_at == std::string::npos || plain_at == std::string::npos ||
+      plain_at < lrc_at + 8) return false;
 
   // header key=value block
   size_t line_end = lrc_at;
@@ -297,14 +364,19 @@ bool try_fetch(const TrackInfo& track, const std::string& url, Lyrics& out,
   std::string err;
   std::string body = http_get(utf8_to_wide(url), 12000, &status, &err);
   if (!err.empty()) {
-    why = err;
+    why = "Lyrics provider transport error: " + err;
     logf("lyrics: %s -> transport error: %s", url.c_str(), err.c_str());
     return false;
   }
   logf("lyrics: %s -> HTTP %d (%zu bytes)", url.c_str(), status, body.size());
   if (status != 200) {
-    why = (status == 404) ? "No lyrics in the database for this track."
-                          : ("Lookup failed (HTTP " + std::to_string(status) + ").");
+    if (status == 404) {
+      why = "No lyrics in the database for this track.";
+    } else if (status == 429 || (status >= 500 && status <= 599)) {
+      why = "Provider is temporarily rate-limited or unavailable; try again later.";
+    } else {
+      why = "Lookup failed (HTTP " + std::to_string(status) + ").";
+    }
     return false;
   }
   Lyrics parsed;
@@ -342,7 +414,11 @@ LyricsState do_lookup(const TrackInfo& track, bool force, Lyrics& out,
   }
 
   if (!force && ensure_cache_dir()) {
-    std::string cached = read_file(cache_path(track));
+    std::string cached;
+    {
+      std::lock_guard<std::mutex> lock(g_cache_mu);
+      cached = read_file(cache_path(track));
+    }
     Lyrics l;
     if (!cached.empty() && parse_cache(cached, l)) {
       logf("lyrics: cache hit for %s", track_key(track).c_str());
@@ -355,18 +431,21 @@ LyricsState do_lookup(const TrackInfo& track, bool force, Lyrics& out,
   std::string plain_fallback;   // kept in case nothing timed turns up
   Lyrics plain_lyrics;
   int tried = 0;
-  bool lrclib_unreachable = false;
+  bool lrclib_blocked = false;
 
   auto attempt = [&](const std::string& url, const char* name) {
+    if (http_cancel_requested()) return false;
     const bool lrclib = url.find("lrclib.net") != std::string::npos;
-    if (lrclib && lrclib_unreachable) return false;
+    if (lrclib && lrclib_blocked) return false;
     ++tried;
     Lyrics l;
     std::string detail;
     if (!try_fetch(track, url, l, detail)) {
       if (!detail.empty()) why = detail;
-      if (lrclib && detail.find("transport error") != std::string::npos)
-        lrclib_unreachable = true;
+      if (lrclib &&
+          (detail.find("transport error") != std::string::npos ||
+           detail.find("rate-limited or unavailable") != std::string::npos))
+        lrclib_blocked = true;
       return false;
     }
     if (l.synced && !l.empty()) {
@@ -390,13 +469,14 @@ LyricsState do_lookup(const TrackInfo& track, bool force, Lyrics& out,
   if (!track.artist.empty() && attempt(build_query_url(track), "LRCLIB")) {
     return LyricsState::Ready;
   }
-  // 3. A second catalogue. lyrics.ovh is keyless and answers very fast, and it
-  //    covers a lot of tracks LRCLIB has not been given yet.
+  // 3. Title-only LRCLIB search; candidates still pass best_candidate()'s
+  //    title/artist/duration checks before any lyrics are shown.
+  if (attempt(build_title_only_url(track), "LRCLIB")) return LyricsState::Ready;
+  // 4. Final, lower-confidence fallback: lyrics.ovh is queried by exact
+  //    artist/title but does not return identity metadata for independent checks.
   if (!track.artist.empty() && attempt(build_ovh_url(track), "lyrics.ovh")) {
     return LyricsState::Ready;
   }
-  // 4. Title-only last resort, heavily filtered by best_candidate().
-  if (attempt(build_title_only_url(track), "LRCLIB")) return LyricsState::Ready;
 
   if (!plain_fallback.empty()) {
     plain_lyrics.providers_tried = tried;
@@ -430,8 +510,12 @@ DWORD WINAPI thread_main(LPVOID) {
     Lyrics lyr;
     std::string msg;
     LyricsState state = do_lookup(job.track, job.force, lyr, msg);
-    if (state == LyricsState::Ready && ensure_cache_dir()) {
-      write_file_atomic(cache_path(job.track), serialize_lyrics(lyr));
+    // Manual overrides are re-read on every lookup; never leave a stale copy
+    // in the automatic cache if the user later removes that local file.
+    if (state == LyricsState::Ready && lyr.source != "local file") {
+      std::lock_guard<std::mutex> lock(g_cache_mu);
+      if (ensure_cache_dir())
+        write_file_atomic(cache_path(job.track), serialize_lyrics(lyr));
     }
 
     {
@@ -441,7 +525,11 @@ DWORD WINAPI thread_main(LPVOID) {
       g_result.lyrics = lyr;
       g_result.msg = msg;
     }
-    if (g_app_for_lyrics) PostMessageW(g_app_for_lyrics->hwnd, WM_APP_LYRICS, 0, 0);
+    {
+      std::lock_guard<std::mutex> lock(g_lyrics_app_mu);
+      if (g_app_for_lyrics)
+        PostMessageW(g_app_for_lyrics->hwnd, WM_APP_LYRICS, 0, 0);
+    }
   }
   return 0;
 }
@@ -460,22 +548,91 @@ void lyrics_enqueue(const TrackInfo& track, int req_id, bool force) {
 }
 
 void lyrics_start(App& app) {
-  g_app_for_lyrics = &app;
+  reset_http_cancellation();
+  {
+    std::lock_guard<std::mutex> lock(g_lyrics_app_mu);
+    g_app_for_lyrics = &app;
+  }
   g_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   g_wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+  if (!g_stop || !g_wake) {
+    logf("lyrics: unable to create worker events");
+    if (g_stop) CloseHandle(g_stop);
+    if (g_wake) CloseHandle(g_wake);
+    g_stop = g_wake = nullptr;
+    std::lock_guard<std::mutex> lock(g_lyrics_app_mu);
+    g_app_for_lyrics = nullptr;
+    return;
+  }
   g_thread = CreateThread(nullptr, 0, thread_main, nullptr, 0, nullptr);
+  if (!g_thread) {
+    logf("lyrics: unable to start worker thread");
+    CloseHandle(g_stop);
+    CloseHandle(g_wake);
+    g_stop = g_wake = nullptr;
+    std::lock_guard<std::mutex> lock(g_lyrics_app_mu);
+    g_app_for_lyrics = nullptr;
+  }
 }
 
 void lyrics_stop() {
+  {
+    std::lock_guard<std::mutex> lock(g_lyrics_app_mu);
+    g_app_for_lyrics = nullptr;
+  }
+  cancel_active_http_request();
   if (g_stop) SetEvent(g_stop);
   if (g_thread) {
-    WaitForSingleObject(g_thread, 3000);
+    // The active WinHTTP request is cancelled above; wait for worker cleanup
+    // before closing its event handles or allowing App storage to disappear.
+    const DWORD wait = WaitForSingleObject(g_thread, 5000);
+    if (wait != WAIT_OBJECT_0) {
+      // Keep the stop/wake handles alive for the worker. The App pointer is
+      // already detached, and process teardown will reclaim these handles.
+      logf("lyrics: worker did not stop within five seconds (wait=%lu)",
+           static_cast<unsigned long>(wait));
+      return;
+    }
     CloseHandle(g_thread);
     g_thread = nullptr;
   }
   if (g_stop) CloseHandle(g_stop);
   if (g_wake) CloseHandle(g_wake);
-  g_stop = g_thread = g_wake = nullptr;
+  g_stop = g_wake = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(g_job_mu);
+    g_has_job = false;
+  }
+}
+int lyrics_clear_cache() {
+  if (!ensure_cache_dir()) return -1;
+  std::lock_guard<std::mutex> lock(g_cache_mu);
+  const std::string directory = appdata_dir() + "\\cache";
+  WIN32_FIND_DATAW entry{};
+  const std::wstring pattern = utf8_to_wide(directory + "\\*");
+  HANDLE search = FindFirstFileW(pattern.c_str(), &entry);
+  if (search == INVALID_HANDLE_VALUE) {
+    const DWORD error = GetLastError();
+    return (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) ? 0 : -1;
+  }
+
+  int removed = 0;
+  bool failed = false;
+  do {
+    if (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+    const std::wstring path = utf8_to_wide(directory + "\\") + entry.cFileName;
+    if (DeleteFileW(path.c_str())) {
+      ++removed;
+    } else {
+      failed = true;
+      logf("lyrics: unable to clear cache file (error %lu)",
+           static_cast<unsigned long>(GetLastError()));
+    }
+  } while (FindNextFileW(search, &entry));
+  const DWORD error = GetLastError();
+  FindClose(search);
+  if (error != ERROR_NO_MORE_FILES) failed = true;
+  return failed ? -1 : removed;
 }
 
 // Reads a finished lookup. Returns false when there is nothing new for `req_id`.
