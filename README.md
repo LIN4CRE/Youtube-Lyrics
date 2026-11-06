@@ -12,11 +12,11 @@ track actually playing in the background, and brings up its lyrics when it finds
 a confident match. It never takes focus or catches clicks; the desktop stays
 usable while the words sit quietly in the background.
 
-[![Download](docs/brand/badge-download.png)][download-page]
+[![Download](docs/brand/badge-download.png)][download]
 [![Windows 10 / 11](docs/brand/badge-platform.png)](#requirements)
 [![MIT](docs/brand/badge-licence.png)](LICENSE)
 
-[**Download YoutubeLyrics.exe**][download] · [Download page][download-page] · [See it running](docs/preview.html) · [Shortcuts](#keyboard) · [Troubleshooting](#if-something-is-off)
+[**Download YoutubeLyrics.exe**][download] · [See it running](docs/preview.html) · [Shortcuts](#keyboard) · [Troubleshooting](#if-something-is-off)
 
 </div>
 
@@ -60,7 +60,6 @@ never touches the browser.
 ## Install
 
 1. **[Download `YoutubeLyrics.exe`][download]** — one file, about 527 KiB.
-   Prefer to read first? Visit the [public download page][download-page].
 2. Put it anywhere: Desktop, `%LOCALAPPDATA%`, a USB stick. It is portable and
    writes nothing outside its own folder and `%LOCALAPPDATA%\YouTubeLyrics`.
 3. Double-click it, then play something. No terminal or installer is needed.
@@ -135,7 +134,7 @@ src/core/          portable logic: LRC parsing, JSON, track-name cleaning,
 src/win/           Win32 window, tray, GDI+ renderer, WinHTTP, media listener
 src/win/smtc.ps1   the PowerShell media-session listener (embedded in the exe)
 scripts/build.sh   cross-compiles to dist/YoutubeLyrics.exe
-docs/index.html    no-terminal download page, published with GitHub Pages
+docs/index.html    responsive no-terminal download page for GitHub Pages
 docs/downloads/    direct download of the current Windows executable
 scripts/brand.py   draws the icon, banner and preview art from code
 scripts/test.sh    builds and runs the core tests under ASan/UBSan
@@ -255,7 +254,6 @@ Space Grotesk, JetBrains Mono, Inter).
 <sub>Built for people who would rather look at the song than at a column.</sub>
 </div>
 
-[download]: https://lin4cre.github.io/Youtube-Lyrics/downloads/YoutubeLyrics.exe
-[download-page]: https://lin4cre.github.io/Youtube-Lyrics/
+[download]: https://raw.githubusercontent.com/LIN4CRE/Youtube-Lyrics/refs/heads/main/docs/downloads/YoutubeLyrics.exe
 [lrclib]: https://lrclib.net
 [zig]: https://ziglang.org
