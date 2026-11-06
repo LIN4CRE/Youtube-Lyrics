@@ -1,0 +1,9 @@
+node_modules/
+.build/
+*.log
+*.pdb
+*.obj
+*.o
+.DS_Store
+__pycache__/
+*.pyc
