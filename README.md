@@ -136,6 +136,7 @@ src/win/           Win32 window, tray, GDI+ renderer, WinHTTP, media listener
 src/win/smtc.ps1   the PowerShell media-session listener (embedded in the exe)
 scripts/build.sh   cross-compiles to dist/YoutubeLyrics.exe
 docs/index.html    no-terminal download page, published with GitHub Pages
+docs/downloads/    direct download of the current Windows executable
 scripts/brand.py   draws the icon, banner and preview art from code
 scripts/test.sh    builds and runs the core tests under ASan/UBSan
 docs/preview.html  an interactive browser mock of the display
@@ -254,8 +255,7 @@ Space Grotesk, JetBrains Mono, Inter).
 <sub>Built for people who would rather look at the song than at a column.</sub>
 </div>
 
-[download]: https://github.com/LIN4CRE/Youtube-Lyrics/releases/latest/download/YoutubeLyrics.exe
+[download]: https://lin4cre.github.io/Youtube-Lyrics/downloads/YoutubeLyrics.exe
 [download-page]: https://lin4cre.github.io/Youtube-Lyrics/
-[releases]: https://github.com/LIN4CRE/Youtube-Lyrics/releases
 [lrclib]: https://lrclib.net
 [zig]: https://ziglang.org
