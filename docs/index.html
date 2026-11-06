@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#0b0c10" />
     <meta
       name="description"
-      content="Download Youtube-Lyrics for Windows: a portable desktop lyrics display with one bright, time-synced line at a time."
+      content="Download Youtube-Lyrics for Windows: a portable desktop lyrics display with one bright line at a time and honest timing cues."
     />
     <title>Youtube-Lyrics — lyrics for the whole room</title>
     <style>
@@ -226,7 +226,7 @@
       <nav aria-label="Main navigation">
         <a href="#features">Features</a>
         <a href="#install">How to install</a>
-        <a href="preview.html">Preview</a>
+        <a href="preview.html">Simulated preview</a>
         <a href="https://github.com/LIN4CRE/Youtube-Lyrics">Source code</a>
       </nav>
     </header>
@@ -234,12 +234,12 @@
     <main id="main" class="shell">
       <section class="hero" aria-labelledby="hero-title">
         <div class="hero-copy">
-          <p class="eyebrow">For Windows 10 and 11 · Version 1.2.0</p>
+          <p class="eyebrow">For Windows 10 and 11 · Version 1.3.0</p>
           <h1 id="hero-title">Lyrics for the whole room.</h1>
           <p class="lead">
-            A quiet desktop layer that follows the music and brings one large,
-            time-synced line into focus. No browser tab, second screen, or
-            command line needed.
+            A quiet desktop layer that follows the music and brings one large line
+            into focus. Genuine timing is shown when available; untimed lyrics
+            are clearly marked as estimated. No browser tab or command line needed.
           </p>
           <div class="actions">
             <a
@@ -252,20 +252,20 @@
               </svg>
               Download for Windows
             </a>
-            <a class="button secondary" href="preview.html">See the preview</a>
+            <a class="button secondary" href="preview.html">Explore simulated preview</a>
           </div>
-          <p class="file-note"><strong>YoutubeLyrics.exe</strong> · 64-bit · about 527 KiB · portable</p>
+          <p class="file-note"><strong>YoutubeLyrics.exe</strong> · 64-bit · about 555 KiB · portable Windows x64 build</p>
           <p class="file-note">No installer, account, or administrator rights required. Public download hosted by GitHub.</p>
         </div>
 
         <figure class="preview">
           <img
             src="img/display.png"
-            alt="Youtube-Lyrics displayed across a desktop: one line of lyrics is brightly highlighted, with surrounding lines fading into the background."
+            alt="Illustrative render of the lyrics layout: one line is brightly highlighted, with surrounding lines fading into the background."
             width="2560"
             height="1440"
           />
-          <figcaption>The real display: the active lyric line stays clear and readable from across the room.</figcaption>
+          <figcaption>Illustrative design render generated from project artwork — not a screenshot from the running Windows application.</figcaption>
         </figure>
       </section>
 
@@ -283,7 +283,7 @@
           <article class="feature">
             <span class="feature-mark">02 · Timing</span>
             <h3>Karaoke-style progress</h3>
-            <p>For synced lyrics, the words fill in as the track plays. Adjust timing with the arrow keys.</p>
+            <p>Enhanced LRC segments use genuine inline timestamps; ordinary LRC uses a line-level wipe. Untimed lyrics are explicitly labeled as estimated scroll.</p>
           </article>
           <article class="feature">
             <span class="feature-mark">03 · Desktop</span>
@@ -310,7 +310,7 @@
               <li><strong>Open the file</strong> from your Downloads folder. Move it elsewhere first if you prefer.</li>
               <li><strong>Play a song</strong> in a player that reports its media session to Windows.</li>
             </ol>
-            <p class="privacy">The app does not record audio or send telemetry. It sends the detected track title and artist to lyric providers when looking up lyrics; results are cached locally.</p>
+            <p class="privacy">The app does not record audio or send telemetry. Lookups send the detected title and artist; LRCLIB's exact-match request also includes album and duration when Windows provides them. Results are cached locally.</p>
           </div>
           <aside class="warning" aria-labelledby="warning-title">
             <h3 id="warning-title">A note about Windows SmartScreen</h3>
@@ -326,7 +326,7 @@
         <span>Free and open source under the MIT licence.</span>
         <div class="footer-links">
           <a href="https://github.com/LIN4CRE/Youtube-Lyrics">GitHub source</a>
-          <a href="preview.html">Interactive preview</a>
+          <a href="preview.html">Simulated interactive preview</a>
         </div>
       </div>
     </footer>

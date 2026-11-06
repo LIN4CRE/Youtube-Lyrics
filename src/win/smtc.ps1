@@ -76,12 +76,18 @@ try {
 } catch { }
 
 function Get-ArtPath($props, [string]$key) {
+    $stream = $null
+    $reader = $null
+    $tmp = $null
     try {
         if ($null -eq $props -or $null -eq $props.Thumbnail) { return '' }
         $md5 = [System.Security.Cryptography.MD5]::Create()
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes($key)
-        $hash = [System.BitConverter]::ToString($md5.ComputeHash($bytes)).Replace('-', '').ToLower()
-        $md5.Dispose()
+        try {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($key)
+            $hash = [System.BitConverter]::ToString($md5.ComputeHash($bytes)).Replace('-', '').ToLower()
+        } finally {
+            $md5.Dispose()
+        }
         $file = Join-Path $artDir ($hash.Substring(0, 20) + '.jpg')
         if (Test-Path -LiteralPath $file) { return $file }
 
@@ -94,15 +100,21 @@ function Get-ArtPath($props, [string]$key) {
         Await ($reader.LoadAsync($size)) ([uint32]) | Out-Null
         $buffer = New-Object byte[] $size
         $reader.ReadBytes($buffer)
-        try { $reader.Dispose() } catch { }
 
         $tmp = $file + '.tmp'
         [System.IO.File]::WriteAllBytes($tmp, $buffer)
         if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue }
         Move-Item -LiteralPath $tmp -Destination $file -Force
+        $tmp = $null
         return $file
     } catch {
         return ''
+    } finally {
+        if ($reader) { try { $reader.Dispose() } catch { } }
+        if ($stream) { try { $stream.Dispose() } catch { } }
+        if ($tmp -and (Test-Path -LiteralPath $tmp)) {
+            Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -123,9 +135,8 @@ while ($true) {
 
         $sessions = $manager.GetSessions()
 
-        # Choose only an actually playing session. A paused YouTube tab may
-        # retain the previous song indefinitely; treating it as the current
-        # session is how a stale "In the End" track could replace live audio.
+        # Rank actively playing sessions first; paused sessions are considered
+        # only if Windows identifies one as its current music session below.
         $chosen = $null
         $firstPlaying = $null
 
@@ -151,23 +162,29 @@ while ($true) {
             }
         }
 
-        # Windows exposes the session it considers current. Prefer it only when
-        # it is itself playing; otherwise use a ranked playing session from the
-        # list. This avoids a paused current session masking another live player.
+        # Prefer Windows' current playing session, then another ranked playing
+        # session. If nothing is playing, retain only the current known music
+        # session while it is explicitly Paused: its position stays frozen so
+        # the user can resume without losing the lyric sheet. Stopped/closed
+        # sessions are still ignored, and a new playing session always wins.
+        $pausedCurrent = $null
         try {
             $current = $manager.GetCurrentSession()
             if ($null -ne $current) {
                 $currentInfo = $current.GetPlaybackInfo()
                 $currentRank = & $musicRank $current.SourceAppUserModelId
-                if ($null -ne $currentInfo -and
-                    [string]$currentInfo.PlaybackStatus -eq 'Playing' -and
-                    $currentRank -gt 0) {
-                    $chosen = $current
+                if ($null -ne $currentInfo -and $currentRank -gt 0) {
+                    $currentState = [string]$currentInfo.PlaybackStatus
+                    if ($currentState -eq 'Playing') { $chosen = $current }
+                    elseif ($currentState -eq 'Paused') { $pausedCurrent = $current }
                 }
             }
         } catch { }
         if ($null -eq $chosen -and $null -ne $firstPlaying) {
             $chosen = $firstPlaying
+        }
+        if ($null -eq $chosen -and $null -ne $pausedCurrent) {
+            $chosen = $pausedCurrent
         }
 
         if ($null -eq $chosen) {

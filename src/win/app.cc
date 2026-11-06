@@ -8,10 +8,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cerrno>
 #include <cstdarg>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <string>
 
 namespace ytl {
@@ -186,27 +188,11 @@ void invalidate_window(App& app) {
   if (app.hwnd) InvalidateRect(app.hwnd, nullptr, FALSE);
 }
 
-std::vector<LyricLine> synthesise_plain_lines(const std::string& plain) {
-  std::vector<LyricLine> out;
-  int64_t t = 0;
-  size_t pos = 0;
-  while (pos <= plain.size()) {
-    size_t nl = plain.find('\n', pos);
-    if (nl == std::string::npos) nl = plain.size();
-    std::string line = plain.substr(pos, nl - pos);
-    if (!line.empty() && line.back() == '\r') line.pop_back();
-    out.push_back({t, trim(line)});
-    t += 3000;
-    if (nl >= plain.size()) break;
-    pos = nl + 1;
-  }
-  return out;
-}
-
 void reset_document(App& app) {
   app.lyrics = Lyrics();
   app.disp.clear();
   app.pending_plain_lines.clear();
+  app.timing_estimated = false;
   app.view.line_top.clear();
   app.view.line_h.clear();
   app.view.total_h = 0;
@@ -281,6 +267,7 @@ void on_media(App& app) {
       if (refined.artist.empty()) refined.artist = app.active_track.artist;
       if (refined.album.empty()) refined.album = app.active_track.album;
       if (refined.duration_s <= 0) refined.duration_s = app.active_track.duration_s;
+      m.duration_s = refined.duration_s;
       app.active_track = clean_track(refined, false);
       app.current_key = track_key(app.active_track);
       app.pending_key.clear();
@@ -605,8 +592,11 @@ void show_tray_menu(App& app) {
               L"Always on top\tA");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, 4, L"Reload lyrics\tR");
+  AppendMenuW(menu, MF_STRING, 10, L"Reset sync offset");
   AppendMenuW(menu, MF_STRING | (app.view.help ? MF_CHECKED : 0), 5,
               L"Keyboard shortcuts\tF1");
+  AppendMenuW(menu, MF_STRING, 8, L"Open local lyrics folder");
+  AppendMenuW(menu, MF_STRING, 9, L"Clear automatic lyrics cache");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, 6, L"Quit");
   SetMenuDefaultItem(menu, 1, FALSE);
@@ -638,6 +628,37 @@ void show_tray_menu(App& app) {
     case 5:
       app.toggle_help();
       break;
+    case 8: {
+      const std::wstring folder = widen(appdata_dir() + "\\lyrics");
+      if (!CreateDirectoryW(folder.c_str(), nullptr) &&
+          GetLastError() != ERROR_ALREADY_EXISTS) {
+        app.show_toast("Could not create the local lyrics folder.");
+      } else {
+        const HINSTANCE result = ShellExecuteW(app.hwnd, L"open", folder.c_str(),
+                                               nullptr, nullptr, SW_SHOWNORMAL);
+        if (reinterpret_cast<INT_PTR>(result) <= 32)
+          app.show_toast("Could not open the local lyrics folder.");
+      }
+      break;
+    }
+    case 10:
+      app.cfg.offset_ms = 0;
+      app.cfg.save();
+      app.show_toast("Sync offset reset");
+      invalidate_window(app);
+      break;
+    case 9: {
+      const int removed = lyrics_clear_cache();
+      if (removed < 0) {
+        app.show_toast("Could not clear the automatic lyrics cache.");
+      } else if (removed == 0) {
+        app.show_toast("Automatic lyrics cache is already empty.");
+      } else {
+        app.show_toast("Cleared " + std::to_string(removed) +
+                       " cached sheets; press R to reload.");
+      }
+      break;
+    }
     case 6:
       app.quitting = true;
       PostMessageW(app.hwnd, WM_CLOSE, 0, 0);
@@ -651,6 +672,11 @@ void show_tray_menu(App& app) {
 
 void on_timer(App& app) {
   int64_t now = app.now_ms();
+  if (app.hidden_to_tray) {
+    app.view.last_frame = now;
+    SetTimer(app.hwnd, kFrameTimer, 1000, nullptr);
+    return;
+  }
   double dt = app.view.last_frame ? (now - app.view.last_frame) / 1000.0 : 0.016;
   app.view.last_frame = now;
   if (dt > 0.25) dt = 0.25;
@@ -660,7 +686,9 @@ void on_timer(App& app) {
   int h = rc.bottom - rc.top;
 
   int64_t pos = app.current_pos_ms();
-  int new_active = app.lyrics.synced ? active_index(app.disp, pos) : -1;
+  int new_active = (app.lyrics.synced || app.timing_estimated)
+                       ? active_index(app.disp, pos)
+                       : -1;
   if (new_active != app.active) {
     app.active = new_active;
   }
@@ -670,30 +698,19 @@ void on_timer(App& app) {
   if (std::fabs(target - app.view.scroll) < 0.4) app.view.scroll = target;
   bool animating = std::fabs(target - app.view.scroll) > 0.4;
 
-  // Repaint while playing (smooth karaoke), while animating, and occasionally
-  // when idle so the clock stays honest.
-  static int idle_ticks = 0;
-  // The resting wallpaper has a listening pulse, so idle is not static: repaint
-  // at a low rate while nothing is playing instead of going completely still.
-  bool repaint = animating || app.view.toast_until > now || app.active_media.playing;
-  // Idle wallpaper: repaint about six times a second - enough for the listening
-  // pulse to breathe, cheap enough to leave on a desktop all day.
-  if (!repaint && app.lstate == LyricsState::Idle) {
-    if (now - app.view.last_pulse_paint >= 160) {
-      app.view.last_pulse_paint = now;
-      repaint = true;
-    }
-  }
-  if (!repaint) {
-    if (++idle_ticks >= 12) {
-      idle_ticks = 0;
-      repaint = true;
-    }
-  } else {
-    idle_ticks = 0;
+  const bool rapid_frame = animating || app.view.toast_until > now ||
+                           app.active_media.playing;
+  SetTimer(app.hwnd, kFrameTimer, rapid_frame ? 16u : 200u, nullptr);
+
+  // Idle wallpaper uses a low-rate pulse; static or paused views need no
+  // periodic repaint. The timer itself slows from ~60 Hz to 5 Hz when idle.
+  bool repaint = rapid_frame;
+  if (!rapid_frame && app.lstate == LyricsState::Idle &&
+      now - app.view.last_pulse_paint >= 180) {
+    app.view.last_pulse_paint = now;
+    repaint = true;
   }
   if (repaint) invalidate_window(app);
-
   // Hide the mouse pointer when the display is left alone in full screen.
   if (!app.view.cursor_hidden && !app.windowed && !app.view.help &&
       now - app.view.last_mouse > 2500 && app.view.last_mouse > 0) {
@@ -749,32 +766,63 @@ std::string appdata_dir() {
 }
 
 std::string read_file(const std::string& path) {
+  constexpr uint64_t kMaxFileBytes = 16u << 20;
   std::string out;
   HANDLE h = CreateFileW(widen(path).c_str(), GENERIC_READ, FILE_SHARE_READ |
                                                           FILE_SHARE_WRITE,
                          nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (h == INVALID_HANDLE_VALUE) return out;
+  LARGE_INTEGER size{};
+  if (!GetFileSizeEx(h, &size) || size.QuadPart < 0 ||
+      static_cast<uint64_t>(size.QuadPart) > kMaxFileBytes) {
+    CloseHandle(h);
+    return out;
+  }
+  out.reserve(static_cast<size_t>(size.QuadPart));
   char buf[8192];
   DWORD got = 0;
-  while (ReadFile(h, buf, sizeof(buf), &got, nullptr) && got > 0) {
+  bool ok = true;
+  for (;;) {
+    got = 0;
+    if (!ReadFile(h, buf, sizeof(buf), &got, nullptr)) {
+      ok = false;
+      break;
+    }
+    if (got == 0) break;
     out.append(buf, got);
+    if (out.size() > kMaxFileBytes) {
+      ok = false;
+      break;
+    }
   }
   CloseHandle(h);
+  if (!ok) out.clear();
   return out;
 }
 
 bool write_file_atomic(const std::string& path, const std::string& data) {
-  std::string tmp = path + ".tmp";
-  HANDLE h = CreateFileW(widen(tmp).c_str(), GENERIC_WRITE, 0, nullptr,
+  if (data.size() > MAXDWORD) return false;
+  const std::string tmp = path + ".tmp";
+  const std::wstring tmp_wide = widen(tmp);
+  const std::wstring path_wide = widen(path);
+  HANDLE h = CreateFileW(tmp_wide.c_str(), GENERIC_WRITE, 0, nullptr,
                          CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (h == INVALID_HANDLE_VALUE) return false;
   DWORD written = 0;
   bool ok = WriteFile(h, data.data(), static_cast<DWORD>(data.size()), &written,
-                      nullptr) != 0;
+                      nullptr) != 0 && written == data.size();
+  if (ok) ok = FlushFileBuffers(h) != 0;
   CloseHandle(h);
-  if (!ok) return false;
-  return MoveFileExW(widen(tmp).c_str(), widen(path).c_str(),
-                     MOVEFILE_REPLACE_EXISTING) != 0;
+  if (!ok) {
+    DeleteFileW(tmp_wide.c_str());
+    return false;
+  }
+  if (!MoveFileExW(tmp_wide.c_str(), path_wide.c_str(),
+                   MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+    DeleteFileW(tmp_wide.c_str());
+    return false;
+  }
+  return true;
 }
 
 std::string fnv_hex(const std::string& s) {
@@ -790,6 +838,31 @@ std::string fnv_hex(const std::string& s) {
 
 // ------------------------------------------------------------------- config
 
+namespace {
+
+bool parse_config_integer(const std::string& value, int64_t* result) {
+  if (value.empty()) return false;
+  errno = 0;
+  char* end = nullptr;
+  const long long parsed = std::strtoll(value.c_str(), &end, 10);
+  if (errno == ERANGE || end == value.c_str() || !end || *end != '\0') return false;
+  *result = static_cast<int64_t>(parsed);
+  return true;
+}
+
+bool parse_config_real(const std::string& value, double* result) {
+  if (value.empty()) return false;
+  errno = 0;
+  char* end = nullptr;
+  const double parsed = std::strtod(value.c_str(), &end);
+  if (errno == ERANGE || end == value.c_str() || !end || *end != '\0' ||
+      !std::isfinite(parsed)) return false;
+  *result = parsed;
+  return true;
+}
+
+}  // namespace
+
 void Config::load() {
   std::string data = read_file(appdata_dir() + "\\config.ini");
   size_t pos = 0;
@@ -802,20 +875,26 @@ void Config::load() {
     if (eq == std::string::npos) continue;
     std::string k = trim(line.substr(0, eq));
     std::string v = trim(line.substr(eq + 1));
-    if (k == "offset_ms") offset_ms = atoi(v.c_str());
-    else if (k == "font_scale") font_scale = atof(v.c_str());
-    else if (k == "topmost") topmost = (v == "1");
+    int64_t integer = 0;
+    if (k == "offset_ms" && parse_config_integer(v, &integer)) {
+      offset_ms = static_cast<int>(std::max<int64_t>(-60000,
+                                                     std::min<int64_t>(60000, integer)));
+    } else if (k == "font_scale") {
+      double real = 0.0;
+      if (parse_config_real(v, &real)) font_scale = real;
+    } else if (k == "topmost") topmost = (v == "1");
     else if (k == "cover") cover = (v == "1");
     else if (k == "wipe") wipe = (v == "1");
-    else if (k == "theme") theme = atoi(v.c_str());
-    else if (k == "fullscreen") fullscreen = (v == "1");
+    else if (k == "theme" && parse_config_integer(v, &integer)) {
+      theme = (integer >= 0 && integer < 4) ? static_cast<int>(integer) : 0;
+    } else if (k == "fullscreen") fullscreen = (v == "1");
     else if (k == "wallpaper") wallpaper = (v == "1");
   }
-  if (font_scale < 0.55 || font_scale > 2.2) font_scale = 1.0;
+  if (!std::isfinite(font_scale) || font_scale < 0.55 || font_scale > 2.2)
+    font_scale = 1.0;
   if (theme < 0 || theme >= 4) theme = 0;
   if (wallpaper) fullscreen = true;
 }
-
 void Config::save() const {
   char buf[512];
   std::string data = "offset_ms=" + std::to_string(offset_ms) + "\n";
@@ -834,15 +913,28 @@ void Config::save() const {
 
 int64_t App::current_pos_ms() const {
   const MediaState& m = active_media;  // committed UI-thread snapshot
-  int64_t dur = static_cast<int64_t>(m.duration_s * 1000.0);
-  int64_t pos = interpolate_pos(m.pos_ms, m.at_ms, now_ms(), m.playing, dur);
-  pos += cfg.offset_ms;
+  const double duration_s = current_duration_s();
+  const int64_t duration_ms = duration_s > 0.0
+                                  ? static_cast<int64_t>(duration_s * 1000.0)
+                                  : 0;
+  int64_t pos = interpolate_pos(m.pos_ms, m.at_ms, now_ms(), m.playing,
+                                duration_ms);
+  if (cfg.offset_ms > 0 &&
+      pos > std::numeric_limits<int64_t>::max() - cfg.offset_ms) {
+    pos = std::numeric_limits<int64_t>::max();
+  } else {
+    pos += cfg.offset_ms;
+  }
   if (pos < 0) pos = 0;
-  if (dur > 0 && pos > dur) pos = dur;
+  if (duration_ms > 0 && pos > duration_ms) pos = duration_ms;
   return pos;
 }
 
-double App::current_duration_s() const { return active_media.duration_s; }
+double App::current_duration_s() const {
+  const double duration = active_media.duration_s;
+  if (!std::isfinite(duration) || duration <= 0.0) return 0.0;
+  return std::min(duration, 24.0 * 60.0 * 60.0);
+}
 
 TrackInfo App::current_track() const { return active_track; }
 
@@ -864,28 +956,28 @@ void App::rebuild_layout(bool force) {
     h = 800;
   }
   pending_plain_lines.clear();
+  timing_estimated = false;
   if (lstate == LyricsState::Ready && !lyrics.synced) {
-    // Untimed lyrics: pace the rows across the song's real length so the sheet
-    // still scrolls with playback instead of sitting frozen on one page. Two
-    // seconds of lead-in keeps the first line off screen at 0:00.
-    const double dur = current_duration_s();
-    const size_t row_count = std::max<size_t>(1, synthesise_plain_lines(lyrics.plain).size());
+    // Untimed lyrics may be paced for navigation, but these estimates never
+    // change Lyrics::synced and never drive a karaoke wipe.
+    const double duration = current_duration_s();
+    size_t row_count = 1;
+    for (char c : lyrics.plain) {
+      if (c == '\n') ++row_count;
+    }
     int64_t per_line = 4000;
-    if (dur > 20) {
-      per_line = static_cast<int64_t>(dur * 1000.0 * 0.92) /
-                 static_cast<int64_t>(row_count);
+    if (std::isfinite(duration) && duration > 20) {
+      const double bounded_duration = std::min(duration, 24.0 * 60.0 * 60.0);
+      const double estimated = bounded_duration * 1000.0 * 0.92 /
+                               static_cast<double>(std::max<size_t>(1, row_count));
+      per_line = static_cast<int64_t>(estimated);
       per_line = std::max<int64_t>(1500, std::min<int64_t>(9000, per_line));
     }
     pending_plain_lines = pace_plain_lyrics(lyrics.plain, 2000, per_line);
-    if (!pending_plain_lines.empty() && lyrics.lines.empty()) {
-      // Give the plain sheet timestamps too, so the active-line spotlight and
-      // the scroll anchor work exactly as they do for synced lyrics.
-      lyrics.lines = pending_plain_lines;
-      lyrics.synced = true;
-    }
+    timing_estimated = !pending_plain_lines.empty();
   }
   relayout(*this, w, h);
-  if (!lyrics.synced) active = -1;
+  if (!lyrics.synced && !timing_estimated) active = -1;
   (void)force;
   view.bg_theme = -1;  // force background rebuild (theme/art may have changed)
 }
@@ -961,6 +1053,7 @@ void App::toggle_help() {
 
 void App::show_window() {
   hidden_to_tray = false;
+  if (hwnd) SetTimer(hwnd, kFrameTimer, 16, nullptr);
   apply_desktop_mode(*this);
   const bool desktop = cfg.wallpaper && !windowed;
   ShowWindow(hwnd, desktop ? SW_SHOWNOACTIVATE : SW_SHOW);
@@ -1134,6 +1227,45 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         invalidate_window(*app);
       }
       return 0;
+    case WM_DPICHANGED: {
+      const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
+      if (suggested && app->windowed) {
+        SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+                     suggested->right - suggested->left,
+                     suggested->bottom - suggested->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+      } else if (!app->windowed && !app->cfg.wallpaper) {
+        HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO info{};
+        info.cbSize = sizeof(info);
+        if (GetMonitorInfoW(monitor, &info)) {
+          SetWindowPos(hwnd, nullptr, info.rcMonitor.left, info.rcMonitor.top,
+                       info.rcMonitor.right - info.rcMonitor.left,
+                       info.rcMonitor.bottom - info.rcMonitor.top,
+                       SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+      }
+      app->view.bg_theme = -1;
+      app->rebuild_layout(true);
+      invalidate_window(*app);
+      return 0;
+    }
+    case WM_DISPLAYCHANGE:
+      if (!app->windowed && !app->cfg.wallpaper) {
+        HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
+        MONITORINFO info{};
+        info.cbSize = sizeof(info);
+        if (GetMonitorInfoW(monitor, &info)) {
+          SetWindowPos(hwnd, nullptr, info.rcMonitor.left, info.rcMonitor.top,
+                       info.rcMonitor.right - info.rcMonitor.left,
+                       info.rcMonitor.bottom - info.rcMonitor.top,
+                       SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+      }
+      app->view.bg_theme = -1;
+      app->rebuild_layout(true);
+      invalidate_window(*app);
+      return 0;
     case WM_GETMINMAXINFO: {
       MINMAXINFO* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
       mmi->ptMinTrackSize.x = 480;
@@ -1203,6 +1335,26 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       remove_tray_icon(*app);
       PostQuitMessage(0);
       return 0;
+    case WM_POWERBROADCAST:
+      if (wParam == PBT_APMRESUMEAUTOMATIC ||
+          wParam == PBT_APMRESUMESUSPEND || wParam == PBT_APMRESUMECRITICAL) {
+        MediaState& media = app->active_media;
+        const int64_t now = app->now_ms();
+        if (media.have) {
+          const double duration = app->current_duration_s();
+          const int64_t duration_ms = duration > 0.0
+                                          ? static_cast<int64_t>(duration * 1000.0)
+                                          : 0;
+          const int64_t frozen_at = std::max(media.at_ms, app->view.last_frame);
+          media.pos_ms = interpolate_pos(media.pos_ms, media.at_ms, frozen_at,
+                                         media.playing, duration_ms);
+          media.at_ms = now;
+          media.playing = false;
+        }
+        app->view.last_frame = now;
+        invalidate_window(*app);
+      }
+      return TRUE;
     case WM_ENDSESSION:
       app->cfg.save();
       break;
@@ -1338,8 +1490,15 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show_cmd) {
 
   logf("started (windowed=%d, monitor %dx%d)", app.windowed ? 1 : 0, win_w, win_h);
 
-  MSG msg;
-  while (GetMessageW(&msg, nullptr, 0, 0)) {
+  MSG msg{};
+  for (;;) {
+    const BOOL result = GetMessageW(&msg, nullptr, 0, 0);
+    if (result == 0) break;  // WM_QUIT
+    if (result == -1) {
+      logf("GetMessageW failed (error %lu)",
+           static_cast<unsigned long>(GetLastError()));
+      break;
+    }
     if (msg.message == WM_APP_SHOW_EXISTING) {
       app.quitting = false;
       app.show_window();

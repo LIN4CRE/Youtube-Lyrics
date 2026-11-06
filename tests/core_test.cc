@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -50,6 +51,13 @@ static void test_utf8() {
   CHECK_STR(wide_to_utf8(utf8_to_wide("")), "");
   // U+1F3B5 (🎵) round trips through surrogate pairs.
   CHECK_EQ(utf8_to_wide("🎵").size(), static_cast<size_t>(2));
+  std::string malformed;
+  malformed.push_back(static_cast<char>(0xC0));  // overlong lead
+  malformed.push_back(static_cast<char>(0xAF));
+  CHECK_STR(wide_to_utf8(utf8_to_wide(malformed)),
+            "\xEF\xBF\xBD\xEF\xBF\xBD");
+  CHECK_STR(wide_to_utf8(std::wstring(1, static_cast<wchar_t>(0xD800))),
+            "\xEF\xBF\xBD");
   CHECK_STR(url_encode("Linkin Park & Friends"), "Linkin%20Park%20%26%20Friends");
 }
 
@@ -81,6 +89,25 @@ static void test_json() {
 
   CHECK(!json_parse("{\"broken\":", v));
   CHECK(!json_parse("", v));
+  CHECK(json_parse("\"\\uD83C\\uDFB5\"", v));
+  CHECK_STR(v.str, "🎵");
+
+  const char* malformed_json[] = {
+      "01", "-01", "+1", ".1", "1.", "1e", "1e+", "1e9999",
+      "[1,]", "{\"x\":01}", "null trailing", "truefalse",
+      "\"\\uD800\"", "\"\\uDC00\""};
+  for (const char* sample : malformed_json) {
+    CHECK(!json_parse(sample, v));
+    CHECK(v.is_null());  // failed parsing never leaks a partial object
+  }
+  std::string raw_control = "\"line";
+  raw_control.push_back('\n');
+  raw_control += "break\"";
+  CHECK(!json_parse(raw_control, v));
+  std::string invalid_utf8 = "\"";
+  invalid_utf8.push_back(static_cast<char>(0xC0));
+  invalid_utf8 += "\"";
+  CHECK(!json_parse(invalid_utf8, v));
 }
 
 static void test_lrc() {
@@ -103,11 +130,57 @@ static void test_lrc() {
   CHECK_EQ(lines[2].t_ms, static_cast<int64_t>(17500 - 250));
   CHECK_EQ(lines[3].t_ms, static_cast<int64_t>(20000 - 250));
 
-  // Enhanced LRC word tags and hours field.
+  // Genuine Enhanced LRC markers survive parsing with byte ranges.
   CHECK(lrc_parse("[00:00:05.50]<00:00:05.50>Hello <00:00:06.00>world", lines));
   CHECK_EQ(lines.size(), static_cast<size_t>(1));
   CHECK_EQ(lines[0].t_ms, static_cast<int64_t>(5500));
   CHECK_STR(lines[0].text, "Hello world");
+  CHECK_EQ(lines[0].segments.size(), static_cast<size_t>(2));
+  CHECK_EQ(lines[0].segments[0].t_ms, static_cast<int64_t>(5500));
+  CHECK_EQ(lines[0].segments[0].begin, static_cast<size_t>(0));
+  CHECK_EQ(lines[0].segments[0].end, static_cast<size_t>(5));
+  CHECK_EQ(lines[0].segments[1].t_ms, static_cast<int64_t>(6000));
+  CHECK_EQ(lines[0].segments[1].begin, static_cast<size_t>(5));
+  CHECK_EQ(lines[0].segments[1].end, static_cast<size_t>(11));
+  const std::string cached_lrc = lyrics_to_lrc(lines);
+  CHECK(cached_lrc.find("<00:06.000>") != std::string::npos);
+  std::vector<LyricLine> round_trip;
+  CHECK(lrc_parse(cached_lrc, round_trip));
+  CHECK_EQ(round_trip.size(), lines.size());
+  CHECK_STR(round_trip[0].text, lines[0].text);
+  CHECK_EQ(round_trip[0].t_ms, lines[0].t_ms);
+  CHECK_EQ(round_trip[0].segments.size(), lines[0].segments.size());
+  CHECK_EQ(round_trip[0].segments[1].t_ms, lines[0].segments[1].t_ms);
+  CHECK_EQ(round_trip[0].segments[1].begin, lines[0].segments[1].begin);
+  CHECK_EQ(round_trip[0].segments[1].end, lines[0].segments[1].end);
+
+  // Repeated lines shift their inline markers; line offsets shift both layers.
+  CHECK(lrc_parse("[offset:-250][00:01.000][00:05.000]"
+                  "<00:01.000>hello <00:01.500>world", lines));
+  CHECK_EQ(lines.size(), static_cast<size_t>(2));
+  CHECK_EQ(lines[0].t_ms, static_cast<int64_t>(750));
+  CHECK_EQ(lines[0].segments[0].t_ms, static_cast<int64_t>(750));
+  CHECK_EQ(lines[0].segments[1].t_ms, static_cast<int64_t>(1250));
+  CHECK_EQ(lines[1].t_ms, static_cast<int64_t>(4750));
+  CHECK_EQ(lines[1].segments[0].t_ms, static_cast<int64_t>(4750));
+  CHECK_EQ(lines[1].segments[1].t_ms, static_cast<int64_t>(5250));
+
+  // Malformed timing tags stay visible as text and do not imply word sync.
+  CHECK(lrc_parse("[00:01.00]Hello <00:02.1234>world", lines));
+  CHECK(lines[0].segments.empty());
+  CHECK_STR(lines[0].text, "Hello <00:02.1234>world");
+  std::string split_utf8_tag = "[00:01.00]";
+  split_utf8_tag.push_back(static_cast<char>(0xE4));
+  split_utf8_tag += "<00:01.20>";
+  split_utf8_tag.push_back(static_cast<char>(0xB8));
+  split_utf8_tag.push_back(static_cast<char>(0xAD));
+  CHECK(lrc_parse(split_utf8_tag, lines));
+  CHECK_STR(lines[0].text, "中");
+  CHECK(lines[0].segments.empty());
+  CHECK(!lrc_parse("[00:60.00]invalid seconds", lines));
+  CHECK(!lrc_parse("[999999999999999999999999:00]overflow", lines));
+  CHECK(lrc_parse("[1:02:03.004]hours form", lines));
+  CHECK_EQ(lines[0].t_ms, static_cast<int64_t>(3723004));
 
   // Not lyrics at all.
   CHECK(!lrc_parse("just some prose\nno timestamps here", lines));
@@ -224,6 +297,35 @@ static void test_layout() {
   CHECK_EQ(disp[0].end_ms, static_cast<int64_t>(2000));
   CHECK_EQ(disp[3].cont, true);
 
+  // Unbroken words and CJK text wrap at UTF-8 codepoint boundaries.
+  auto unbroken = build_display_lines({{0, "abcdefghij"}}, 20, 10, fake_measure);
+  CHECK(unbroken.size() >= 3);
+  std::string joined;
+  for (const auto& row : unbroken) {
+    CHECK(fake_measure(row.text, 10) <= 20);
+    joined += row.text;
+  }
+  CHECK_STR(joined, "abcdefghij");
+  auto cjk = build_display_lines({{0, "世界"}}, 16, 10, fake_measure);
+  CHECK_EQ(cjk.size(), static_cast<size_t>(2));
+  CHECK_EQ(cjk[0].text.size(), static_cast<size_t>(3));
+  CHECK_EQ(cjk[1].text.size(), static_cast<size_t>(3));
+  CHECK_STR(cjk[0].text + cjk[1].text, "世界");
+
+  // Enhanced timing ranges remain attached when their line wraps.
+  LyricLine timed{0, "hello world", {{0, 0, 5}, {500, 5, 11}}};
+  auto timed_rows = build_display_lines({timed}, 30, 10, fake_measure);
+  CHECK_EQ(timed_rows.size(), static_cast<size_t>(2));
+  CHECK_EQ(timed_rows[0].segments.size(), static_cast<size_t>(1));
+  CHECK_EQ(timed_rows[0].segments[0].begin, static_cast<size_t>(0));
+  CHECK_EQ(timed_rows[0].segments[0].end, static_cast<size_t>(5));
+  CHECK_EQ(timed_rows[1].segments.size(), static_cast<size_t>(1));
+  CHECK_EQ(timed_rows[1].segments[0].begin, static_cast<size_t>(0));
+  CHECK_EQ(timed_rows[1].segments[0].end, static_cast<size_t>(5));
+  CHECK_EQ(active_index(timed_rows, 0), 0);
+  CHECK_EQ(active_index(timed_rows, 499), 0);
+  CHECK_EQ(active_index(timed_rows, 500), 1);
+
   // Active line selection.
   CHECK_EQ(active_index(disp, 0), -1);
   CHECK_EQ(active_index(disp, 1000), 0);
@@ -253,6 +355,9 @@ static void test_layout() {
   CHECK_EQ(interpolate_pos(1000, 5000, 6500, false, 200000), 1000);
   CHECK_EQ(interpolate_pos(199000, 5000, 6500, true, 200000), 200000);  // clamped
   CHECK_EQ(interpolate_pos(-50, 5000, 6500, false, 0), 0);
+  CHECK_EQ(interpolate_pos(0, std::numeric_limits<int64_t>::min(),
+                           std::numeric_limits<int64_t>::max(), true, 0),
+           std::numeric_limits<int64_t>::max());
 }
 
 static void test_misc() {
@@ -479,6 +584,27 @@ static void test_extra_providers() {
   CHECK(parse_local_lyrics("just words\nmore words", out));
   CHECK(!out.synced);
   CHECK(!parse_local_lyrics("   \n  ", out));
+
+  // Local lyric files are commonly saved with a BOM by Windows editors.
+  std::string utf8_bom;
+  utf8_bom.push_back(static_cast<char>(0xEF));
+  utf8_bom.push_back(static_cast<char>(0xBB));
+  utf8_bom.push_back(static_cast<char>(0xBF));
+  utf8_bom += "[00:01.00]hello";
+  CHECK(parse_local_lyrics(utf8_bom, out));
+  CHECK(out.synced);
+  CHECK_STR(out.lines[0].text, "hello");
+
+  std::string utf16le;
+  utf16le.push_back(static_cast<char>(0xFF));
+  utf16le.push_back(static_cast<char>(0xFE));
+  for (unsigned char c : std::string("Hello\nworld")) {
+    utf16le.push_back(static_cast<char>(c));
+    utf16le.push_back('\0');
+  }
+  CHECK(parse_local_lyrics(utf16le, out));
+  CHECK(!out.synced);
+  CHECK_STR(out.plain, "Hello\nworld");
 }
 
 int main() {

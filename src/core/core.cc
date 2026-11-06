@@ -2,8 +2,10 @@
 #include "core.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <cstdlib>
 #include <cstring>
 #include <cctype>
@@ -13,50 +15,65 @@ namespace ytl {
 
 // ---------------------------------------------------------------- text utils
 
+static bool decode_utf8_char(const std::string& s, size_t i, uint32_t* cp_out,
+                             size_t* length_out) {
+  if (i >= s.size()) return false;
+  const unsigned char first = static_cast<unsigned char>(s[i]);
+  uint32_t cp = 0;
+  size_t length = 0;
+  if (first < 0x80) {
+    cp = first;
+    length = 1;
+  } else if (first >= 0xC2 && first <= 0xDF) {
+    cp = first & 0x1F;
+    length = 2;
+  } else if (first >= 0xE0 && first <= 0xEF) {
+    cp = first & 0x0F;
+    length = 3;
+  } else if (first >= 0xF0 && first <= 0xF4) {
+    cp = first & 0x07;
+    length = 4;
+  } else {
+    return false;
+  }
+  if (i + length > s.size()) return false;
+  for (size_t k = 1; k < length; ++k) {
+    const unsigned char next = static_cast<unsigned char>(s[i + k]);
+    if ((next & 0xC0) != 0x80) return false;
+    cp = (cp << 6) | (next & 0x3F);
+  }
+  if ((length == 3 && cp < 0x800) || (length == 4 && cp < 0x10000) ||
+      (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF) {
+    return false;
+  }
+  *cp_out = cp;
+  *length_out = length;
+  return true;
+}
+
+static bool valid_utf8(const std::string& s) {
+  for (size_t i = 0; i < s.size();) {
+    uint32_t cp = 0;
+    size_t length = 0;
+    if (!decode_utf8_char(s, i, &cp, &length)) return false;
+    i += length;
+  }
+  return true;
+}
+
 std::wstring utf8_to_wide(const std::string& s) {
   std::wstring out;
   out.reserve(s.size());
-  size_t i = 0;
-  while (i < s.size()) {
-    unsigned char c = static_cast<unsigned char>(s[i]);
+  for (size_t i = 0; i < s.size();) {
     uint32_t cp = 0;
-    size_t extra = 0;
-    if (c < 0x80) {
-      cp = c;
-    } else if ((c & 0xE0) == 0xC0) {
-      cp = c & 0x1F;
-      extra = 1;
-    } else if ((c & 0xF0) == 0xE0) {
-      cp = c & 0x0F;
-      extra = 2;
-    } else if ((c & 0xF8) == 0xF0) {
-      cp = c & 0x07;
-      extra = 3;
-    } else {
-      // Broken byte: emit U+FFFD and move on.
-      out.push_back(0xFFFD);
+    size_t length = 0;
+    if (!decode_utf8_char(s, i, &cp, &length)) {
+      // Replace malformed, overlong, surrogate, and out-of-range sequences.
+      out.push_back(static_cast<wchar_t>(0xFFFD));
       ++i;
       continue;
     }
-    if (i + extra >= s.size()) {
-      out.push_back(0xFFFD);
-      break;
-    }
-    bool ok = true;
-    for (size_t k = 1; k <= extra; ++k) {
-      unsigned char cc = static_cast<unsigned char>(s[i + k]);
-      if ((cc & 0xC0) != 0x80) {
-        ok = false;
-        break;
-      }
-      cp = (cp << 6) | (cc & 0x3F);
-    }
-    if (!ok) {
-      out.push_back(0xFFFD);
-      ++i;
-      continue;
-    }
-    i += extra + 1;
+    i += length;
     if (cp > 0xFFFF) {
       cp -= 0x10000;
       out.push_back(static_cast<wchar_t>(0xD800 + (cp >> 10)));
@@ -69,6 +86,8 @@ std::wstring utf8_to_wide(const std::string& s) {
 }
 
 static void append_utf8(std::string& out, uint32_t cp) {
+  if (cp >= 0xD800 && cp <= 0xDFFF) cp = 0xFFFD;
+  if (cp > 0x10FFFF) cp = 0xFFFD;
   if (cp < 0x80) {
     out.push_back(static_cast<char>(cp));
   } else if (cp < 0x800) {
@@ -91,12 +110,20 @@ std::string wide_to_utf8(const std::wstring& s) {
   out.reserve(s.size());
   for (size_t i = 0; i < s.size(); ++i) {
     uint32_t cp = static_cast<uint32_t>(s[i]);
-    if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < s.size()) {
-      uint32_t lo = static_cast<uint32_t>(s[i + 1]);
-      if (lo >= 0xDC00 && lo <= 0xDFFF) {
-        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-        ++i;
+    if (cp >= 0xD800 && cp <= 0xDBFF) {
+      if (i + 1 < s.size()) {
+        const uint32_t lo = static_cast<uint32_t>(s[i + 1]);
+        if (lo >= 0xDC00 && lo <= 0xDFFF) {
+          cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+          ++i;
+        } else {
+          cp = 0xFFFD;
+        }
+      } else {
+        cp = 0xFFFD;
       }
+    } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+      cp = 0xFFFD;
     }
     append_utf8(out, cp);
   }
@@ -197,9 +224,15 @@ std::string JValue::get_str(const char* key, const char* def) const {
 
 double JValue::get_num(const char* key, double def) const {
   const JValue* v = find(key);
-  if (v && (v->is_number() || v->is_string())) {
-    if (v->is_number()) return v->num;
-    return std::atof(v->str.c_str());
+  if (!v) return def;
+  if (v->is_number()) return std::isfinite(v->num) ? v->num : def;
+  if (v->is_string()) {
+    const std::string value = trim(v->str);
+    if (value.empty()) return def;
+    char* end = nullptr;
+    const double number = std::strtod(value.c_str(), &end);
+    if (end != value.c_str() && end && *end == '\0' && std::isfinite(number))
+      return number;
   }
   return def;
 }
@@ -226,16 +259,32 @@ struct JsonParser {
     if (p >= end || *p != '"') return false;
     ++p;
     out.clear();
+    auto read_hex4 = [&](uint32_t* value) {
+      if (end - p < 4) return false;
+      uint32_t result = 0;
+      for (int k = 0; k < 4; ++k) {
+        const char h = p[k];
+        result <<= 4;
+        if (h >= '0' && h <= '9') result |= static_cast<uint32_t>(h - '0');
+        else if (h >= 'a' && h <= 'f') result |= static_cast<uint32_t>(h - 'a' + 10);
+        else if (h >= 'A' && h <= 'F') result |= static_cast<uint32_t>(h - 'A' + 10);
+        else return false;
+      }
+      p += 4;
+      *value = result;
+      return true;
+    };
     while (p < end) {
-      unsigned char c = static_cast<unsigned char>(*p);
+      const unsigned char c = static_cast<unsigned char>(*p);
       if (c == '"') {
         ++p;
         return true;
       }
+      if (c < 0x20) return false;
       if (c == '\\') {
         ++p;
         if (p >= end) return false;
-        char esc = *p++;
+        const char esc = *p++;
         switch (esc) {
           case '"': out.push_back('"'); break;
           case '\\': out.push_back('\\'); break;
@@ -246,34 +295,16 @@ struct JsonParser {
           case 'r': out.push_back('\r'); break;
           case 't': out.push_back('\t'); break;
           case 'u': {
-            if (end - p < 4) return false;
             uint32_t cp = 0;
-            for (int k = 0; k < 4; ++k) {
-              char h = p[k];
-              cp <<= 4;
-              if (h >= '0' && h <= '9') cp |= static_cast<uint32_t>(h - '0');
-              else if (h >= 'a' && h <= 'f') cp |= static_cast<uint32_t>(h - 'a' + 10);
-              else if (h >= 'A' && h <= 'F') cp |= static_cast<uint32_t>(h - 'A' + 10);
-              else return false;
-            }
-            p += 4;
-            // Surrogate pair?
-            if (cp >= 0xD800 && cp <= 0xDBFF && end - p >= 6 && p[0] == '\\' &&
-                p[1] == 'u') {
-              uint32_t lo = 0;
-              bool ok = true;
-              for (int k = 0; k < 4; ++k) {
-                char h = p[2 + k];
-                lo <<= 4;
-                if (h >= '0' && h <= '9') lo |= static_cast<uint32_t>(h - '0');
-                else if (h >= 'a' && h <= 'f') lo |= static_cast<uint32_t>(h - 'a' + 10);
-                else if (h >= 'A' && h <= 'F') lo |= static_cast<uint32_t>(h - 'A' + 10);
-                else { ok = false; break; }
-              }
-              if (ok && lo >= 0xDC00 && lo <= 0xDFFF) {
-                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-                p += 6;
-              }
+            if (!read_hex4(&cp)) return false;
+            if (cp >= 0xD800 && cp <= 0xDBFF) {
+              if (end - p < 6 || p[0] != '\\' || p[1] != 'u') return false;
+              p += 2;
+              uint32_t low = 0;
+              if (!read_hex4(&low) || low < 0xDC00 || low > 0xDFFF) return false;
+              cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+            } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+              return false;
             }
             append_utf8(out, cp);
             break;
@@ -371,18 +402,37 @@ struct JsonParser {
       v.b = false;
       return true;
     }
-    // Number
+    // Strict JSON number grammar: no leading plus, leading zeros, or
+    // incomplete fraction/exponent are accepted.
     const char* start = p;
-    if (p < end && (*p == '-' || *p == '+')) ++p;
-    bool any = false;
-    while (p < end && ((*p >= '0' && *p <= '9') || *p == '.' || *p == 'e' ||
-                       *p == 'E' || *p == '-' || *p == '+')) {
-      any = true;
+    if (p < end && *p == '-') ++p;
+    if (p >= end) return false;
+    if (*p == '0') {
       ++p;
+      if (p < end && *p >= '0' && *p <= '9') return false;
+    } else if (*p >= '1' && *p <= '9') {
+      while (p < end && *p >= '0' && *p <= '9') ++p;
+    } else {
+      return false;
     }
-    if (!any) return false;
+    if (p < end && *p == '.') {
+      ++p;
+      if (p >= end || *p < '0' || *p > '9') return false;
+      while (p < end && *p >= '0' && *p <= '9') ++p;
+    }
+    if (p < end && (*p == 'e' || *p == 'E')) {
+      ++p;
+      if (p < end && (*p == '+' || *p == '-')) ++p;
+      if (p >= end || *p < '0' || *p > '9') return false;
+      while (p < end && *p >= '0' && *p <= '9') ++p;
+    }
+    const std::string token(start, p - start);
+    char* parsed_end = nullptr;
+    const double number = std::strtod(token.c_str(), &parsed_end);
+    if (parsed_end != token.c_str() + token.size() || !std::isfinite(number))
+      return false;
     v.type = JType::Number;
-    v.num = std::atof(std::string(start, p - start).c_str());
+    v.num = number;
     return true;
   }
 };
@@ -392,9 +442,18 @@ struct JsonParser {
 bool json_parse(const std::string& src, JValue& out) {
   // Reset first: callers reuse JValue instances for successive responses.
   out = JValue();
+  if (!valid_utf8(src)) return false;
   JsonParser jp{src.data(), src.data() + src.size()};
   jp.skip_ws();
-  if (!jp.parse_value(out, 0)) return false;
+  if (!jp.parse_value(out, 0)) {
+    out = JValue();
+    return false;
+  }
+  jp.skip_ws();
+  if (jp.p != jp.end) {
+    out = JValue();
+    return false;
+  }
   return true;
 }
 
@@ -402,73 +461,201 @@ bool json_parse(const std::string& src, JValue& out) {
 
 namespace {
 
-// Parses "mm:ss", "mm:ss.xx", "mm:ss.xxx", "hh:mm:ss.xx" and bare seconds.
-// Timestamps are ambiguous by nature, so this splits on ':' first and treats a
-// trailing ".xxx" (or ":xxx" in the 2-field legacy form) as a fraction.
+// Parses bare seconds, mm:ss[.fraction], or hh:mm:ss[.fraction].
+// Fractions are interpreted as one to three decimal places (100 ms, 10 ms,
+// or 1 ms respectively); malformed and overflowing timestamps are rejected.
 bool parse_timestamp(const std::string& s, size_t pos, int64_t* out_ms,
                      size_t* consumed) {
   size_t i = pos;
-  std::vector<long> fields;
-  long cur = 0;
-  bool cur_has_digits = false;
-  long frac = -1;
-  size_t frac_digits = 0;
+  std::vector<int64_t> fields;
+  fields.reserve(3);
+  int64_t current = 0;
+  bool has_digits = false;
+  bool in_fraction = false;
+  int64_t fraction = 0;
+  size_t fraction_digits = 0;
+  const int64_t max_value = std::numeric_limits<int64_t>::max();
 
   while (i < s.size()) {
-    char c = s[i];
+    const char c = s[i];
     if (c >= '0' && c <= '9') {
-      if (frac >= 0) {  // digits after the fraction separator
-        if (frac_digits < 3) {
-          frac = frac * 10 + (c - '0');
-          ++frac_digits;
-        }
-        ++i;
-        continue;
+      const int digit = c - '0';
+      if (in_fraction) {
+        if (fraction_digits == 3) return false;
+        fraction = fraction * 10 + digit;
+        ++fraction_digits;
+      } else {
+        if (current > (max_value - digit) / 10) return false;
+        current = current * 10 + digit;
+        has_digits = true;
       }
-      cur = cur * 10 + (c - '0');
-      cur_has_digits = true;
       ++i;
       continue;
     }
-    if (c == ':' && frac < 0) {
-      if (!cur_has_digits) return false;
-      fields.push_back(cur);
-      cur = 0;
-      cur_has_digits = false;
+    if (c == ':' && !in_fraction) {
+      if (!has_digits || fields.size() >= 2) return false;
+      fields.push_back(current);
+      current = 0;
+      has_digits = false;
       ++i;
       continue;
     }
-    if (c == '.' && frac < 0) {
-      if (!cur_has_digits) return false;
-      frac = 0;
-      frac_digits = 0;
+    if (c == '.' && !in_fraction) {
+      if (!has_digits) return false;
+      in_fraction = true;
       ++i;
       continue;
     }
     break;
   }
-  if (cur_has_digits) fields.push_back(cur);
-  if (fields.empty()) return false;
+  if (!has_digits || (in_fraction && fraction_digits == 0)) return false;
+  fields.push_back(current);
+  if (fields.empty() || fields.size() > 3) return false;
 
-  double seconds = 0.0;
+  const uint64_t max_seconds = static_cast<uint64_t>(max_value / 1000);
+  uint64_t seconds = 0;
+  auto add_seconds = [&](uint64_t value, uint64_t multiplier) {
+    if (value > max_seconds / multiplier) return false;
+    const uint64_t part = value * multiplier;
+    if (seconds > max_seconds - part) return false;
+    seconds += part;
+    return true;
+  };
   if (fields.size() == 1) {
-    seconds = static_cast<double>(fields[0]);
+    if (!add_seconds(static_cast<uint64_t>(fields[0]), 1)) return false;
   } else if (fields.size() == 2) {
-    seconds = static_cast<double>(fields[0]) * 60.0 + static_cast<double>(fields[1]);
+    if (fields[1] >= 60 || !add_seconds(static_cast<uint64_t>(fields[0]), 60) ||
+        !add_seconds(static_cast<uint64_t>(fields[1]), 1)) return false;
   } else {
-    seconds = static_cast<double>(fields[0]) * 3600.0 +
-              static_cast<double>(fields[1]) * 60.0 +
-              static_cast<double>(fields[2]);
+    if (fields[1] >= 60 || fields[2] >= 60 ||
+        !add_seconds(static_cast<uint64_t>(fields[0]), 3600) ||
+        !add_seconds(static_cast<uint64_t>(fields[1]), 60) ||
+        !add_seconds(static_cast<uint64_t>(fields[2]), 1)) return false;
   }
-  double frac_ms = 0.0;
-  if (frac >= 0) {
-    if (frac_digits == 1) frac_ms = static_cast<double>(frac) * 100.0;
-    else if (frac_digits == 2) frac_ms = static_cast<double>(frac) * 10.0;
-    else frac_ms = static_cast<double>(frac);
-  }
-  *out_ms = static_cast<int64_t>(llround(seconds * 1000.0 + frac_ms));
+  int64_t fraction_ms = fraction;
+  if (fraction_digits == 1) fraction_ms *= 100;
+  else if (fraction_digits == 2) fraction_ms *= 10;
+  if (seconds > static_cast<uint64_t>((max_value - fraction_ms) / 1000))
+    return false;
+  *out_ms = static_cast<int64_t>(seconds * 1000u) + fraction_ms;
   *consumed = i - pos;
   return true;
+}
+
+
+struct RawLyricPart {
+  int64_t t_ms = 0;
+  size_t begin = 0;
+  size_t end = 0;
+  size_t normalized_begin = 0;
+  size_t normalized_end = 0;
+  bool explicit_time = false;
+};
+
+bool parse_inline_lyrics(const std::string& input, int64_t line_start_ms,
+                         std::string* plain,
+                         std::vector<LyricSegment>* segments) {
+  std::string raw_text;
+  std::vector<RawLyricPart> parts;
+  size_t cursor = 0;
+  int64_t part_time = line_start_ms;
+  bool explicit_time = false;
+  bool saw_tag = false;
+  bool saw_timed_text = false;
+
+  for (size_t i = 0; i < input.size();) {
+    if (input[i] == '<') {
+      const size_t close = input.find('>', i + 1);
+      if (close != std::string::npos) {
+        const std::string tag = input.substr(i + 1, close - i - 1);
+        int64_t word_ms = 0;
+        size_t used = 0;
+        if (parse_timestamp(tag, 0, &word_ms, &used) && used == tag.size()) {
+          if (i > cursor) {
+            const size_t begin = raw_text.size();
+            raw_text.append(input, cursor, i - cursor);
+            parts.push_back({part_time, begin, raw_text.size(), 0, 0, explicit_time});
+            if (explicit_time) saw_timed_text = true;
+          }
+          saw_tag = true;
+          explicit_time = true;
+          part_time = word_ms;
+          cursor = close + 1;
+          i = close + 1;
+          continue;
+        }
+      }
+    }
+    ++i;
+  }
+  if (cursor < input.size()) {
+    const size_t begin = raw_text.size();
+    raw_text.append(input, cursor, std::string::npos);
+    parts.push_back({part_time, begin, raw_text.size(), 0, 0, explicit_time});
+    if (explicit_time) saw_timed_text = true;
+  }
+
+  *plain = squish(raw_text);
+  segments->clear();
+  if (!saw_tag || !saw_timed_text || plain->empty()) return false;
+
+  // Map each raw part boundary through the same whitespace normalization as
+  // `squish`, in one pass so even a long imported line stays linear-time.
+  size_t begin_index = 0;
+  size_t end_index = 0;
+  size_t normalized_size = 0;
+  bool have_text = false;
+  bool pending_space = false;
+  for (size_t i = 0; i <= raw_text.size(); ++i) {
+    while (begin_index < parts.size() && parts[begin_index].begin == i) {
+      parts[begin_index].normalized_begin = normalized_size;
+      ++begin_index;
+    }
+    while (end_index < parts.size() && parts[end_index].end == i) {
+      parts[end_index].normalized_end = normalized_size;
+      ++end_index;
+    }
+    if (i == raw_text.size()) break;
+    const unsigned char c = static_cast<unsigned char>(raw_text[i]);
+    if (c <= ' ') {
+      if (have_text) pending_space = true;
+    } else {
+      if (pending_space) {
+        ++normalized_size;
+        pending_space = false;
+      }
+      ++normalized_size;
+      have_text = true;
+    }
+  }
+  // Parts are in text order. A decreasing time or a tag inside a UTF-8
+  // codepoint makes segment interpolation ambiguous, so retain the lyric text
+  // but fall back to line timing.
+  auto is_utf8_boundary = [&](size_t index) {
+    return index == 0 || index >= plain->size() ||
+           (static_cast<unsigned char>((*plain)[index]) & 0xC0) != 0x80;
+  };
+  int64_t previous_time = -1;
+  for (const RawLyricPart& part : parts) {
+    if (part.normalized_end <= part.normalized_begin) continue;
+    if (part.t_ms < previous_time ||
+        !is_utf8_boundary(part.normalized_begin) ||
+        !is_utf8_boundary(part.normalized_end)) {
+      segments->clear();
+      return false;
+    }
+    previous_time = part.t_ms;
+    segments->push_back({part.t_ms, part.normalized_begin, part.normalized_end});
+  }
+  return !segments->empty();
+}
+
+int64_t add_time_saturated(int64_t value, int64_t delta) {
+  const int64_t max_value = std::numeric_limits<int64_t>::max();
+  const int64_t min_value = std::numeric_limits<int64_t>::min();
+  if (delta > 0 && value > max_value - delta) return max_value;
+  if (delta < 0 && value < min_value - delta) return min_value;
+  return value + delta;
 }
 
 }  // namespace
@@ -490,50 +677,61 @@ bool lrc_parse(const std::string& lrc, std::vector<LyricLine>& out) {
       continue;
     }
 
-    // Collect leading [..] tags.
+    // Collect leading timestamps and metadata. Metadata offsets are applied
+    // after all lines are parsed, regardless of where the tag appears.
     std::vector<int64_t> stamps;
     size_t i = 0;
     while (i < raw.size() && raw[i] == '[') {
-      size_t close = raw.find(']', i);
+      const size_t close = raw.find(']', i);
       if (close == std::string::npos) break;
-      std::string tag = raw.substr(i + 1, close - i - 1);
+      const std::string tag = raw.substr(i + 1, close - i - 1);
       int64_t ms = 0;
       size_t used = 0;
       if (parse_timestamp(tag, 0, &ms, &used) && used == tag.size()) {
         stamps.push_back(ms);
       } else if (starts_with(to_lower_ascii(tag), "offset:")) {
-        offset_ms = std::atoll(tag.c_str() + 7);
+        const std::string value = trim(tag.substr(7));
+        if (!value.empty()) {
+          errno = 0;
+          char* end = nullptr;
+          const long long parsed = std::strtoll(value.c_str(), &end, 10);
+          if (errno != ERANGE && end != value.c_str() && end && *end == '\0')
+            offset_ms = static_cast<int64_t>(parsed);
+        }
       }
       i = close + 1;
     }
-    if (stamps.empty()) continue;  // metadata or stray text
-
-    std::string text = raw.substr(i);
-    // Drop inline word timings like <00:12.34>.
-    std::string cleaned;
-    cleaned.reserve(text.size());
-    for (size_t k = 0; k < text.size();) {
-      if (text[k] == '<') {
-        size_t close = text.find('>', k);
-        if (close != std::string::npos && text.find(':', k) < close) {
-          k = close + 1;
-          continue;
-        }
-      }
-      cleaned.push_back(text[k]);
-      ++k;
+    if (stamps.empty()) {
+      if (nl >= lrc.size()) break;
+      continue;  // metadata or stray text
     }
-    text = squish(cleaned);
 
-    for (int64_t ms : stamps) lines.push_back({ms, text});
+    std::string text;
+    std::vector<LyricSegment> segments;
+    parse_inline_lyrics(raw.substr(i), stamps.front(), &text, &segments);
+    const int64_t base_stamp = stamps.front();
+    for (int64_t stamp : stamps) {
+      const int64_t shift = stamp - base_stamp;
+      LyricLine line;
+      line.t_ms = stamp;
+      line.text = text;
+      line.segments = segments;
+      for (LyricSegment& segment : line.segments)
+        segment.t_ms = add_time_saturated(segment.t_ms, shift);
+      lines.push_back(std::move(line));
+    }
     if (nl >= lrc.size()) break;
   }
 
   if (lines.empty()) return false;
 
-  for (auto& l : lines) {
-    l.t_ms += offset_ms;
-    if (l.t_ms < 0) l.t_ms = 0;
+  for (auto& line : lines) {
+    line.t_ms = add_time_saturated(line.t_ms, offset_ms);
+    if (line.t_ms < 0) line.t_ms = 0;
+    for (LyricSegment& segment : line.segments) {
+      segment.t_ms = add_time_saturated(segment.t_ms, offset_ms);
+      if (segment.t_ms < 0) segment.t_ms = 0;
+    }
   }
   std::stable_sort(lines.begin(), lines.end(),
                    [](const LyricLine& a, const LyricLine& b) {
@@ -558,6 +756,36 @@ std::string lyrics_to_plain(const std::vector<LyricLine>& lines) {
     last_blank = false;
   }
   while (!out.empty() && out.back() == '\n') out.pop_back();
+  return out;
+}
+
+
+std::string lyrics_to_lrc(const std::vector<LyricLine>& lines) {
+  auto stamp = [](int64_t value, char open, char close) {
+    if (value < 0) value = 0;
+    const long long ms = static_cast<long long>(value);
+    char buffer[48];
+    std::snprintf(buffer, sizeof(buffer), "%c%02lld:%02lld.%03lld%c", open,
+                  ms / 60000, (ms / 1000) % 60, ms % 1000, close);
+    return std::string(buffer);
+  };
+
+  std::string out;
+  for (const LyricLine& line : lines) {
+    out += stamp(line.t_ms, '[', ']');
+    size_t cursor = 0;
+    for (const LyricSegment& segment : line.segments) {
+      const size_t begin = std::min(segment.begin, line.text.size());
+      const size_t end = std::min(segment.end, line.text.size());
+      if (end <= begin || begin < cursor) continue;
+      out.append(line.text, cursor, begin - cursor);
+      out += stamp(segment.t_ms, '<', '>');
+      out.append(line.text, begin, end - begin);
+      cursor = end;
+    }
+    out.append(line.text, cursor, std::string::npos);
+    out.push_back('\n');
+  }
   return out;
 }
 
@@ -911,18 +1139,54 @@ std::vector<LyricLine> pace_plain_lyrics(const std::string& plain, int64_t lead_
   return out;
 }
 
+namespace {
+
+std::string normalize_import_text(const std::string& input) {
+  if (input.size() >= 3 &&
+      static_cast<unsigned char>(input[0]) == 0xEF &&
+      static_cast<unsigned char>(input[1]) == 0xBB &&
+      static_cast<unsigned char>(input[2]) == 0xBF) {
+    const std::string utf8 = input.substr(3);
+    return valid_utf8(utf8) ? utf8 : wide_to_utf8(utf8_to_wide(utf8));
+  }
+  if (input.size() >= 2 &&
+      ((static_cast<unsigned char>(input[0]) == 0xFF &&
+        static_cast<unsigned char>(input[1]) == 0xFE) ||
+       (static_cast<unsigned char>(input[0]) == 0xFE &&
+        static_cast<unsigned char>(input[1]) == 0xFF))) {
+    const bool little_endian = static_cast<unsigned char>(input[0]) == 0xFF;
+    std::wstring wide_text;
+    wide_text.reserve((input.size() - 2) / 2 + 1);
+    size_t i = 2;
+    for (; i + 1 < input.size(); i += 2) {
+      const uint16_t first = static_cast<unsigned char>(input[i]);
+      const uint16_t second = static_cast<unsigned char>(input[i + 1]);
+      const uint16_t unit = little_endian
+                                ? static_cast<uint16_t>(first | (second << 8))
+                                : static_cast<uint16_t>((first << 8) | second);
+      wide_text.push_back(static_cast<wchar_t>(unit));
+    }
+    if (i < input.size()) wide_text.push_back(static_cast<wchar_t>(0xFFFD));
+    return wide_to_utf8(wide_text);
+  }
+  return valid_utf8(input) ? input : wide_to_utf8(utf8_to_wide(input));
+}
+
+}  // namespace
+
 bool parse_local_lyrics(const std::string& text, Lyrics& out) {
-  if (trim(text).empty()) return false;
+  const std::string normalized = normalize_import_text(text);
+  if (trim(normalized).empty()) return false;
   out = Lyrics();
   std::vector<LyricLine> lines;
-  if (lrc_parse(text, lines) && !lines.empty()) {
+  if (lrc_parse(normalized, lines) && !lines.empty()) {
     out.synced = true;
     out.lines = std::move(lines);
     out.source = "local file";
     return true;
   }
   out.synced = false;
-  out.plain = text;
+  out.plain = normalized;
   out.source = "local file";
   return true;
 }
@@ -965,56 +1229,117 @@ bool parse_lrclib_payload(const std::string& body, const TrackInfo& want,
 std::vector<DispLine> build_display_lines(const std::vector<LyricLine>& lines,
                                           double max_w, double px,
                                           const MeasureFn& measure) {
+  struct Chunk {
+    size_t begin = 0;
+    size_t end = 0;
+    std::string text;
+  };
+
   std::vector<DispLine> out;
   if (lines.empty()) return out;
 
-  // Wrap one lyric line into chunks that fit max_w.
-  auto wrap = [&](const std::string& text, std::vector<std::string>& chunks) {
+  auto next_codepoint = [](const std::string& text, size_t i) {
+    if (i >= text.size()) return text.size();
+    const unsigned char c = static_cast<unsigned char>(text[i]);
+    size_t length = 1;
+    if (c >= 0xC2 && c <= 0xDF) length = 2;
+    else if (c >= 0xE0 && c <= 0xEF) length = 3;
+    else if (c >= 0xF0 && c <= 0xF4) length = 4;
+    if (i + length > text.size()) return i + 1;
+    for (size_t k = 1; k < length; ++k) {
+      if ((static_cast<unsigned char>(text[i + k]) & 0xC0) != 0x80) return i + 1;
+    }
+    return i + length;
+  };
+
+  auto wrap = [&](const std::string& text, std::vector<Chunk>& chunks) {
     chunks.clear();
     if (text.empty()) {
-      chunks.push_back("");
+      chunks.push_back({0, 0, ""});
       return;
     }
     if (max_w <= 1 || !measure) {
-      chunks.push_back(text);
+      chunks.push_back({0, text.size(), text});
       return;
     }
-    std::string cur;
-    std::string word;
-    auto flush_word = [&]() {
-      if (word.empty()) return;
-      std::string candidate = cur.empty() ? word : cur + " " + word;
-      if (measure(candidate, px) <= max_w || cur.empty()) {
-        cur = candidate;
-      } else {
-        chunks.push_back(cur);
-        cur = word;
-      }
-      word.clear();
+
+    Chunk current;
+    bool have_current = false;
+    auto flush_current = [&]() {
+      if (have_current) chunks.push_back(std::move(current));
+      current = Chunk();
+      have_current = false;
     };
-    for (char c : text) {
-      if (c == ' ') {
-        flush_word();
+    auto add_long_token = [&](size_t begin, size_t end) {
+      size_t part_begin = begin;
+      size_t cursor = begin;
+      while (cursor < end) {
+        const size_t next = next_codepoint(text, cursor);
+        const std::string candidate = text.substr(part_begin, next - part_begin);
+        if (measure(candidate, px) > max_w && cursor > part_begin) {
+          chunks.push_back({part_begin, cursor, text.substr(part_begin, cursor - part_begin)});
+          part_begin = cursor;
+        }
+        cursor = next;
+      }
+      if (part_begin < end)
+        chunks.push_back({part_begin, end, text.substr(part_begin, end - part_begin)});
+    };
+
+    for (size_t pos = 0; pos < text.size();) {
+      while (pos < text.size() && text[pos] == ' ') ++pos;
+      if (pos >= text.size()) break;
+      const size_t word_begin = pos;
+      while (pos < text.size() && text[pos] != ' ') ++pos;
+      const size_t word_end = pos;
+      const std::string word = text.substr(word_begin, word_end - word_begin);
+
+      if (measure(word, px) > max_w) {
+        flush_current();
+        add_long_token(word_begin, word_end);
+        continue;
+      }
+      if (!have_current) {
+        current = {word_begin, word_end, word};
+        have_current = true;
+        continue;
+      }
+      const std::string candidate = text.substr(current.begin, word_end - current.begin);
+      if (measure(candidate, px) <= max_w) {
+        current.end = word_end;
+        current.text = candidate;
       } else {
-        word.push_back(c);
+        flush_current();
+        current = {word_begin, word_end, word};
+        have_current = true;
       }
     }
-    flush_word();
-    if (!cur.empty()) chunks.push_back(cur);
-    if (chunks.empty()) chunks.push_back(text);
+    flush_current();
+    if (chunks.empty()) chunks.push_back({0, text.size(), text});
   };
 
-  std::vector<std::string> chunks;
+  std::vector<Chunk> chunks;
   for (size_t i = 0; i < lines.size(); ++i) {
     wrap(lines[i].text, chunks);
-    int64_t end = (i + 1 < lines.size()) ? lines[i + 1].t_ms : lines[i].t_ms + 6000;
+    const int64_t end = (i + 1 < lines.size())
+                            ? lines[i + 1].t_ms
+                            : add_time_saturated(lines[i].t_ms, 6000);
     for (size_t k = 0; k < chunks.size(); ++k) {
-      DispLine dl;
-      dl.start_ms = lines[i].t_ms;
-      dl.end_ms = end;
-      dl.text = chunks[k];
-      dl.cont = (k > 0);
-      out.push_back(std::move(dl));
+      const Chunk& chunk = chunks[k];
+      DispLine display;
+      display.start_ms = lines[i].t_ms;
+      display.end_ms = end;
+      display.text = chunk.text;
+      display.cont = (k > 0);
+      for (const LyricSegment& segment : lines[i].segments) {
+        const size_t begin = std::max(segment.begin, chunk.begin);
+        const size_t finish = std::min(segment.end, chunk.end);
+        if (finish > begin) {
+          display.segments.push_back(
+              {segment.t_ms, begin - chunk.begin, finish - chunk.begin});
+        }
+      }
+      out.push_back(std::move(display));
     }
   }
   return out;
@@ -1034,12 +1359,27 @@ int active_index(const std::vector<DispLine>& lines, int64_t pos_ms) {
     }
   }
   if (lo == 0) return -1;
-  size_t idx = lo - 1;
-  // Wrapped continuations share the start time: report the first chunk.
-  while (idx > 0 && lines[idx].cont && lines[idx - 1].start_ms == lines[idx].start_ms) {
-    --idx;
+  size_t group_end = lo - 1;
+  size_t group_begin = group_end;
+  while (group_begin > 0 && lines[group_begin].cont &&
+         lines[group_begin - 1].start_ms == lines[group_begin].start_ms) {
+    --group_begin;
   }
-  return static_cast<int>(idx);
+
+  // Ordinary timed lines keep the first wrapped row active. With genuine
+  // Enhanced LRC segments, advance the active row to the chunk containing the
+  // latest segment marker reached so long, wrapped lines remain navigable.
+  size_t selected = group_begin;
+  int64_t latest_segment_ms = -1;
+  for (size_t row = group_begin; row <= group_end; ++row) {
+    for (const LyricSegment& segment : lines[row].segments) {
+      if (segment.t_ms <= pos_ms && segment.t_ms > latest_segment_ms) {
+        latest_segment_ms = segment.t_ms;
+        selected = row;
+      }
+    }
+  }
+  return static_cast<int>(selected);
 }
 
 double line_progress(const std::vector<DispLine>& lines, int index, int64_t pos_ms) {
@@ -1101,7 +1441,16 @@ int64_t interpolate_pos(int64_t anchor_ms, int64_t anchor_at_ms, int64_t now_ms,
                         bool playing, int64_t duration_ms) {
   int64_t pos = anchor_ms;
   if (playing && now_ms > anchor_at_ms) {
-    pos += (now_ms - anchor_at_ms);
+    // Subtract in unsigned space so extreme signed anchors cannot overflow.
+    const uint64_t elapsed = static_cast<uint64_t>(now_ms) -
+                             static_cast<uint64_t>(anchor_at_ms);
+    const int64_t max_value = std::numeric_limits<int64_t>::max();
+    if (elapsed > static_cast<uint64_t>(max_value) ||
+        pos > max_value - static_cast<int64_t>(elapsed)) {
+      pos = max_value;
+    } else {
+      pos += static_cast<int64_t>(elapsed);
+    }
   }
   if (pos < 0) pos = 0;
   if (duration_ms > 0 && pos > duration_ms) pos = duration_ms;
