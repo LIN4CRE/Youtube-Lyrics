@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Troubleshooting and support
+    url: https://github.com/LIN4CRE/Youtube-Lyrics/blob/main/SUPPORT.md
+    about: Check common playback, timing, and installation issues before opening a report.
+  - name: Security reporting policy
+    url: https://github.com/LIN4CRE/Youtube-Lyrics/blob/main/SECURITY.md
+    about: Follow the private reporting instructions; do not publish exploit details in a public issue.

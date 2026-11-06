@@ -54,6 +54,35 @@ struct JValue {
 // Returns false on malformed input, invalid UTF-8, or trailing non-whitespace.
 bool json_parse(const std::string& src, JValue& out);
 
+// Strict stable semantic versions used by the release updater. An optional
+// leading 'v' is accepted for Git tags; prerelease/build suffixes are rejected.
+struct StableVersion {
+  uint64_t major = 0;
+  uint64_t minor = 0;
+  uint64_t patch = 0;
+};
+bool parse_stable_version(const std::string& text, StableVersion& out);
+// Returns -1, 0, or 1 using semantic-version numeric precedence.
+int compare_stable_versions(const StableVersion& a, const StableVersion& b);
+
+struct ReleaseMetadata {
+  std::string repository;
+  std::string tag;
+  std::string version;
+  std::string channel;
+  std::string architecture;
+  std::string asset;
+  std::string sha256;
+  uint64_t size_bytes = 0;
+};
+// Parses the small release.json attached to stable GitHub Releases and rejects
+// mismatched tag/version, architecture, asset name, repo, or checksum data.
+bool parse_release_metadata(const std::string& json,
+                            const std::string& expected_repository,
+                            ReleaseMetadata& out);
+// Parses the common `sha256  YoutubeLyrics.exe` sidecar format.
+bool parse_sha256_sidecar(const std::string& text, std::string& sha256);
+
 // ------------------------------------------------------------------- lyrics
 
 struct LyricSegment {

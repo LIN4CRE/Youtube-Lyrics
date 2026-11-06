@@ -1,5 +1,15 @@
 <div align="center">
 
+<a href="https://github.com/LIN4CRE/Youtube-Lyrics/releases/latest/download/YoutubeLyrics.exe"><img src="docs/brand/badge-download.png" alt="Download YoutubeLyrics.exe — version 1.4.0 for Windows x64"></a>
+&nbsp; · &nbsp;
+<a href="https://paypal.me/delinacre16"><img src="docs/brand/badge-support.png" alt="Help me out via PayPal"></a>
+
+<br>
+
+<strong>Windows 10 / 11 · 64-bit · Portable · No installer</strong>
+
+<br><br>
+
 <img src="docs/brand/banner.png" alt="Youtube-Lyrics — full-screen desktop lyrics for Windows 10 and 11" width="100%">
 
 <br>
@@ -7,18 +17,18 @@
 **YouTube Music gives you a thin strip of small text at the side of the screen.**
 **This gives you the whole screen, one lit line at a time.**
 
-A single Windows executable that lives behind your desktop icons and follows
-Windows' current music session, prioritizing what is playing while retaining its
-current paused track. It never takes focus or catches clicks; the desktop stays
-usable while lyrics sit quietly in the background. LRCLIB search results are
-matched before display; lyrics.ovh is an untimed fallback without response-side
-track metadata.
+A single Windows executable that follows Windows' current music session,
+prioritizing what is playing while retaining its current paused track. In desktop
+wallpaper mode it sits behind the icons, does not take focus, and passes clicks
+through. Three original cinematic backgrounds are bundled, with rotation and
+readability preferences. LRCLIB results are matched before display; lyrics.ovh is
+an untimed fallback without response-side track metadata.
 
-[![Download](docs/brand/badge-download.png)][download]
 [![Windows 10 / 11](docs/brand/badge-platform.png)](#requirements)
 [![MIT](docs/brand/badge-licence.png)](LICENSE)
+[![CI](https://github.com/LIN4CRE/Youtube-Lyrics/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/LIN4CRE/Youtube-Lyrics/actions/workflows/ci.yml)
 
-[**Download YoutubeLyrics.exe**][download] · [Interactive design preview (simulated)](docs/preview.html) · [Shortcuts](#keyboard) · [Troubleshooting](#if-something-is-off)
+[**Download YoutubeLyrics.exe**][download] · [Help out via PayPal][support] · [Interactive design preview (simulated)](docs/preview.html) · [Shortcuts](#keyboard) · [Troubleshooting](#if-something-is-off)
 
 </div>
 
@@ -28,17 +38,35 @@ track metadata.
 
 <br>
 
-## Why this exists
+## About Youtube-Lyrics
 
-YouTube Music's lyrics panel has three problems: it is a narrow column on the
-right, the text is small, and **nothing tells you which line you are on**. If you
-are singing along — or learning a song in another language, or playing live —
-that is the only information you actually need.
+Youtube-Lyrics is a free, open-source Windows desktop app that follows the
+active media session and puts readable, timed lyrics on the desktop. It is a
+native C++/Win32 executable—not a browser wrapper, YouTube Music modification,
+video wallpaper, or background web page. It uses Explorer's WorkerW desktop layer
+when available, passes clicks through, and can switch to an ordinary
+window/full-screen view. WorkerW integration has not yet been runtime-tested on
+Windows in this build environment.
 
-Youtube-Lyrics is not a YouTube Music mod, extension, or wrapper. It reads the
-Windows media session (the same metadata behind the volume-key overlay) and draws
-its own display, so it works with any player that reports to Windows, and it
-never touches the browser.
+It reads the track metadata Windows already publishes for media controls; it
+does not capture or record audio, and it sends no telemetry. Lyrics are looked
+up from LRCLIB, with an untimed lyrics.ovh fallback and optional local `.lrc` or
+`.txt` files. The project is licensed under MIT.
+
+YouTube Music's built-in lyrics panel is a narrow column, its text can be small,
+and it does not always make the active line obvious. Youtube-Lyrics gives the
+current line a clear visual focus, for singing along, learning a song, or
+playing live. It works with media players that publish a Windows media session;
+not every player does.
+
+### Logo and icon
+
+The original lyric-sheet mark is used throughout the app and project: [scalable
+wordmark](docs/brand/logo.svg), [vector mark](docs/brand/mark.svg), [multi-size
+Windows icon for shortcuts](docs/brand/YoutubeLyrics.ico), and PNG assets for the
+app icon, repository avatar, and banner. `scripts/brand.py` and
+`scripts/make_icon.py` generate them from the same ink-and-amber design; the
+Windows executable embeds that same multi-size icon.
 
 <br>
 
@@ -52,8 +80,10 @@ never touches the browser.
 | **Smooth, not twitchy** | Lines scroll on a spring, so a fast chorus glides instead of jolting. Gaps of 3 s or more get extra breathing room, so verses and choruses separate themselves. |
 | **Four themes, one of them honest** | Midnight (ink and amber, the default), Aurora, Ember, Mono. `T` cycles; the choice is remembered. |
 | **Cover art, if you want it** | The album cover, aspect-filled and heavily darkened behind the text. `C` toggles. |
-| **A real desktop layer** | Sits behind desktop icons and ordinary windows, without taking focus or intercepting clicks. `Ctrl+Alt+W` switches wallpaper mode; `Ctrl+Alt+L` hides or restores it. |
+| **A real desktop layer** | Uses Explorer's WorkerW desktop surface when available; it does not take focus or intercept clicks. `Ctrl+Alt+W` switches wallpaper mode; `Ctrl+Alt+L` hides or restores it. A bottom-of-z-order fallback is used if WorkerW cannot be found. |
 | **The right media session** | A playing session takes priority; Windows' current known music session remains visible while paused, with its position frozen. Stopped sessions are ignored, track changes are confirmed across polls, and lyrics are checked against title, artist and duration. |
+| **Bundled scenes** | Three original procedural cinematic wallpapers ship inside the executable. Cycle them, choose random launch, set rotation, and adjust darkness from the tray. |
+| **Stable updates** | Checks the project's stable GitHub Releases at startup; it asks before downloading and verifies the manifest, SHA-256, size, and x64 executable before staging. No background service. |
 | **Out of the way** | Runs in the tray; use the global hotkeys or the tray menu. Turn wallpaper mode off to use the normal full-screen/windowed display. |
 | **Offline after the first play** | Lyrics are cached per track on disk. Replay a song on a plane and it still works. |
 
@@ -61,10 +91,18 @@ never touches the browser.
 
 ## Install
 
-1. **[Download `YoutubeLyrics.exe`][download]** — one file, about 555 KiB.
+1. **[Download `YoutubeLyrics.exe`][download]** — one portable Windows x64 file; the current size and SHA-256 are shown below.
 2. Put it anywhere: Desktop, `%LOCALAPPDATA%`, a USB stick. It is portable and
    writes nothing outside its own folder and `%LOCALAPPDATA%\YouTubeLyrics`.
-3. Double-click it, then play something. No terminal or installer is needed.
+3. Double-click it, then play something. No installer or administrator rights are needed.
+
+Optional integrity check (PowerShell):
+
+```powershell
+Get-FileHash .\YoutubeLyrics.exe -Algorithm SHA256
+```
+
+Expected SHA-256 for the current 1.4.0 download is listed in [`YoutubeLyrics.exe.sha256`](docs/downloads/YoutubeLyrics.exe.sha256) and beside the download on the [project website](https://lin4cre.github.io/Youtube-Lyrics/). Compare it before running the file. The checksum is served by GitHub over HTTPS; it is an integrity check, not a code signature.
 
 Windows may show **"Windows protected your PC"** because the file is not
 code-signed. The source is public; continue only if you trust the download. If
@@ -81,12 +119,15 @@ ships with Windows.
 
 ## Using it
 
-The default is desktop-wallpaper mode: the display stays behind desktop icons,
-never takes focus, and passes clicks through. `Ctrl+Alt+W` switches between that
-and the normal full-screen display; `Ctrl+Alt+L` hides or restores it from any
-app. In normal display mode, `F11` toggles full screen/windowed and `Esc` leaves
-full screen, then hides to the tray. `F1` shows shortcuts and the raw media-session
-state when the window is focused.
+The default is desktop-wallpaper mode: the display attempts to sit on Explorer's
+WorkerW desktop layer behind desktop icons, never takes focus, and passes clicks
+through. If WorkerW is unavailable, it falls back to the bottom of the normal
+window z-order. `Ctrl+Alt+W` switches between that and the normal display;
+`Ctrl+Alt+L` hides or restores it from any app. The wallpaper behavior still
+needs runtime verification on Windows. In normal display mode, `F11` toggles
+full screen/windowed and `Esc` leaves full screen, then hides to the tray. `F1`
+shows shortcuts and the
+raw media-session state when the window is focused.
 
 <a id="keyboard"></a>
 
@@ -100,8 +141,32 @@ state when the window is focused.
 | `↑` `↓` | Bigger / smaller text | | `T` | Theme |
 | `←` `→` | Shift lyric timing ±0.25 s | | `F1` `H` | Help overlay |
 
-Double-clicking toggles full screen. Everything above is also in the tray
-icon's right-click menu, and every setting is saved as you change it.
+Double-clicking toggles full screen. The tray icon's right-click menu includes
+the same controls, wallpaper preferences, an About dialog, a manual stable-update
+check, and an optional “Help out via PayPal” link. Display settings are saved as
+you change them.
+
+### Desktop scenes
+
+Three locally generated, original 1600×900 scenes (City Rain, Mountain Night, and
+Forest Mist) are embedded in the executable; there are no hotlinked or third-party
+wallpapers. Press `B` or choose **Next cinematic wallpaper** in the tray menu to
+cycle them. Automatic rotation and a random wallpaper on launch are enabled by
+default; the tray menu can turn either off, cycle the rotation interval (15, 30,
+or 60 minutes), and change background darkness (0%, 12%, 24%, or 36%). These
+preferences are stored locally.
+
+### Stable updates
+
+At startup the app quietly checks the project's latest **stable GitHub Release**.
+If there is a newer version, it asks before downloading; use **Check for updates**
+in the tray menu to check manually. The update must match the repository, stable
+tag/version, x64 architecture, executable name, and declared size. The app compares
+the release manifest with the separate SHA-256 file, verifies the downloaded
+bytes and 64-bit PE header, stages the file, and uses a replacement helper with a
+rollback path. It does not install previews or run a background service. The
+checksum is obtained over HTTPS from GitHub; it is not a substitute for a
+code-signing certificate.
 
 <br>
 
@@ -145,10 +210,17 @@ src/core/          portable logic: LRC parsing, JSON, track-name cleaning,
 src/win/           Win32 window, tray, GDI+ renderer, WinHTTP, media listener
 src/win/smtc.ps1   the PowerShell media-session listener (embedded in the exe)
 scripts/build.sh   cross-compiles to dist/YoutubeLyrics.exe
+scripts/generate_release.py creates strict stable-release metadata and checksum
 docs/index.html    responsive no-terminal download page for GitHub Pages
-AUDIT.md           engineering audit, verification, release status and next steps
-docs/downloads/    direct download of the current Windows executable
-scripts/brand.py   draws the icon, banner and preview art from code
+docs/brand/        custom icon, vector logo, banner, badges and Windows .ico
+src/win/wallpapers/ original procedural desktop scenes embedded in the app
+AUDIT.md           engineering audit, verification, and residual risks
+docs/downloads/    public Windows executable and SHA-256 sidecar
+.github/           CI, stable release, Pages deploy, issue forms and funding
+CHANGELOG.md       user-visible version history
+CONTRIBUTING.md    build, test and contribution guidance
+SECURITY.md        private vulnerability-reporting guidance
+scripts/brand.py   draws the icon, logo, banner and preview art from code
 scripts/test.sh    builds and runs the core tests under ASan/UBSan
 docs/preview.html  an interactive browser mock of the display
 ```
@@ -259,6 +331,18 @@ will not work. The display itself still runs.
 
 <br>
 
+## Help out
+
+If Youtube-Lyrics is useful to you, you can support its ongoing development
+through PayPal. Contributions are completely optional: the app will stay free,
+open source, and usable without a donation.
+
+<div align="center">
+<a href="https://paypal.me/delinacre16"><img src="docs/brand/badge-support.png" alt="Help me out via PayPal"></a>
+</div>
+
+<br>
+
 ## Licence
 
 MIT — do what you like with it. The lyrics themselves belong to their writers
@@ -271,6 +355,7 @@ Space Grotesk, JetBrains Mono, Inter).
 <sub>Built for people who would rather look at the song than at a column.</sub>
 </div>
 
-[download]: https://raw.githubusercontent.com/LIN4CRE/Youtube-Lyrics/refs/heads/main/docs/downloads/YoutubeLyrics.exe
+[download]: https://github.com/LIN4CRE/Youtube-Lyrics/releases/latest/download/YoutubeLyrics.exe
+[support]: https://paypal.me/delinacre16
 [lrclib]: https://lrclib.net
 [zig]: https://ziglang.org

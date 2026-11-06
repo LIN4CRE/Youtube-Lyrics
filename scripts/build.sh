@@ -14,6 +14,7 @@ OUT_DIR="dist"
 BUILD_DIR=".build"
 
 mkdir -p "$OUT_DIR" "$BUILD_DIR"
+"$PYTHON" scripts/generate_version.py
 
 # 1. Embed the PowerShell media helper into the binary as a raw string literal.
 "$PYTHON" - <<'PY'
@@ -29,7 +30,7 @@ PY
 RES_ARG=""
 if "$PYTHON" -c 'import PIL' 2>/dev/null; then
   "$PYTHON" scripts/make_icon.py "$BUILD_DIR"
-  if "$ZIG" rc /i "$BUILD_DIR" src/win/app.rc "$BUILD_DIR/app.res"; then
+  if "$ZIG" rc /i "$BUILD_DIR" /i src/win src/win/app.rc "$BUILD_DIR/app.res"; then
     RES_ARG="$BUILD_DIR/app.res"
   else
     echo "warning: resource compilation failed, building without an icon"
@@ -51,12 +52,23 @@ fi
   src/win/render.cc \
   src/win/media.cc \
   src/win/lyrics.cc \
+  src/win/update.cc \
   $RES_ARG \
   -lgdiplus -lgdi32 -luser32 -lole32 -luuid -lshell32 -lshlwapi -ldwmapi \
-  -lwinhttp -lcomdlg32 -ladvapi32
+  -lwinhttp -lcomdlg32 -ladvapi32 -lbcrypt -lcomctl32
 
 # Some Zig/MinGW versions leave an unused import archive beside the executable.
 rm -f "$OUT_DIR/core.lib"
 
-echo "built $OUT_DIR/YoutubeLyrics.exe"
+# Keep the public raw-GitHub download byte-identical to the verified local build.
+cp "$OUT_DIR/YoutubeLyrics.exe" docs/downloads/YoutubeLyrics.exe
+if command -v sha256sum >/dev/null 2>&1; then
+  HASH="$(sha256sum "$OUT_DIR/YoutubeLyrics.exe" | awk '{print $1}')"
+else
+  HASH="$(shasum -a 256 "$OUT_DIR/YoutubeLyrics.exe" | awk '{print $1}')"
+fi
+printf '%s  YoutubeLyrics.exe\n' "$HASH" > docs/downloads/YoutubeLyrics.exe.sha256
+
+echo "built $OUT_DIR/YoutubeLyrics.exe ($(wc -c < "$OUT_DIR/YoutubeLyrics.exe") bytes)"
+echo "SHA-256: $HASH"
 ls -la "$OUT_DIR/YoutubeLyrics.exe"

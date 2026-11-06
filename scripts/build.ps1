@@ -8,6 +8,8 @@ $zig = if ($env:ZIG) { $env:ZIG } else { 'zig' }
 $python = if ($env:PYTHON) { $env:PYTHON } else { 'python' }
 
 New-Item -ItemType Directory -Force -Path dist, .build | Out-Null
+& $python scripts/generate_version.py
+if ($LASTEXITCODE -ne 0) { throw 'version generation failed' }
 
 # 1. Embed the PowerShell helper as a C++ raw string literal.
 & $python -c @"
@@ -22,7 +24,7 @@ open('.build/smtc_script.h', 'w', encoding='utf-8').write(out)
 $res = @()
 try {
     & $python scripts/make_icon.py .build
-    & $zig rc /i .build src/win/app.rc .build/app.res
+    & $zig rc /i .build /i src/win src/win/app.rc .build/app.res
     if ($LASTEXITCODE -eq 0) { $res = @('.build/app.res') }
 } catch { Write-Host 'note: building without an embedded icon' }
 
@@ -32,10 +34,14 @@ try {
     -municode -Wl,--subsystem,windows -Wl,--gc-sections `
     -fno-exceptions -fno-rtti -fno-strict-aliasing `
     -I.build -o dist/YoutubeLyrics.exe `
-    src/core/core.cc src/win/app.cc src/win/render.cc src/win/media.cc src/win/lyrics.cc `
+    src/core/core.cc src/win/app.cc src/win/render.cc src/win/media.cc src/win/lyrics.cc src/win/update.cc `
     @res `
     -lgdiplus -lgdi32 -luser32 -lole32 -luuid -lshell32 -lshlwapi -ldwmapi `
-    -lwinhttp -lcomdlg32 -ladvapi32
+    -lwinhttp -lcomdlg32 -ladvapi32 -lbcrypt -lcomctl32
 if ($LASTEXITCODE -ne 0) { throw 'compile failed' }
 Remove-Item -Force -ErrorAction SilentlyContinue dist/core.lib
-Write-Host "built dist\YoutubeLyrics.exe"
+Copy-Item -Force dist/YoutubeLyrics.exe docs/downloads/YoutubeLyrics.exe
+$hash = (Get-FileHash dist/YoutubeLyrics.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+Set-Content -NoNewline -Encoding ascii docs/downloads/YoutubeLyrics.exe.sha256 "$hash  YoutubeLyrics.exe`n"
+Write-Host "built dist\YoutubeLyrics.exe ($((Get-Item dist/YoutubeLyrics.exe).Length) bytes)"
+Write-Host "SHA-256: $hash"

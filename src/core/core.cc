@@ -237,6 +237,98 @@ double JValue::get_num(const char* key, double def) const {
   return def;
 }
 
+bool parse_stable_version(const std::string& text, StableVersion& out) {
+  size_t i = 0;
+  if (!text.empty() && text[0] == 'v') i = 1;
+  StableVersion parsed;
+  uint64_t* parts[3] = {&parsed.major, &parsed.minor, &parsed.patch};
+  for (int part = 0; part < 3; ++part) {
+    const size_t start = i;
+    if (i >= text.size() || text[i] < '0' || text[i] > '9') return false;
+    uint64_t value = 0;
+    while (i < text.size() && text[i] >= '0' && text[i] <= '9') {
+      const unsigned digit = static_cast<unsigned>(text[i] - '0');
+      if (value > (std::numeric_limits<uint64_t>::max() - digit) / 10) return false;
+      value = value * 10 + digit;
+      ++i;
+    }
+    if (i - start > 1 && text[start] == '0') return false;
+    *parts[part] = value;
+    if (part < 2) {
+      if (i >= text.size() || text[i] != '.') return false;
+      ++i;
+    }
+  }
+  if (i != text.size()) return false;
+  out = parsed;
+  return true;
+}
+
+int compare_stable_versions(const StableVersion& a, const StableVersion& b) {
+  if (a.major != b.major) return a.major < b.major ? -1 : 1;
+  if (a.minor != b.minor) return a.minor < b.minor ? -1 : 1;
+  if (a.patch != b.patch) return a.patch < b.patch ? -1 : 1;
+  return 0;
+}
+
+bool parse_release_metadata(const std::string& json,
+                            const std::string& expected_repository,
+                            ReleaseMetadata& out) {
+  JValue root;
+  if (!json_parse(json, root) || !root.is_object() || expected_repository.empty() ||
+      root.get_num("schema_version", 0) != 1.0)
+    return false;
+
+  ReleaseMetadata parsed;
+  parsed.repository = root.get_str("repository");
+  parsed.tag = root.get_str("tag");
+  parsed.version = root.get_str("version");
+  parsed.channel = root.get_str("channel");
+  parsed.architecture = root.get_str("architecture");
+  parsed.asset = root.get_str("asset");
+  parsed.sha256 = to_lower_ascii(root.get_str("sha256"));
+  const JValue* size_value = root.find("size_bytes");
+  if (!size_value || !size_value->is_number() || !std::isfinite(size_value->num) ||
+      size_value->num < 1 || size_value->num > (64u << 20) ||
+      std::floor(size_value->num) != size_value->num)
+    return false;
+  parsed.size_bytes = static_cast<uint64_t>(size_value->num);
+
+  StableVersion tag_version, manifest_version;
+  if (parsed.tag.size() < 2 || parsed.tag[0] != 'v' ||
+      !parse_stable_version(parsed.tag.substr(1), tag_version) ||
+      !parse_stable_version(parsed.version, manifest_version) ||
+      compare_stable_versions(tag_version, manifest_version) != 0 ||
+      parsed.repository != expected_repository || parsed.channel != "stable" ||
+      parsed.architecture != "x64" || parsed.asset != "YoutubeLyrics.exe" ||
+      parsed.sha256.size() != 64)
+    return false;
+  for (unsigned char c : parsed.sha256) {
+    if (!std::isxdigit(c)) return false;
+  }
+  out = std::move(parsed);
+  return true;
+}
+
+bool parse_sha256_sidecar(const std::string& text, std::string& sha256) {
+  const std::string value = trim(text);
+  if (value.size() < 64) return false;
+  const std::string hash = to_lower_ascii(value.substr(0, 64));
+  for (unsigned char c : hash) {
+    if (!std::isxdigit(c)) return false;
+  }
+  if (value.size() > 64) {
+    if (value[64] != ' ' && value[64] != '\t' && value[64] != '\r' &&
+        value[64] != '\n')
+      return false;
+    std::string name = trim(value.substr(64));
+    if (!name.empty() && name[0] == '*') name.erase(0, 1);
+    if (!name.empty() && name != "YoutubeLyrics.exe") return false;
+  }
+  sha256 = hash;
+  return true;
+}
+
 namespace {
 
 struct JsonParser {

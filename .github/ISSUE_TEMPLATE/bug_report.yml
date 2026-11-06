@@ -1,0 +1,54 @@
+name: Bug report
+description: Report a reproducible problem with the Windows app.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please check the README troubleshooting section first. Do not attach copyrighted lyrics or unredacted logs; logs may contain track titles and artist names.
+  - type: input
+    id: version
+    attributes:
+      label: Youtube-Lyrics version
+      description: Find the version in Windows file properties or the tray menu's About item.
+      placeholder: 1.4.0
+    validations:
+      required: true
+  - type: dropdown
+    id: windows
+    attributes:
+      label: Windows version
+      options:
+        - Windows 10 (1809 or newer)
+        - Windows 11
+        - Other / unsure
+    validations:
+      required: true
+  - type: input
+    id: player
+    attributes:
+      label: Player and playback state
+      description: For example, YouTube Music in Chrome, Spotify, or a local player; say whether it was playing or paused.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: 1. Start playback…
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional context
+      description: Include relevant details only. Redact personal paths, private track history, and other identifying information.
+    validations:
+      required: false

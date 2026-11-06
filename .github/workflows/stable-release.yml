@@ -1,0 +1,105 @@
+name: Stable release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Stable tag to publish from the selected branch (for example v1.4.0)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: stable-release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish the Windows x64 stable release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Check out the tagged or selected source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Validate the stable version and tag
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          version = Path('VERSION').read_text(encoding='ascii').strip()
+          tag = os.environ['INPUT_TAG'] if os.environ['EVENT_NAME'] == 'workflow_dispatch' else os.environ['REF_NAME']
+          if not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', version):
+              raise SystemExit(f'VERSION is not stable semantic versioning: {version!r}')
+          if tag != f'v{version}':
+              raise SystemExit(f'refuses to publish: tag {tag!r} does not match VERSION {version!r}')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write(f'tag={tag}\nversion={version}\n')
+          print(f'validated stable release {tag}')
+          PY
+
+      - name: Run portable and release-metadata tests
+        run: ./scripts/test.sh
+
+      - name: Install pinned Windows cross-build tools
+        run: python3 -m pip install --disable-pip-version-check ziglang==0.17.1 Pillow==13.0.0
+
+      - name: Build the Windows x64 executable
+        shell: bash
+        run: |
+          ZIG="$(python3 -c 'import pathlib, ziglang; print(pathlib.Path(ziglang.__file__).with_name("zig"))')"
+          ZIG="$ZIG" PYTHON=python3 ./scripts/build.sh
+
+      - name: Verify the executable and create release metadata
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          image = Path('dist/YoutubeLyrics.exe').read_bytes()
+          assert image[:2] == b'MZ', 'missing DOS/PE header'
+          pe = int.from_bytes(image[0x3c:0x40], 'little')
+          assert image[pe:pe + 4] == b'PE\0\0', 'invalid PE signature'
+          machine = int.from_bytes(image[pe + 4:pe + 6], 'little')
+          assert machine == 0x8664, f'expected x86-64 PE, got 0x{machine:04x}'
+          print(f'validated x86-64 Windows executable ({len(image):,} bytes)')
+          PY
+          python3 scripts/generate_release.py \
+            --exe dist/YoutubeLyrics.exe \
+            --output-dir .build/release \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG"
+
+      - name: Publish stable assets to GitHub Releases
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            dist/YoutubeLyrics.exe \
+            .build/release/release.json \
+            .build/release/YoutubeLyrics.exe.sha256 \
+            --title "Youtube-Lyrics $RELEASE_VERSION" \
+            --generate-notes \
+            --latest \
+            --target "$GITHUB_SHA"
