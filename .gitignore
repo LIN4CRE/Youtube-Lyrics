@@ -4,6 +4,7 @@ node_modules/
 *.pdb
 *.obj
 *.o
+dist/*.lib
 .DS_Store
 __pycache__/
 *.pyc

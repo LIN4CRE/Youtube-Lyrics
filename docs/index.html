@@ -1,7 +1,335 @@
-<!DOCTYPE html>
-<html><head><meta charset="utf-8">
-<meta http-equiv="refresh" content="0; url=preview.html">
-<title>Youtube-Lyrics preview</title></head>
-<body style="background:#06060a;color:#ddd;font-family:system-ui;padding:40px">
-<a style="color:#9d8bff" href="preview.html">Open the full-screen display preview →</a>
-</body></html>
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0b0c10" />
+    <meta
+      name="description"
+      content="Download Youtube-Lyrics for Windows: a portable desktop lyrics display with one bright, time-synced line at a time."
+    />
+    <title>Youtube-Lyrics — lyrics for the whole room</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b0c10;
+        --panel: #13151b;
+        --panel-soft: #191b21;
+        --text: #f5f1e8;
+        --muted: #c3c2c5;
+        --line: #34353b;
+        --amber: #ffc46c;
+        --amber-dark: #21170c;
+        --green: #b7e7c5;
+        font-family: Inter, "Segoe UI", system-ui, -apple-system, sans-serif;
+        font-synthesis: none;
+        text-rendering: optimizeLegibility;
+      }
+
+      * { box-sizing: border-box; }
+      html { scroll-behavior: smooth; }
+      body {
+        min-width: 320px;
+        margin: 0;
+        background:
+          radial-gradient(ellipse at 15% 0%, rgb(104 70 30 / 18%), transparent 38rem),
+          radial-gradient(ellipse at 92% 28%, rgb(67 70 106 / 13%), transparent 34rem),
+          var(--bg);
+        color: var(--text);
+        line-height: 1.6;
+      }
+
+      a { color: var(--amber); text-underline-offset: 0.2em; }
+      a:hover { color: #ffdb9c; }
+      a:focus-visible { outline: 3px solid var(--amber); outline-offset: 4px; border-radius: 4px; }
+      img { display: block; max-width: 100%; }
+      .skip-link {
+        position: absolute;
+        z-index: 2;
+        top: 0.75rem;
+        left: 0.75rem;
+        padding: 0.7rem 1rem;
+        transform: translateY(-160%);
+        border-radius: 0.5rem;
+        background: var(--text);
+        color: var(--bg);
+        font-weight: 700;
+      }
+      .skip-link:focus { transform: translateY(0); }
+
+      .shell { width: min(1120px, calc(100% - 40px)); margin-inline: auto; }
+      .topbar {
+        display: flex;
+        min-height: 82px;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1.25rem;
+        border-bottom: 1px solid rgb(255 255 255 / 9%);
+      }
+      .brand { display: inline-flex; align-items: center; gap: 0.8rem; color: var(--text); text-decoration: none; }
+      .brand img { width: 38px; height: 38px; object-fit: contain; }
+      .brand span { font-size: 0.98rem; font-weight: 750; letter-spacing: 0.01em; }
+      nav { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.5rem 1.35rem; }
+      nav a { color: var(--muted); font-size: 0.9rem; text-decoration: none; }
+      nav a:hover { color: var(--text); }
+
+      .hero { padding: clamp(3rem, 8vw, 6rem) 0 3.2rem; }
+      .hero-copy { max-width: 780px; }
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.55rem;
+        margin: 0 0 1rem;
+        color: var(--amber);
+        font-size: 0.8rem;
+        font-weight: 750;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+      .eyebrow::before { width: 7px; height: 7px; border-radius: 50%; background: var(--amber); content: ""; }
+      h1 {
+        max-width: 760px;
+        margin: 0;
+        font-size: clamp(2.7rem, 7.5vw, 5.5rem);
+        font-weight: 650;
+        letter-spacing: -0.065em;
+        line-height: 0.99;
+      }
+      .lead { max-width: 660px; margin: 1.5rem 0 0; color: var(--muted); font-size: clamp(1.08rem, 2.1vw, 1.3rem); }
+      .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.8rem; margin-top: 2rem; }
+      .button {
+        display: inline-flex;
+        min-height: 54px;
+        align-items: center;
+        justify-content: center;
+        gap: 0.65rem;
+        padding: 0.8rem 1.15rem;
+        border: 1px solid transparent;
+        border-radius: 0.72rem;
+        background: var(--amber);
+        color: #21170c;
+        font-size: 0.98rem;
+        font-weight: 800;
+        text-align: center;
+        text-decoration: none;
+        transition: transform 140ms ease, background-color 140ms ease;
+      }
+      .button:hover { transform: translateY(-1px); background: #ffd28b; color: #21170c; }
+      .button svg { flex: none; }
+      .button.secondary { border-color: var(--line); background: var(--panel); color: var(--text); }
+      .button.secondary:hover { background: var(--panel-soft); }
+      .file-note { margin: 0.95rem 0 0; color: var(--muted); font-size: 0.9rem; }
+      .file-note strong { color: var(--text); font-weight: 650; }
+
+      .preview {
+        margin: 1rem 0 0;
+        padding: clamp(0.5rem, 1.5vw, 1rem);
+        border: 1px solid rgb(255 255 255 / 11%);
+        border-radius: 1rem;
+        background: linear-gradient(145deg, rgb(255 255 255 / 5%), rgb(255 255 255 / 1%));
+        box-shadow: 0 28px 100px rgb(0 0 0 / 34%);
+      }
+      .preview img { width: 100%; border-radius: 0.55rem; }
+      .preview figcaption { padding: 0.7rem 0.35rem 0.1rem; color: var(--muted); font-size: 0.83rem; }
+
+      section { scroll-margin-top: 1.5rem; }
+      .section-heading { max-width: 700px; margin-bottom: 1.4rem; }
+      .section-heading h2 { margin: 0; font-size: clamp(1.7rem, 4vw, 2.45rem); letter-spacing: -0.035em; line-height: 1.15; }
+      .section-heading p { margin: 0.65rem 0 0; color: var(--muted); }
+      .features { padding: 3.5rem 0; }
+      .feature-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.85rem; }
+      .feature {
+        min-height: 175px;
+        padding: 1.2rem;
+        border: 1px solid rgb(255 255 255 / 9%);
+        border-radius: 0.8rem;
+        background: rgb(19 21 27 / 78%);
+      }
+      .feature-mark { color: var(--amber); font-size: 0.78rem; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; }
+      .feature h3 { margin: 0.65rem 0 0.35rem; font-size: 1.05rem; }
+      .feature p { margin: 0; color: var(--muted); font-size: 0.91rem; }
+
+      .install { padding: 2.5rem 0 4rem; }
+      .install-card {
+        display: grid;
+        grid-template-columns: minmax(0, 1.3fr) minmax(250px, 0.7fr);
+        gap: 2rem;
+        padding: clamp(1.3rem, 4vw, 2.2rem);
+        border: 1px solid rgb(255 255 255 / 10%);
+        border-radius: 1rem;
+        background: linear-gradient(135deg, #17181e, #101116);
+      }
+      .steps { display: grid; gap: 1rem; margin: 1.35rem 0 0; padding: 0; list-style: none; counter-reset: step; }
+      .steps li { position: relative; min-height: 2rem; padding-left: 2.6rem; color: var(--muted); counter-increment: step; }
+      .steps li::before {
+        position: absolute;
+        top: 0.05rem;
+        left: 0;
+        display: grid;
+        width: 1.85rem;
+        height: 1.85rem;
+        place-items: center;
+        border: 1px solid #655235;
+        border-radius: 50%;
+        background: var(--amber-dark);
+        color: var(--amber);
+        content: counter(step);
+        font-size: 0.85rem;
+        font-weight: 800;
+      }
+      .steps strong { color: var(--text); }
+      .warning {
+        align-self: start;
+        padding: 1.1rem;
+        border: 1px solid #6b5636;
+        border-radius: 0.75rem;
+        background: rgb(255 196 108 / 7%);
+      }
+      .warning h3 { margin: 0; color: #ffe0b3; font-size: 1rem; }
+      .warning p { margin: 0.6rem 0 0; color: #ded0bd; font-size: 0.9rem; }
+      .privacy { margin: 1.15rem 0 0; color: var(--muted); font-size: 0.9rem; }
+
+      footer { padding: 1.5rem 0 2.5rem; border-top: 1px solid rgb(255 255 255 / 9%); color: var(--muted); font-size: 0.88rem; }
+      .footer-inner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem 1.5rem; }
+      .footer-links { display: flex; flex-wrap: wrap; gap: 1rem; }
+      .footer-links a { color: var(--muted); }
+      .footer-links a:hover { color: var(--text); }
+
+      @media (max-width: 800px) {
+        .feature-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .install-card { grid-template-columns: 1fr; }
+      }
+      @media (max-width: 520px) {
+        .shell { width: min(100% - 28px, 1120px); }
+        .topbar { min-height: 72px; align-items: flex-start; flex-direction: column; justify-content: center; gap: 0.5rem; padding: 0.75rem 0; }
+        nav { justify-content: flex-start; gap: 0.4rem 1rem; }
+        .hero { padding-top: 3.5rem; }
+        .actions { align-items: stretch; flex-direction: column; }
+        .button { width: 100%; }
+        .feature-grid { grid-template-columns: 1fr; }
+        .feature { min-height: 0; }
+        .footer-inner { align-items: flex-start; flex-direction: column; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        html { scroll-behavior: auto; }
+        *, *::before, *::after { transition-duration: 0.01ms !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="shell topbar">
+      <a class="brand" href="./" aria-label="Youtube-Lyrics home">
+        <img src="brand/icon.png" alt="" width="38" height="38" />
+        <span>Youtube-Lyrics</span>
+      </a>
+      <nav aria-label="Main navigation">
+        <a href="#features">Features</a>
+        <a href="#install">How to install</a>
+        <a href="preview.html">Preview</a>
+        <a href="https://github.com/LIN4CRE/Youtube-Lyrics">Source code</a>
+      </nav>
+    </header>
+
+    <main id="main" class="shell">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="eyebrow">For Windows 10 and 11 · Version 1.2.0</p>
+          <h1 id="hero-title">Lyrics for the whole room.</h1>
+          <p class="lead">
+            A quiet desktop layer that follows the music and brings one large,
+            time-synced line into focus. No browser tab, second screen, or
+            command line needed.
+          </p>
+          <div class="actions">
+            <a
+              class="button"
+              href="https://github.com/LIN4CRE/Youtube-Lyrics/releases/latest/download/YoutubeLyrics.exe"
+              download="YoutubeLyrics.exe"
+            >
+              <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none">
+                <path d="M12 3v12m0 0 4-4m-4 4-4-4M5 17v3h14v-3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+              Download for Windows
+            </a>
+            <a class="button secondary" href="preview.html">See the preview</a>
+          </div>
+          <p class="file-note"><strong>YoutubeLyrics.exe</strong> · 64-bit · about 527 KiB · portable</p>
+          <p class="file-note">No installer, account, or administrator rights required. Public download hosted by GitHub.</p>
+        </div>
+
+        <figure class="preview">
+          <img
+            src="img/display.png"
+            alt="Youtube-Lyrics displayed across a desktop: one line of lyrics is brightly highlighted, with surrounding lines fading into the background."
+            width="2560"
+            height="1440"
+          />
+          <figcaption>The real display: the active lyric line stays clear and readable from across the room.</figcaption>
+        </figure>
+      </section>
+
+      <section id="features" class="features" aria-labelledby="features-title">
+        <div class="section-heading">
+          <h2 id="features-title">Made to follow the song.</h2>
+          <p>It reads the track information Windows already shares with media controls and keeps the words out of your way until you need them.</p>
+        </div>
+        <div class="feature-grid">
+          <article class="feature">
+            <span class="feature-mark">01 · Focus</span>
+            <h3>One line, lit</h3>
+            <p>The current line is larger and brighter; nearby lines fade so your eyes find the right place.</p>
+          </article>
+          <article class="feature">
+            <span class="feature-mark">02 · Timing</span>
+            <h3>Karaoke-style progress</h3>
+            <p>For synced lyrics, the words fill in as the track plays. Adjust timing with the arrow keys.</p>
+          </article>
+          <article class="feature">
+            <span class="feature-mark">03 · Desktop</span>
+            <h3>Out of the way</h3>
+            <p>Use it as a click-through desktop layer or switch to a normal full-screen and windowed display.</p>
+          </article>
+          <article class="feature">
+            <span class="feature-mark">04 · Portable</span>
+            <h3>Start with a double-click</h3>
+            <p>One standalone Windows executable. It lives in the tray and remembers your display settings.</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="install" class="install" aria-labelledby="install-title">
+        <div class="install-card">
+          <div>
+            <div class="section-heading">
+              <h2 id="install-title">Up and running in a minute.</h2>
+              <p>Windows 10 (version 1809 or later) or Windows 11, 64-bit.</p>
+            </div>
+            <ol class="steps">
+              <li><strong>Download</strong> YoutubeLyrics.exe using the button above.</li>
+              <li><strong>Open the file</strong> from your Downloads folder. Move it elsewhere first if you prefer.</li>
+              <li><strong>Play a song</strong> in a player that reports its media session to Windows.</li>
+            </ol>
+            <p class="privacy">The app does not record audio or send telemetry. It sends the detected track title and artist to lyric providers when looking up lyrics; results are cached locally.</p>
+          </div>
+          <aside class="warning" aria-labelledby="warning-title">
+            <h3 id="warning-title">A note about Windows SmartScreen</h3>
+            <p>This free app is not code-signed, so Windows may show an “unrecognized app” warning. The source code is public. Continue only if you trust this download; if you are unsure, cancel.</p>
+            <p>There is no installer and no terminal step.</p>
+          </aside>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="shell footer-inner">
+        <span>Free and open source under the MIT licence.</span>
+        <div class="footer-links">
+          <a href="https://github.com/LIN4CRE/Youtube-Lyrics">GitHub source</a>
+          <a href="https://github.com/LIN4CRE/Youtube-Lyrics/releases">Release notes</a>
+          <a href="preview.html">Interactive preview</a>
+        </div>
+      </div>
+    </footer>
+  </body>
+</html>
