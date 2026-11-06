@@ -67,7 +67,13 @@ if ($null -eq $tMgr) {
 
 # --- cover art --------------------------------------------------------------
 $artDir = Join-Path $env:LOCALAPPDATA 'YouTubeLyrics\art'
-try { New-Item -ItemType Directory -Force -Path $artDir | Out-Null } catch { }
+try {
+    New-Item -ItemType Directory -Force -Path $artDir | Out-Null
+    # Keep the cover-art cache from growing forever.
+    Get-ChildItem -LiteralPath $artDir -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-14) } |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+} catch { }
 
 function Get-ArtPath($props, [string]$key) {
     try {

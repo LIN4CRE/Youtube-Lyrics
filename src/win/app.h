@@ -131,6 +131,8 @@ struct App {
 
   View view;
 
+  bool helper_heard = false;  // has the media helper reported anything yet?
+  int64_t started_at = 0;
   bool windowed = false;      // currently a normal window (not full screen)
   RECT windowed_rect{};
   bool hidden_to_tray = false;

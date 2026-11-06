@@ -738,6 +738,13 @@ void render_frame(App& app, Graphics& g, int w, int h) {
         paint_centred_message(app, g, w, h, "Paused", track_label(snapshot.track),
                               "Resume playback and the words follow along.",
                               "", "");
+      } else if (!app.helper_heard && app.started_at > 0 &&
+                 app.now_ms() - app.started_at > 12000) {
+        paint_centred_message(
+            app, g, w, h, "Waiting for the media listener…", "",
+            "Windows has not reported any media session yet.",
+            "Press F1 to see exactly what the background listener is saying.",
+            "If it stays empty, check %LOCALAPPDATA%\\YouTubeLyrics\\ytlyrics.log");
       } else {
         paint_centred_message(
             app, g, w, h, "Waiting for music…", "",

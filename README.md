@@ -95,6 +95,17 @@ does not, check `F1` — it shows the raw state the helper reports.
 Check `%LOCALAPPDATA%\YouTubeLyrics\ytlyrics.log`. Lyrics are cached in the
 `cache` subfolder next to it; deleting that folder is always safe.
 
+**Seeing what the listener hears.**
+To watch the raw media-session feed yourself, run in a terminal while a song
+plays:
+
+```bat
+powershell -ExecutionPolicy Bypass -File "%LOCALAPPDATA%\YouTubeLyrics\smtc.ps1"
+```
+
+It prints one JSON line every 400 ms with the detected status, title, artist and
+playhead. `F1` inside the app shows the most recent line too.
+
 **It needs PowerShell.**
 The background listener is a small Windows PowerShell script (present on every
 Windows 10/11 machine) that talks to the WinRT media-session API. The app writes

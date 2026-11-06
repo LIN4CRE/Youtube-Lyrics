@@ -180,6 +180,7 @@ void on_media(App& app) {
     std::lock_guard<std::mutex> lock(app.mu);
     m = app.media;
   }
+  if (!m.raw.empty()) app.helper_heard = true;
 
   // Some players (notably browsers without Media Session position state) do
   // not report a moving playhead. Detect that and run our own clock from the
@@ -987,6 +988,7 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show_cmd) {
     logf("hotkey Ctrl+Alt+L could not be registered (another app owns it)");
   }
 
+  app.started_at = app.now_ms();
   app.view.last_frame = app.now_ms();
   app.view.last_mouse = 0;
   app.view.hint_until = app.now_ms() + 9000;
