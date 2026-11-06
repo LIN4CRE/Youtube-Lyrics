@@ -68,6 +68,7 @@ struct Lyrics {
   std::vector<LyricLine> lines;  // sorted by t_ms; may include blank spacer lines
   std::string plain;             // unsynced fallback text
   std::string source;            // e.g. "LRCLIB"
+  int providers_tried = 0;       // services attempted for this track
   std::string title, artist, album;
   bool empty() const { return lines.empty() && plain.empty(); }
 };
@@ -92,10 +93,21 @@ struct TrackInfo {
 
 // Strips "Official Video", "(feat. X)", "- Topic", "VEVO", trailing "| ..."
 // and similar noise that media apps put in their reported metadata.
-TrackInfo clean_track(TrackInfo t);
+TrackInfo clean_track(TrackInfo t, bool infer_artist_from_title = true);
 
 // Stable identity for caching / "did the track change" checks.
 std::string track_key(const TrackInfo& t);
+
+// True when two observations describe the same recording: the same title and
+// artist, and durations that do not contradict each other. Used to reject a
+// stale media session that is still reporting the previous song.
+bool same_track(const TrackInfo& a, const TrackInfo& b);
+
+// Whether a track is worth watching for: music, not video, podcasts or UI
+// sounds. Streams (no duration) count only when they come from a known player.
+// Rejecting the rest is what stops the app from chasing a YouTube video's audio
+// track or a game's now-playing widget.
+bool is_watchable_app(const std::string& app_id, const TrackInfo& t);
 
 // Human readable "Artist — Title".
 std::string track_label(const TrackInfo& t);
@@ -108,6 +120,18 @@ const JValue* best_candidate(const JValue& search_results, const TrackInfo& want
 // Reads a lyrics payload: either an LRCLIB /api/get object or the best entry of
 // a /api/search array. Returns false when no usable lyrics were found.
 bool parse_lrclib_payload(const std::string& body, const TrackInfo& want, Lyrics& out);
+
+// lyrics.ovh /api/v1/{artist}/{title}: {"lyrics":"..."}. Always untimed.
+bool parse_lyrics_ovh_payload(const std::string& body, Lyrics& out);
+
+// Plain (untimed) lyrics are turned into evenly paced display rows for the
+// fallback view. `lead_ms` delays the first row and `per_line_ms` paces them.
+std::vector<LyricLine> pace_plain_lyrics(const std::string& plain, int64_t lead_ms,
+                                         int64_t per_line_ms);
+
+// Normalises a hand-written LRC or plain-text lyric document (the user can drop
+// a .lrc next to a cached track to override the lookup).
+bool parse_local_lyrics(const std::string& text, Lyrics& out);
 
 // ------------------------------------------------------------------- layout
 

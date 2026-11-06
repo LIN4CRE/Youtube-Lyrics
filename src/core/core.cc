@@ -649,7 +649,7 @@ std::string strip_trailing_noise(const std::string& in) {
 
 }  // namespace
 
-TrackInfo clean_track(TrackInfo t) {
+TrackInfo clean_track(TrackInfo t, bool infer_artist_from_title) {
   t.title = trim(t.title);
   t.artist = trim(t.artist);
   t.album = trim(t.album);
@@ -673,7 +673,7 @@ TrackInfo clean_track(TrackInfo t) {
   t.title = trim(t.title);
 
   // If we still have a leftover "Title - Artist" and no artist, split it.
-  if (t.artist.empty()) {
+  if (infer_artist_from_title && t.artist.empty()) {
     size_t dash = t.title.find(" - ");
     if (dash != std::string::npos && dash > 0 && dash + 3 < t.title.size()) {
       std::string lhs = trim(t.title.substr(0, dash));
@@ -704,6 +704,66 @@ std::string track_label(const TrackInfo& t) {
   if (t.artist.empty()) return t.title;
   if (t.title.empty()) return t.artist;
   return t.artist + " \xE2\x80\x94 " + t.title;  // em dash
+}
+
+bool same_track(const TrackInfo& a, const TrackInfo& b) {
+  if (a.title.empty() || b.title.empty()) return false;
+  if (text_similarity(a.title, b.title) < 0.80) return false;
+  // An artist that is present on both sides must agree. A missing artist means
+  // the player withdrew its metadata mid-session, which should not count as a
+  // new song.
+  if (!a.artist.empty() && !b.artist.empty() &&
+      text_similarity(a.artist, b.artist) < 0.72) {
+    return false;
+  }
+  // Contradictory durations mean a different song that happens to share a
+  // title (very common with "Intro", "Interlude", "Home").
+  if (a.duration_s > 5 && b.duration_s > 5 &&
+      std::fabs(a.duration_s - b.duration_s) > 8.0) {
+    return false;
+  }
+  return true;
+}
+
+bool is_watchable_app(const std::string& app_id, const TrackInfo& t) {
+  const std::string id = to_lower_ascii(app_id);
+  static const char* kBrowsers[] = {"chrome",  "msedge", "brave",  "firefox",
+                                    "opera",   "vivaldi", "chromium", "arc"};
+  static const char* kPlayers[] = {"spotify", "vlc", "wmplayer", "foobar",
+                                   "music.ui", "itunes", "tidal", "deezer",
+                                   "amazon", "plex", "musicbee", "aimp", "mpc",
+                                   "applemusic", "youtube", "podcast"};
+  // Windows shell / system surfaces that report a session but are not music.
+  static const char* kUI[] = {"shellexperiencehost", "searchhost",
+                              "startmenuexperiencehost", "systemsettings"};
+
+  for (const char* ui : kUI) {
+    if (id.find(ui) != std::string::npos) return false;
+  }
+  if (t.title.empty()) return false;
+  // Empty titles that are really just a container name, or obvious non-music.
+  const std::string title = to_lower_ascii(t.title);
+  if (title == "unknown" || title == "no title" || title == "advertisement" ||
+      title == "audio") {
+    return false;
+  }
+  if (t.duration_s > 0 && t.duration_s < 25) return false;  // stingers, ads, UI
+
+  const bool browser = [&] {
+    for (const char* b : kBrowsers) {
+      if (id.find(b) != std::string::npos) return true;
+    }
+    return false;
+  }();
+  const bool player = [&] {
+    for (const char* b : kPlayers) {
+      if (id.find(b) != std::string::npos) return true;
+    }
+    return false;
+  }();
+  // An unknown app is allowed only if it reports a real song length; that is
+  // the signal that separates a music session from a game or a video.
+  return browser || player || t.duration_s >= 45;
 }
 
 double text_similarity(const std::string& a, const std::string& b) {
@@ -746,19 +806,19 @@ const JValue* best_candidate(const JValue& search_results, const TrackInfo& want
                              double* score_out) {
   const JValue* best = nullptr;
   double best_score = -1.0;
-  if (!search_results.is_array()) {
-    // A single object works too.
-    if (search_results.is_object()) {
-      const JValue* synced = search_results.find("syncedLyrics");
-      if (synced && synced->is_string() && !trim(synced->str).empty()) {
-        if (score_out) *score_out = 10.0;
-        return &search_results;
-      }
-    }
+  std::vector<const JValue*> candidates;
+  if (search_results.is_array()) {
+    candidates.reserve(search_results.arr.size());
+    for (const auto& value : search_results.arr) candidates.push_back(&value);
+  } else if (search_results.is_object()) {
+    candidates.push_back(&search_results);
+  } else {
     return nullptr;
   }
-  for (const auto& rec : search_results.arr) {
-    if (!rec.is_object()) continue;
+
+  for (const JValue* candidate : candidates) {
+    if (!candidate || !candidate->is_object()) continue;
+    const JValue& rec = *candidate;
     bool has_synced = false, has_plain = false;
     if (const JValue* s = rec.find("syncedLyrics")) {
       has_synced = s->is_string() && !trim(s->str).empty();
@@ -768,17 +828,42 @@ const JValue* best_candidate(const JValue& search_results, const TrackInfo& want
     }
     if (!has_synced && !has_plain) continue;
 
-    double title_sim = text_similarity(want.title, rec.get_str("trackName"));
-    double artist_sim = text_similarity(want.artist, rec.get_str("artistName"));
-    if (want.artist.empty()) artist_sim = 0.6;
-    double score = title_sim * 4.0 + artist_sim * 3.0;
+    // Clean provider titles with the same conservative rules as media titles,
+    // but never infer an artist from a title string. Title similarity is a hard
+    // gate: a query for one track must not be won by another track from the
+    // same artist merely because its duration happens to match.
+    const double duration = rec.get_num("duration", 0);
+    TrackInfo candidate_track = clean_track(
+        TrackInfo{rec.get_str("trackName"), rec.get_str("artistName"), "", duration},
+        false);
+    const double title_sim = text_similarity(want.title, candidate_track.title);
+    if (title_sim < 0.80) continue;
+
+    const double artist_sim = text_similarity(want.artist, candidate_track.artist);
+    const bool same_artist = artist_sim >= 0.72;
+    if (!want.artist.empty() && !candidate_track.artist.empty() && !same_artist) {
+      continue;
+    }
+    // With no artist metadata, a title alone is not enough: common titles such
+    // as "Home" and "Intro" have many unrelated lyric sheets. Require a real
+    // duration match before accepting a provider result in that case.
+    if (want.artist.empty()) {
+      if (want.duration_s <= 5 || duration <= 5 ||
+          std::fabs(duration - want.duration_s) > 8.0) {
+        continue;
+      }
+    }
+
+    double score = title_sim * 5.0 + artist_sim * 4.0;
     if (has_synced) score += 2.5;
-    double dur = rec.get_num("duration", 0);
-    if (want.duration_s > 0 && dur > 0) {
-      double delta = std::fabs(dur - want.duration_s);
-      if (delta <= 2.0) score += 2.0;
-      else if (delta <= 6.0) score += 0.8;
-      else if (delta > 25.0) score -= 2.0;
+
+    if (want.duration_s > 0 && duration > 0) {
+      const double delta = std::fabs(duration - want.duration_s);
+      if (delta <= 2.0) score += 3.5;
+      else if (delta <= 5.0) score += 2.2;
+      else if (delta <= 8.0) score += 0.6;
+      else if (delta > 30.0) score -= 4.0;
+      else score -= 1.5;
     }
     if (score > best_score) {
       best_score = score;
@@ -786,8 +871,60 @@ const JValue* best_candidate(const JValue& search_results, const TrackInfo& want
     }
   }
   if (score_out) *score_out = best_score;
-  if (best_score < 4.0) return nullptr;
+  // Better to show nothing than the wrong words.
+  if (best_score < 6.5) return nullptr;
   return best;
+}
+
+bool parse_lyrics_ovh_payload(const std::string& body, Lyrics& out) {
+  JValue root;
+  if (!json_parse(body, root) || !root.is_object()) return false;
+  std::string text = root.get_str("lyrics");
+  if (trim(text).empty()) return false;
+  // The service answers "No lyrics found" with HTTP 200 for misses.
+  if (to_lower_ascii(trim(text)).find("no lyrics found") == 0) return false;
+  out = Lyrics();
+  out.synced = false;
+  out.plain = text;
+  out.source = "lyrics.ovh";
+  return true;
+}
+
+std::vector<LyricLine> pace_plain_lyrics(const std::string& plain, int64_t lead_ms,
+                                         int64_t per_line_ms) {
+  std::vector<LyricLine> out;
+  if (per_line_ms < 500) per_line_ms = 500;
+  int64_t t = lead_ms < 0 ? 0 : lead_ms;
+  size_t pos = 0;
+  while (pos <= plain.size()) {
+    size_t nl = plain.find('\n', pos);
+    if (nl == std::string::npos) nl = plain.size();
+    std::string line = plain.substr(pos, nl - pos);
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    line = trim(line);
+    // Blank lines become an empty spacer row rather than a timed lyric.
+    out.push_back({t, line});
+    t += per_line_ms;
+    if (nl >= plain.size()) break;
+    pos = nl + 1;
+  }
+  return out;
+}
+
+bool parse_local_lyrics(const std::string& text, Lyrics& out) {
+  if (trim(text).empty()) return false;
+  out = Lyrics();
+  std::vector<LyricLine> lines;
+  if (lrc_parse(text, lines) && !lines.empty()) {
+    out.synced = true;
+    out.lines = std::move(lines);
+    out.source = "local file";
+    return true;
+  }
+  out.synced = false;
+  out.plain = text;
+  out.source = "local file";
+  return true;
 }
 
 bool parse_lrclib_payload(const std::string& body, const TrackInfo& want,
@@ -795,17 +932,8 @@ bool parse_lrclib_payload(const std::string& body, const TrackInfo& want,
   JValue root;
   if (!json_parse(body, root)) return false;
 
-  const JValue* rec = nullptr;
-  if (root.is_array()) {
-    double score = 0;
-    rec = best_candidate(root, want, &score);
-    if (!rec) return false;
-  } else if (root.is_object()) {
-    if (root.find("syncedLyrics") == nullptr && root.find("plainLyrics") == nullptr) {
-      return false;
-    }
-    rec = &root;
-  }
+  double score = 0;
+  const JValue* rec = best_candidate(root, want, &score);
   if (!rec) return false;
 
   out = Lyrics();

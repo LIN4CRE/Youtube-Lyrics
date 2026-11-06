@@ -2,11 +2,11 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Youtube-Lyrics — full-screen display preview</title>
+<title>Youtube-Lyrics — desktop wallpaper preview</title>
 <style>
   :root {
-    --bg-top: #0a0a12; --bg-bottom: #171226;
-    --accent: #7c5cff; --text: #f4f2ff;
+    --bg-top: #0b0a0f; --bg-bottom: #17151d;
+    --accent: #f5a524; --text: #f3efe6;
     --stage-w: 1920px; --stage-h: 1080px;
   }
   * { box-sizing: border-box; }
@@ -17,10 +17,10 @@
   .bar { width: 100%; max-width: 1400px; padding: 14px 18px 6px;
     display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; }
   .bar .spacer { flex: 1; }
-  .bar button { background: #1b1b26; color: #dcdce8; border: 1px solid #2e2e3e;
+  .bar button { background: #17151d; color: #e7e1d5; border: 1px solid #37333d;
     border-radius: 8px; padding: 7px 12px; font-size: 13px; cursor: pointer; }
-  .bar button:hover { background: #24242f; border-color: #3d3d52; }
-  .bar button.on { background: #2c2350; border-color: #6a52d8; color: #fff; }
+  .bar button:hover { background: #24212a; border-color: #61543e; }
+  .bar button.on { background: #332819; border-color: #b47a22; color: #fff7e8; }
   .bar .hint { opacity: .55; }
 
   .frame { width: 100%; max-width: 1400px; padding: 0 18px 18px; }
@@ -34,15 +34,15 @@
     background: linear-gradient(180deg, var(--bg-top), var(--bg-bottom)); }
   .glow { position: absolute; border-radius: 50%; filter: blur(70px); opacity: .85; }
   .glow.a { width: 1188px; height: 907px; left: -180px; top: -190px;
-    background: radial-gradient(closest-side, rgba(124,92,255,.42), rgba(124,92,255,0)); }
+    background: radial-gradient(closest-side, rgba(245,165,36,.20), rgba(245,165,36,0)); }
   .glow.b { width: 1080px; height: 864px; right: -190px; bottom: -230px;
-    background: radial-gradient(closest-side, rgba(124,92,255,.30), rgba(124,92,255,0)); }
+    background: radial-gradient(closest-side, rgba(245,165,36,.13), rgba(245,165,36,0)); }
   .cover { position: absolute; inset: -8%; opacity: 0; transition: opacity .4s;
     background:
-      radial-gradient(40% 45% at 32% 38%, #6b4bd0 0%, rgba(0,0,0,0) 70%),
-      radial-gradient(45% 50% at 70% 62%, #d05b8a 0%, rgba(0,0,0,0) 72%),
-      radial-gradient(50% 60% at 55% 25%, #2a7fb8 0%, rgba(0,0,0,0) 70%),
-      linear-gradient(135deg, #12101d, #241a33 55%, #0d0b14);
+      radial-gradient(40% 45% at 32% 38%, #8d6236 0%, rgba(0,0,0,0) 70%),
+      radial-gradient(45% 50% at 70% 62%, #74452f 0%, rgba(0,0,0,0) 72%),
+      radial-gradient(50% 60% at 55% 25%, #36535b 0%, rgba(0,0,0,0) 70%),
+      linear-gradient(135deg, #12100f, #261c15 55%, #0d0b09);
     filter: blur(26px) saturate(1.1); }
   .stage.cover .cover { opacity: 1; }
   .stage.cover .bg { opacity: .25; }
@@ -58,8 +58,8 @@
 
   /* ---------- header ---------- */
   .header { position: absolute; left: 0; right: 0; top: 30px; text-align: center; }
-  .artist { font-size: 16px; letter-spacing: .02em; color: rgba(244,242,255,.60); }
-  .title { font-size: 22px; font-weight: 600; color: rgba(244,242,255,.88); margin-top: 6px; }
+  .artist { font-size: 16px; letter-spacing: .02em; color: rgba(243,239,230,.60); }
+  .title { font-size: 22px; font-weight: 600; color: rgba(243,239,230,.88); margin-top: 6px; }
 
   /* ---------- lyrics ---------- */
   .lyrics { position: absolute; left: 260px; width: 1400px; top: 0; bottom: 0; }
@@ -68,18 +68,18 @@
   .row .txt { font-size: 45px; font-weight: 400; color: var(--text);
     white-space: nowrap; position: relative; transition: font-size .12s ease-out; }
   .row.active .txt { font-size: 55px; font-weight: 600; }
-  .row .dim { color: rgba(244,242,255,.40); }
+  .row .dim { color: rgba(243,239,230,.40); }
   .row .fill { position: absolute; left: 0; top: 0; overflow: hidden;
     width: 0; white-space: nowrap; }
   .row.active .halo { position: absolute; left: 50%; top: 50%;
     width: 1400px; height: 72px; transform: translate(-50%,-50%);
-    background: radial-gradient(50% 100% at 50% 50%, rgba(124,92,255,.16), rgba(124,92,255,0) 75%); }
+    background: radial-gradient(50% 100% at 50% 50%, rgba(245,165,36,.16), rgba(245,165,36,0) 75%); }
 
   /* ---------- chrome ---------- */
   .track-line { position: absolute; left: 0; bottom: 4px; height: 3px; width: 100%;
     background: rgba(255,255,255,.18); }
   .track-fill { position: absolute; left: 0; bottom: 4px; height: 3px; width: 0;
-    background: linear-gradient(90deg, var(--accent), rgba(124,92,255,.82)); }
+    background: linear-gradient(90deg, var(--accent), rgba(245,165,36,.82)); }
   .track-dot { position: absolute; bottom: 2px; width: 7px; height: 7px; border-radius: 50%;
     background: #fff; left: 0; }
   .times { position: absolute; right: 18px; bottom: 12px; font-size: 16px;
@@ -88,7 +88,7 @@
     color: rgba(255,255,255,.40); }
   .toast { position: absolute; left: 50%; bottom: 56px; transform: translateX(-50%);
     padding: 12px 24px; border-radius: 22px; font-size: 20px; color: #f0f0f5;
-    background: rgba(20,20,32,.86); border: 1px solid rgba(124,92,255,.35);
+    background: rgba(20,20,32,.86); border: 1px solid rgba(245,165,36,.35);
     opacity: 0; transition: opacity .25s; }
   .toast.show { opacity: 1; }
 
@@ -111,9 +111,50 @@
   .empty { position: absolute; inset: 0; display: none; flex-direction: column;
     align-items: center; justify-content: center; text-align: center; }
   .empty.show { display: flex; }
+  .stage.empty-state .lyrics, .stage.empty-state .header,
+  .stage.empty-state .track-line, .stage.empty-state .track-fill,
+  .stage.empty-state .track-dot, .stage.empty-state .times { display: none; }
   .empty h1 { font-size: 56px; font-weight: 600; margin: 0 0 22px; }
-  .empty .sub { font-size: 26px; color: rgba(244,242,255,.66); margin-bottom: 8px; }
-  .empty p { font-size: 21px; color: rgba(244,242,255,.55); margin: 5px 0; }
+  .empty .sub { font-size: 26px; color: rgba(243,239,230,.66); margin-bottom: 8px; }
+  .empty p { font-size: 21px; color: rgba(243,239,230,.55); margin: 5px 0; }
+
+  .empty .listening-mark { position: relative; width: 150px; height: 150px; margin: 0 0 22px;
+    display: grid; place-items: center; }
+  .empty .pulse { position: absolute; inset: 8px; border: 1px solid rgba(245,165,36,.36);
+    border-radius: 50%; animation: breathe 2.8s ease-out infinite; }
+  .empty .pulse:nth-child(2) { animation-delay: 1.4s; }
+  @keyframes breathe { 0% { transform: scale(.58); opacity: .72; }
+    100% { transform: scale(1.45); opacity: 0; } }
+  .paper-tile { position: relative; width: 82px; height: 82px; border-radius: 19px;
+    background: #f3efe6; border: 1px solid rgba(11,10,15,.16); box-shadow: 0 16px 38px rgba(0,0,0,.25); }
+  .paper-tile::before { content: ""; position: absolute; left: 18px; top: 18px; bottom: 18px;
+    width: 2px; background: rgba(11,10,15,.35); }
+  .paper-tile i { position: absolute; left: 29px; height: 5px; border-radius: 8px;
+    background: rgba(11,10,15,.52); }
+  .paper-tile i:nth-child(1) { top: 25px; width: 29px; }
+  .paper-tile i:nth-child(2) { top: 38px; width: 39px; height: 8px; background: #f5a524; }
+  .paper-tile i:nth-child(3) { top: 55px; width: 23px; }
+  .desktop-layer { display: none; position: absolute; inset: 0; z-index: 30; pointer-events: none; }
+  .stage.wallpaper .desktop-layer { display: block; }
+  .desktop-badge { position: absolute; top: 24px; left: 30px; padding: 7px 10px;
+    border: 1px solid rgba(243,239,230,.14); border-radius: 7px; color: rgba(243,239,230,.65);
+    background: rgba(11,10,15,.38); font: 12px/1.2 Consolas, monospace; letter-spacing: .04em; }
+  .desktop-icons { position: absolute; left: 26px; top: 88px; display: grid; gap: 16px; }
+  .desktop-icon { width: 92px; min-height: 78px; display: flex; flex-direction: column;
+    align-items: center; gap: 6px; color: rgba(255,255,255,.82); text-align: center;
+    font-size: 12px; text-shadow: 0 1px 3px #000; }
+  .desktop-icon .glyph { font-size: 27px; line-height: 32px; filter: drop-shadow(0 2px 3px rgba(0,0,0,.38)); }
+  .desktop-taskbar { position: absolute; left: 0; right: 0; bottom: 0; height: 50px;
+    display: flex; align-items: center; justify-content: center; gap: 13px;
+    background: rgba(13,12,16,.58); border-top: 1px solid rgba(255,255,255,.10);
+    backdrop-filter: blur(12px); }
+  .desktop-taskbar .app-dot { width: 25px; height: 25px; border-radius: 7px;
+    background: rgba(243,239,230,.12); border: 1px solid rgba(243,239,230,.14); }
+  .desktop-taskbar .app-dot.active { background: #f5a524; border-color: #f5a524; }
+  .wallpaper-note { display: none; position: absolute; right: 24px; top: 24px; z-index: 31;
+    color: rgba(243,239,230,.62); background: rgba(11,10,15,.38); border: 1px solid rgba(243,239,230,.14);
+    border-radius: 7px; padding: 7px 10px; font: 12px/1.2 Consolas, monospace; }
+  .stage.wallpaper .wallpaper-note { display: block; }
 </style>
 </head>
 <body>
@@ -127,14 +168,15 @@
   <button id="cover">Cover art</button>
   <button id="wipe" class="on">Karaoke wipe</button>
   <button id="helpBtn">F1 Help</button>
-  <button id="stateBtn">Idle / not-found states</button>
+  <button id="stateBtn">State: listening</button>
+  <button id="wallpaperBtn" class="on">Desktop layer: on</button>
   <span class="spacer"></span>
-  <span class="hint">Browser mock of the native renderer — same type sizes, colours and timing maths.</span>
+  <span class="hint">Native-renderer mock · desktop icons sit above the click-through lyric layer.</span>
 </div>
 
 <div class="frame">
   <div class="stage-wrap" id="wrap">
-    <div class="stage" id="stage">
+    <div class="stage wallpaper empty-state" id="stage">
       <div class="bg"></div>
       <div class="cover"></div>
       <div class="scrim-dark"></div>
@@ -145,8 +187,8 @@
       <div class="scrim-bottom"></div>
 
       <div class="header">
-        <div class="artist">Linkin Park</div>
-        <div class="title">In the End</div>
+        <div class="artist">June Archive</div>
+        <div class="title">Night Bus</div>
       </div>
 
       <div class="lyrics" id="lyrics"></div>
@@ -154,16 +196,20 @@
       <div class="track-line"></div>
       <div class="track-fill" id="trackFill"></div>
       <div class="track-dot" id="trackDot"></div>
-      <div class="times" id="times">0:00 / 3:36</div>
-      <div class="source">via chrome.exe</div>
+      <div class="times" id="times">0:00 / 3:15</div>
+      <div class="source">mock track · synced lyrics</div>
       <div class="toast" id="toast"></div>
 
       <div class="empty" id="empty">
-        <h1 id="emptyTitle">Waiting for music…</h1>
-        <div class="sub" id="emptySub"></div>
-        <p id="empty1">Play a song anywhere — YouTube Music, Spotify, any player.</p>
-        <p id="empty2">This window follows along on its own, even in the background.</p>
-        <p id="empty3">F1 for shortcuts · Ctrl+Alt+L shows or hides this window</p>
+        <div class="listening-mark" aria-hidden="true">
+          <i class="pulse"></i><i class="pulse"></i>
+          <div class="paper-tile"><i></i><i></i><i></i></div>
+        </div>
+        <h1 id="emptyTitle">Listening</h1>
+        <div class="sub" id="emptySub">Play a song anywhere — YouTube Music, Spotify, any player.</div>
+        <p id="empty1">Lyrics appear when a matching sheet is found.</p>
+        <p id="empty2">No focus, no clicks, no window to manage.</p>
+        <p id="empty3">Ctrl+Alt+W toggles wallpaper mode · Ctrl+Alt+L hides or shows</p>
       </div>
 
       <div class="help" id="help">
@@ -181,11 +227,25 @@
             <tr><td>T</td><td>Theme</td></tr>
             <tr><td>F1 / H</td><td>Show / hide this help</td></tr>
             <tr><td>Ctrl+Alt+L</td><td>Show / hide from any app</td></tr>
+            <tr><td>Ctrl+Alt+W</td><td>Toggle desktop wallpaper mode</td></tr>
             <tr><td>Q</td><td>Quit</td></tr>
           </table>
-          <div class="diag">media helper: {"ok":1,"status":"playing","title":"In the End","artist":"Linkin Park","album":"Hybrid Theory","pos":12.4,"dur":216,"app":"Chrome","art":"…"}</div>
+          <div class="diag">media helper: {"ok":1,"status":"playing","title":"Night Bus","artist":"June Archive","pos":12.4,"dur":195,"app":"Chrome","art":"…"}</div>
         </div>
       </div>
+      <div class="desktop-layer" id="desktopLayer" aria-hidden="true">
+        <div class="desktop-badge">WORKERW · DESKTOP LAYER</div>
+        <div class="desktop-icons">
+          <div class="desktop-icon"><span class="glyph">🗑️</span><span>Recycle Bin</span></div>
+          <div class="desktop-icon"><span class="glyph">📁</span><span>Music</span></div>
+          <div class="desktop-icon"><span class="glyph">📄</span><span>Lyrics notes</span></div>
+        </div>
+        <div class="desktop-taskbar">
+          <span class="app-dot active"></span><span class="app-dot"></span>
+          <span class="app-dot"></span><span class="app-dot"></span>
+        </div>
+      </div>
+      <div class="wallpaper-note">CLICK-THROUGH · BEHIND WINDOWS</div>
     </div>
   </div>
 </div>
@@ -193,54 +253,29 @@
 <script>
 // ---- the lyric sheet (LRCLIB-synced LRC, as the app would receive it) ----
 const LRC = `
-[00:06.40](It starts with one)
-[00:12.34]One thing, I don't know why
-[00:15.10]It doesn't even matter how hard you try
-[00:18.20]Keep that in mind
-[00:20.00]I designed this rhyme
-[00:22.40]To explain in due time
-[00:25.00]All I know
-[00:27.60]Time is a valuable thing
-[00:30.10]Watch it fly by as the pendulum swings
-[00:33.00]Watch it count down to the end of the day
-[00:36.40]The clock ticks life away
-[00:39.00]It's so unreal
-[00:41.20]Didn't look out below
-[00:44.00]Watch the time go right out the window
-[00:47.20]Trying to hold on, didn't even know
-[00:50.10]I wasted it all just to watch you go
-[00:53.00]I kept everything inside
-[00:55.40]And even though I tried, it all fell apart
-[00:58.60]What it meant to me will eventually
-[01:01.20]Be a memory of a time when
-[01:05.60]I tried so hard and got so far
-[01:10.10]But in the end, it doesn't even matter
-[01:13.90]I had to fall to lose it all
-[01:17.50]But in the end, it doesn't even matter
-[01:40.00]One thing, I don't know why
-[01:42.80]It doesn't even matter how hard you try
-[01:45.60]Keep that in mind
-[01:47.60]I designed this rhyme to remind myself how
-[01:50.90]I tried so hard
-[01:53.20]In spite of the way you were mocking me
-[01:56.00]Acting like I was part of your property
-[01:58.90]Remembering all the times you fought with me
-[02:01.70]I'm surprised it got so far
-[02:04.40]Things aren't the way they were before
-[02:07.20]You wouldn't even recognize me anymore
-[02:10.00]Not that you knew me back then
-[02:12.60]But it all comes back to me in the end
-[02:15.60]You kept everything inside
-[02:18.20]And even though I tried, it all fell apart
-[02:21.40]What it meant to me will eventually
-[02:24.00]Be a memory of a time when
-[02:27.60]I tried so hard and got so far
-[02:32.10]But in the end, it doesn't even matter
-[02:35.90]I had to fall to lose it all
-[02:39.50]But in the end, it doesn't even matter
+[00:04.00]Streetlights fold into the rain
+[00:08.50]Windows draw a silver lane
+[00:13.00]Every stop is moving slow
+[00:17.00]Every quiet sign says go
+[00:22.00]City lights dissolve behind me
+[00:26.50]Night air humming through the wire
+[00:31.00]I can feel the morning finding
+[00:35.20]A small spark beneath the tired
+[00:41.00]Take the long way home tonight
+[00:46.00]Let the dark turn soft and blue
+[00:51.00]There is room to start again
+[00:56.00]There is still a road to you
+[01:12.00]Streetlights fold into the rain
+[01:16.50]Window ghosts go by like trains
+[01:21.00]All the words I meant to say
+[01:25.00]Ride the quiet miles away
+[01:30.00]Take the long way home tonight
+[01:35.00]Let the dark turn soft and blue
+[01:40.00]There is room to start again
+[01:45.00]There is still a road to you
 `.trim();
 
-const DURATION = 216;   // 3:36
+const DURATION = 195;   // mock 3:15 track
 const lines = LRC.split('\n').map((raw) => {
   const m = raw.match(/^\[(\d+):(\d+)\.(\d+)\](.*)$/);
   const t = (+m[1]) * 60000 + (+m[2]) * 1000 + (+m[3]) * 10;
@@ -282,7 +317,7 @@ let playing = true;
 let scroll = 0;
 let wipe = true;
 let last = performance.now();
-let stateOverride = null;  // 'idle' | 'notfound' | null
+let stateOverride = 'idle';  // starts with the actual resting wallpaper state
 
 function activeIndex(p) {
   if (!rows.length) return -1;
@@ -324,6 +359,7 @@ const trackFill = document.getElementById('trackFill');
 const trackDot = document.getElementById('trackDot');
 const timesEl = document.getElementById('times');
 const emptyEl = document.getElementById('empty');
+if (stateOverride) { emptyEl.classList.add('show'); document.querySelector('.header').style.display = 'none'; }
 
 function frame(now) {
   const dt = Math.min(0.25, (now - last) / 1000);
@@ -414,7 +450,7 @@ themeBtn.onclick = () => {
   root.setProperty('--accent', t.accent);
   root.setProperty('--text', t.text);
   document.querySelectorAll('.glow').forEach((g) => {
-    g.style.background = `radial-gradient(closest-side, ${t.accent}6b, ${t.accent}00)`;
+    g.style.background = `radial-gradient(closest-side, ${t.accent}33, ${t.accent}00)`;
   });
   themeBtn.textContent = `Theme: ${t.name}`;
   toast(`Theme: ${t.name}`);
@@ -425,6 +461,14 @@ coverBtn.onclick = () => {
   const on = document.getElementById('stage').classList.toggle('cover');
   coverBtn.classList.toggle('on', on);
   toast(on ? 'Cover art background: on' : 'Cover art background: off');
+};
+
+const wallpaperBtn = document.getElementById('wallpaperBtn');
+wallpaperBtn.onclick = () => {
+  const on = document.getElementById('stage').classList.toggle('wallpaper');
+  wallpaperBtn.classList.toggle('on', on);
+  wallpaperBtn.textContent = `Desktop layer: ${on ? 'on' : 'off'}`;
+  toast(on ? 'Click-through desktop wallpaper layer' : 'Normal display preview');
 };
 
 const wipeBtn = document.getElementById('wipe');
@@ -441,21 +485,23 @@ const stateBtn = document.getElementById('stateBtn');
 const emptyTitle = document.getElementById('emptyTitle');
 const emptySub = document.getElementById('emptySub');
 stateBtn.onclick = () => {
-  if (!stateOverride) {
-    stateOverride = 'idle';
-    emptyTitle.textContent = 'Waiting for music…';
-    emptySub.textContent = '';
-    stateBtn.textContent = 'State: nothing playing';
-  } else if (stateOverride === 'idle') {
+  if (stateOverride === 'idle') {
+    stateOverride = null;
+    stateBtn.textContent = 'State: synced lyrics';
+    emptyTitle.textContent = 'Listening';
+  } else if (!stateOverride) {
     stateOverride = 'notfound';
     emptyTitle.textContent = 'No lyrics found';
-    emptySub.textContent = 'Linkin Park — In the End';
-    stateBtn.textContent = 'State: lyrics missing';
+    emptySub.textContent = 'June Archive — Night Bus';
+    stateBtn.textContent = 'State: no match';
   } else {
-    stateOverride = null;
-    stateBtn.textContent = 'Idle / not-found states';
+    stateOverride = 'idle';
+    emptyTitle.textContent = 'Listening';
+    emptySub.textContent = 'Play a song anywhere — YouTube Music, Spotify, any player.';
+    stateBtn.textContent = 'State: listening';
   }
   emptyEl.classList.toggle('show', !!stateOverride);
+  document.getElementById('stage').classList.toggle('empty-state', !!stateOverride);
   document.querySelector('.header').style.display = stateOverride ? 'none' : '';
 };
 

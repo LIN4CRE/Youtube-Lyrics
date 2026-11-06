@@ -7,8 +7,10 @@
 **YouTube Music gives you a thin strip of small text at the side of the screen.**
 **This gives you the whole screen, one lit line at a time.**
 
-A single 640 KB executable that sits in the tray, listens to whatever Windows is
-playing, and paints the lyrics full-screen — karaoke style.
+A single Windows executable that lives behind your desktop icons, listens for a
+track actually playing in the background, and brings up its lyrics when it finds
+a confident match. It never takes focus or catches clicks; the desktop stays
+usable while the words sit quietly in the background.
 
 [![Download](docs/brand/badge-download.png)][releases]
 [![Windows 10 / 11](docs/brand/badge-platform.png)](#requirements)
@@ -48,14 +50,16 @@ never touches the browser.
 | **Smooth, not twitchy** | Lines scroll on a spring, so a fast chorus glides instead of jolting. Gaps of 3 s or more get extra breathing room, so verses and choruses separate themselves. |
 | **Four themes, one of them honest** | Midnight (ink and amber, the default), Aurora, Ember, Mono. `T` cycles; the choice is remembered. |
 | **Cover art, if you want it** | The album cover, aspect-filled and heavily darkened behind the text. `C` toggles. |
-| **Out of the way** | Runs in the tray, `Ctrl+Alt+L` from anywhere, always-on-top on a second monitor, `Esc` to get your screen back. |
+| **A real desktop layer** | Sits behind desktop icons and ordinary windows, without taking focus or intercepting clicks. `Ctrl+Alt+W` switches wallpaper mode; `Ctrl+Alt+L` hides or restores it. |
+| **Only the song that is playing** | Paused/stale SMTC sessions are ignored, track changes are confirmed across polls, and lyrics are matched against title, artist and duration before display. |
+| **Out of the way** | Runs in the tray; use the global hotkeys or the tray menu. Turn wallpaper mode off to use the normal full-screen/windowed display. |
 | **Offline after the first play** | Lyrics are cached per track on disk. Replay a song on a plane and it still works. |
 
 <br>
 
 ## Install
 
-1. **[Download `YoutubeLyrics.exe`][releases]** — one file, about 640 KB.
+1. **[Download `YoutubeLyrics.exe`][releases]** — one file, about 680 KB.
 2. Put it anywhere: Desktop, `%LOCALAPPDATA%`, a USB stick. It is portable and
    writes nothing outside its own folder and `%LOCALAPPDATA%\YouTubeLyrics`.
 3. Double-click it, then play something.
@@ -75,22 +79,24 @@ ships with Windows.
 
 ## Using it
 
-`Esc` leaves full screen; `Esc` again hides to the tray. `Ctrl+Alt+L` brings it
-back from any app. `F1` shows the shortcut sheet over the lyrics, along with the
-raw state of the media session, which is the first thing to look at if
-something seems stuck.
+The default is desktop-wallpaper mode: the display stays behind desktop icons,
+never takes focus, and passes clicks through. `Ctrl+Alt+W` switches between that
+and the normal full-screen display; `Ctrl+Alt+L` hides or restores it from any
+app. In normal display mode, `F11` toggles full screen/windowed and `Esc` leaves
+full screen, then hides to the tray. `F1` shows shortcuts and the raw media-session
+state when the window is focused.
 
 <a id="keyboard"></a>
 
 | Key | Action | | Key | Action |
 | :--- | :--- | :--- | :--- | :--- |
-| `F11` | Full screen ⇄ windowed | | `F` | Reset text size |
-| `Esc` | Leave full screen, then hide to tray | | `R` | Look the lyrics up again |
-| `Ctrl`+`Alt`+`L` | Show / hide from any app | | `C` | Cover-art background |
-| `A` | Always on top | | `K` | Karaoke wipe |
+| `Ctrl`+`Alt`+`W` | Toggle desktop wallpaper mode | | `F` | Reset text size |
+| `Ctrl`+`Alt`+`L` | Show / hide from any app | | `R` | Look the lyrics up again |
+| `F11` | Full screen ⇄ windowed (normal mode) | | `C` | Cover-art background |
+| `Esc` | Leave full screen, then hide to tray | | `K` | Karaoke wipe |
+| `A` | Always on top (normal mode) | | `Q` | Quit |
 | `↑` `↓` | Bigger / smaller text | | `T` | Theme |
 | `←` `→` | Shift lyric timing ±0.25 s | | `F1` `H` | Help overlay |
-| | | | `Q` | Quit |
 
 Double-clicking toggles full screen. Everything above is also in the tray
 icon's right-click menu, and every setting is saved as you change it.
@@ -99,21 +105,24 @@ icon's right-click menu, and every setting is saved as you change it.
 
 ## Where the lyrics come from
 
-[LRCLIB][lrclib] — a free, open, community-maintained database of time-synced
-lyrics. When a track starts, the app sends its title, artist, album and duration
-and gets back an LRC file with a timestamp for every line. That is the entire
-network conversation: no account, no identifier, no telemetry, and nothing is
-ever uploaded. Responses are cached on disk, so a track only costs one request,
-ever.
+The app tries [LRCLIB][lrclib] first for a time-synced LRC sheet, then searches
+its broader query endpoint, then asks lyrics.ovh for untimed lyrics. Untimed
+results are paced across the reported song length so the display still follows
+along. Every candidate is checked against the track title, artist and duration;
+when the identity is uncertain, it shows no lyrics instead of confident-looking
+wrong ones. Results are cached on disk.
 
-If a track is not in the database you get a clear "no lyrics found" message
-instead of a blank screen, and `R` retries.
+For songs neither catalogue has, add your own `.lrc` or `.txt` file under
+`%LOCALAPPDATA%\YouTubeLyrics\lyrics\` named `Artist - Title.lrc` (or `.txt`).
+A local sheet takes priority over cached and online results. No account or
+telemetry is used; only the title/artist search is sent to a lyrics provider.
+If no source has the song, the display says so, and `R` retries.
 
 <br>
 
 <h2 align="center">How it works</h2>
 
-<img src="docs/brand/pipeline.png" alt="Pipeline: you press play; Windows media session reports title, artist and playhead; LRCLIB returns synced LRC; the display draws one lit line." width="100%">
+<img src="docs/brand/pipeline.png" alt="Pipeline: Windows reports the playing track; LRCLIB, lyrics.ovh, or a local sheet supplies lyrics; the display shows one lit line." width="100%">
 
 <div align="center"><sub>Nothing is recorded. The app never touches your audio — only the metadata Windows already publishes.</sub></div>
 
@@ -131,9 +140,9 @@ docs/preview.html  a browser mock of the display, for looking at it here
 ```
 
 The portable half is deliberately free of Windows headers and has its own test
-suite — 3,192 assertions covering LRC parsing, timing, layout and scroll
-behaviour — so lyric maths can be checked on any machine, not just a Windows
-one.
+suite covering LRC parsing, track matching, wrong-song rejection, lyric timing,
+layout and scroll behaviour — so lyric maths can be checked on any machine, not
+just a Windows one.
 
 ```bash
 ./scripts/test.sh     # core tests (ASan + UBSan), no Windows needed
@@ -154,10 +163,10 @@ it does on Windows. Icon and artwork generation additionally need Pillow and
 
 <br>
 
-The app reads Windows' media session, so the player must publish one. Browsers do
-this while a tab is actually producing audio — a paused tab does not count. Press
-`F1`: it shows the raw state the listener reported, including whether any session
-was found at all. Some players (a few portable builds, older foobar2000) never
+The app reads Windows' media session and only accepts sessions Windows reports
+as playing. Paused tabs are ignored. Press `F1` in normal display mode: it shows
+the raw state the listener reported, including whether any session was found at
+all. Some players (a few portable builds, older foobar2000) never
 publish a session and cannot be supported.
 
 </details>
@@ -167,10 +176,11 @@ publish a session and cannot be supported.
 
 <br>
 
-Press `F1` to see the exact title and artist the app detected. YouTube Music
-sometimes reports `Artist - Topic`, `Song (Official Video)` or a remaster suffix;
-the app strips those, then tries a fuzzy search, then gives up rather than showing
-the wrong words. `R` retries.
+Press `F1` in normal display mode to see the exact title and artist the app
+detected. YouTube Music sometimes reports `Artist - Topic` or a video suffix;
+the app cleans the noise, searches multiple sources, and refuses mismatched
+artists/titles rather than showing the wrong words. `R` retries. You can add a
+local `.lrc`/`.txt` override under `%LOCALAPPDATA%\YouTubeLyrics\lyrics\`.
 
 </details>
 
@@ -193,8 +203,8 @@ within a second.
 <br>
 
 Read `%LOCALAPPDATA%\YouTubeLyrics\ytlyrics.log`. Cached lyrics live beside it in
-`cache\`; deleting that folder is always safe and costs you nothing but a
-re-download.
+`cache\`; local overrides go in `lyrics\`. Deleting `cache\` is always safe
+and costs you nothing but a re-download.
 
 </details>
 
@@ -209,7 +219,8 @@ Run this in a terminal while a song plays:
 powershell -ExecutionPolicy Bypass -File "%LOCALAPPDATA%\YouTubeLyrics\smtc.ps1"
 ```
 
-It prints one JSON line every 400 ms with status, title, artist and playhead. This
+It prints one JSON line every 400 ms with the selected playing session, title,
+artist and playhead. This
 is also the fastest way to tell whether a playback problem is in the app or in
 Windows' media session.
 

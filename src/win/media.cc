@@ -218,7 +218,10 @@ bool media_parse_line(const std::string& line, MediaState& out, int64_t now) {
   std::string title = v.get_str("title");
   std::string artist = v.get_str("artist");
 
-  if (status == "none" || (title.empty() && status != "paused")) {
+  // No title means no identified track. In particular, do not promote the
+  // artist to a fake title when a stale paused session has only half its
+  // metadata left.
+  if (status == "none" || title.empty()) {
     out.have = false;
     return true;
   }
@@ -228,13 +231,21 @@ bool media_parse_line(const std::string& line, MediaState& out, int64_t now) {
   t.artist = artist;
   t.album = v.get_str("album");
   t.duration_s = v.get_num("dur", 0);
-  out.track = clean_track(t);
+  // Media metadata is authoritative. The generic cleaner still offers an
+  // optional YouTube-title heuristic for callers that want it, but the live
+  // listener never invents an artist from "Title - Something".
+  out.track = clean_track(t, false);
   out.duration_s = t.duration_s;
   out.pos_ms = static_cast<int64_t>(v.get_num("pos", 0) * 1000.0);
   out.art_path = v.get_str("art");
   out.app = v.get_str("app");
   out.key = track_key(out.track);
-  out.have = !out.track.title.empty();
+
+  // Ignore sessions that are not music: system UI, ads, stinger jingles, game
+  // menus. Without this the display can latch onto whatever happens to hold a
+  // media session, which is one way the wrong words end up on screen.
+  out.have = !out.track.title.empty() && is_watchable_app(out.app, out.track);
+  if (!out.have) out.status = "ignored";
   return true;
 }
 

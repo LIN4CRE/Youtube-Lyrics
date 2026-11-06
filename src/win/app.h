@@ -51,6 +51,10 @@ struct Config {
   bool wipe = true;           // karaoke wipe on the active line
   int theme = 0;              // index into the theme table
   bool fullscreen = true;     // start in full screen
+  // Desktop-wallpaper mode: the window sits on the desktop layer behind every
+  // other window, ignores mouse input entirely and never takes focus, so it can
+  // stay up permanently without getting in the way.
+  bool wallpaper = true;
 
   void load();
   void save() const;
@@ -103,6 +107,7 @@ struct View {
   int64_t hint_until = 0;
   bool cursor_hidden = false;
   int64_t last_mouse = 0;
+  int64_t last_pulse_paint = 0;
 };
 
 // --------------------------------------------------------------------- the app
@@ -114,8 +119,13 @@ struct App {
 
   Config cfg;
 
-  std::mutex mu;   // guards `media`
+  std::mutex mu;   // guards `media` (the latest raw helper observation)
   MediaState media;
+
+  // UI-thread-owned committed media state. Unlike `media`, this survives a
+  // transient blank/none poll while SMTC tears down or switches sessions.
+  MediaState active_media;
+  TrackInfo active_track;
 
   // lyrics document (UI thread owns it)
   Lyrics lyrics;
@@ -133,6 +143,19 @@ struct App {
 
   bool helper_heard = false;  // has the media helper reported anything yet?
   int64_t started_at = 0;
+
+  // Track-change debounce. A stale session can report one song for a single
+  // poll while another app is starting; only commit after the same track has
+  // been seen twice in a row, so the display never flickers to another song.
+  std::string pending_key;
+  TrackInfo pending_track;
+  int pending_seen = 0;
+  int64_t pending_since = 0;
+  int64_t missing_since = 0;
+
+  // Parent HWND for true WorkerW wallpaper mode (behind desktop icons).
+  HWND desktop_host = nullptr;
+  bool desktop_parented = false;
   bool windowed = false;      // currently a normal window (not full screen)
   RECT windowed_rect{};
   bool hidden_to_tray = false;
@@ -145,8 +168,9 @@ struct App {
   // Current playback position, extrapolated from the last media poll and with
   // the user's manual offset applied. 0 when nothing is playing.
   int64_t current_pos_ms() const;
+  double current_duration_s() const;
 
-  // Track that lyrics should be shown for (snapshot of media.track).
+  // Track whose lyrics have been committed after media-session validation.
   TrackInfo current_track() const;
 
   void request_lyrics(const TrackInfo& track, bool force);

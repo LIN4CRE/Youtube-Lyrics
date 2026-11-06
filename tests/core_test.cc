@@ -141,6 +141,10 @@ static void test_clean_track() {
     TrackInfo c = clean_track(t);
     CHECK_STR(c.title, "In the End");
     CHECK_STR(c.artist, "Linkin Park");
+    // The live media path does not invent an artist from an ambiguous title.
+    TrackInfo conservative = clean_track(t, false);
+    CHECK_STR(conservative.title, "In the End - Linkin Park");
+    CHECK(conservative.artist.empty());
   }
   {
     TrackInfo t{"Somebody That I Used To Know", "Gotye", "", 0};
@@ -352,6 +356,131 @@ static void test_playback_simulation() {
   CHECK(m3.top[1] - m3.top[0] == 60);
 }
 
+
+// Regression: a stale media session that is still reporting the previous song
+// must not be mistaken for the track that is playing now, and a search result
+// for a cover must never win just because it is the only synced candidate.
+static void test_wrong_song_guards() {
+  // Same recording, different capitalisation / punctuation is the same track.
+  TrackInfo a{"In the End", "Linkin Park", "Hybrid Theory", 216.0};
+  TrackInfo b{"in the end", "LINKIN PARK", "", 216.4};
+  CHECK(same_track(a, b));
+
+  // A different recording with a colliding title is not.
+  TrackInfo c{"In the End", "Linkin Park", "", 260.0};
+  CHECK(!same_track(a, c));
+  TrackInfo d{"In the End", "Some Cover Band", "", 216.0};
+  CHECK(!same_track(a, d));
+
+  // A player that withdraws its artist mid-session has not changed the song.
+  TrackInfo e{"In the End", "", "", 216.0};
+  CHECK(same_track(a, e));
+
+  // Short-lived non-music sessions are never watched.
+  TrackInfo ad{"Advertisement", "Spotify", "", 20.0};
+  CHECK(!is_watchable_app("Spotify.exe", ad));
+  CHECK(!is_watchable_app("Chrome", TrackInfo{"Intro", "Band", "", 18.0}));
+  CHECK(!is_watchable_app("ShellExperienceHost", TrackInfo{"Settings", "", "", 0}));
+  CHECK(is_watchable_app("Chrome", TrackInfo{"In the End", "Linkin Park", "", 216.0}));
+  CHECK(is_watchable_app("Spotify.exe", TrackInfo{"In the End", "Linkin Park", "", 0}));
+  // An unknown app is trusted only when it reports a real song length.
+  CHECK(!is_watchable_app("SomeGame.exe", TrackInfo{"Theme", "Composer", "", 40.0}));
+  CHECK(is_watchable_app("SomeGame.exe", TrackInfo{"Theme", "Composer", "", 180.0}));
+
+  // Candidate ranking: an unrelated artist with the right title must be
+  // rejected even when it is the only synced result in the list.
+  JValue v;
+  std::string covers =
+      "[{\"trackName\":\"In the End\",\"artistName\":\"Karaoke Kings\","
+      "\"duration\":216,\"syncedLyrics\":\"[00:12.00] wrong words\"},"
+      "{\"trackName\":\"In the End\",\"artistName\":\"Linkin Park\","
+      "\"duration\":215,\"syncedLyrics\":\"[00:12.00] It starts with one\"}]";
+  CHECK(json_parse(covers, v));
+  const JValue* best = best_candidate(v, a, nullptr);
+  CHECK(best != nullptr);
+  CHECK_STR(best->get_str("artistName"), "Linkin Park");
+
+  // Right title, right artist, but the wrong length: a live version. A 40 s
+  // discrepancy must lose to a studio cut that matches.
+  std::string versions =
+      "[{\"trackName\":\"In the End\",\"artistName\":\"Linkin Park\","
+      "\"duration\":258,\"syncedLyrics\":\"[00:12.00] live\"},"
+      "{\"trackName\":\"In the End\",\"artistName\":\"Linkin Park\","
+      "\"duration\":216,\"syncedLyrics\":\"[00:12.00] studio\"}]";
+  CHECK(json_parse(versions, v));
+  best = best_candidate(v, a, nullptr);
+  CHECK(best != nullptr);
+  CHECK_EQ(static_cast<int>(best->get_num("duration")), 216);
+
+  // A different title from the same artist must not win on a matching duration.
+  std::string same_artist_wrong_title =
+      "[{\"trackName\":\"Numb\",\"artistName\":\"Linkin Park\","
+      "\"duration\":216,\"syncedLyrics\":\"[00:12.00] wrong song\"}]";
+  CHECK(json_parse(same_artist_wrong_title, v));
+  CHECK(best_candidate(v, a, nullptr) == nullptr);
+
+  // Even the exact-match endpoint is validated against the requested track;
+  // a malformed or stale response cannot bypass the search candidate gate.
+  Lyrics rejected;
+  CHECK(!parse_lrclib_payload(
+      "{\"trackName\":\"Numb\",\"artistName\":\"Linkin Park\","
+      "\"duration\":216,\"syncedLyrics\":\"[00:12.00] wrong song\"}",
+      a, rejected));
+
+  // If the media source omitted the artist, exact title alone is not enough;
+  // require matching duration to avoid a same-title song from another artist.
+  TrackInfo artist_missing{"In the End", "", "", 216.0};
+  std::string title_only_wrong_length =
+      "[{\"trackName\":\"In the End\",\"artistName\":\"Other Artist\","
+      "\"duration\":258,\"syncedLyrics\":\"[00:12.00] other song\"}]";
+  CHECK(json_parse(title_only_wrong_length, v));
+  CHECK(best_candidate(v, artist_missing, nullptr) == nullptr);
+  std::string title_only_right_length =
+      "[{\"trackName\":\"In the End\",\"artistName\":\"Linkin Park\","
+      "\"duration\":216,\"syncedLyrics\":\"[00:12.00] same recording\"}]";
+  CHECK(json_parse(title_only_right_length, v));
+  CHECK(best_candidate(v, artist_missing, nullptr) != nullptr);
+  artist_missing.duration_s = 0;
+  CHECK(best_candidate(v, artist_missing, nullptr) == nullptr);
+
+  // Only an artist mismatch available -> refuse rather than guess.
+  std::string only_cover =
+      "[{\"trackName\":\"In the End\",\"artistName\":\"Karaoke Kings\","
+      "\"duration\":216,\"syncedLyrics\":\"[00:12.00] wrong words\"}]";
+  CHECK(json_parse(only_cover, v));
+  CHECK(best_candidate(v, a, nullptr) == nullptr);
+}
+
+// The wider net: a second provider, pacing for untimed lyrics, and a local
+// override file.
+static void test_extra_providers() {
+  Lyrics out;
+  CHECK(parse_lyrics_ovh_payload("{\"lyrics\":\"first line\\nsecond line\"}", out));
+  CHECK(!out.synced);
+  CHECK_STR(out.source, "lyrics.ovh");
+  CHECK(out.plain.find("second line") != std::string::npos);
+  // The service reports misses in-band with HTTP 200.
+  CHECK(!parse_lyrics_ovh_payload("{\"lyrics\":\"No lyrics found\"}", out));
+  CHECK(!parse_lyrics_ovh_payload("{\"error\":\"nope\"}", out));
+  CHECK(!parse_lyrics_ovh_payload("not json", out));
+
+  // Untimed lyrics are paced across the track so the view still scrolls.
+  auto paced = pace_plain_lyrics("one\n\ntwo\nthree", 2000, 4000);
+  CHECK_EQ(paced.size(), static_cast<size_t>(4));
+  CHECK_EQ(paced[0].t_ms, static_cast<int64_t>(2000));
+  CHECK(paced[1].text.empty());
+  CHECK_EQ(paced[3].t_ms, static_cast<int64_t>(14000));
+
+  // A hand-written .lrc or .txt overrides whatever the lookup returned.
+  CHECK(parse_local_lyrics("[00:01.00]hello\n[00:05.00]world", out));
+  CHECK(out.synced);
+  CHECK_EQ(out.lines.size(), static_cast<size_t>(2));
+  CHECK_STR(out.source, "local file");
+  CHECK(parse_local_lyrics("just words\nmore words", out));
+  CHECK(!out.synced);
+  CHECK(!parse_local_lyrics("   \n  ", out));
+}
+
 int main() {
   test_utf8();
   test_json();
@@ -361,6 +490,8 @@ int main() {
   test_layout();
   test_misc();
   test_playback_simulation();
+  test_wrong_song_guards();
+  test_extra_providers();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

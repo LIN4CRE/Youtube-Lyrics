@@ -10,7 +10,7 @@ namespace ytl {
 
 // LRCLIB asks API clients to identify themselves.
 static const wchar_t* kUserAgent =
-    L"YoutubeLyrics/1.1 (https://github.com/LIN4CRE/Youtube-Lyrics)";
+    L"YoutubeLyrics/1.2 (https://github.com/LIN4CRE/Youtube-Lyrics)";
 
 // ---------------------------------------------------------------------------
 // Minimal blocking HTTP GET (WinHTTP). Runs on the lyrics worker thread only.
@@ -40,6 +40,8 @@ std::string http_get(const std::wstring& url, int timeout_ms, int* status_out,
   }
   if (!session) return fail("WinHttpOpen", GetLastError());
 
+  // Keep lookups responsive when a provider is offline. The chain has fallbacks,
+  // so one stalled host must not freeze the display for a minute.
   WinHttpSetTimeouts(session, timeout_ms, timeout_ms, timeout_ms, timeout_ms * 2);
 
   URL_COMPONENTS uc{};
@@ -257,6 +259,32 @@ std::string build_search_url(const TrackInfo& t) {
   return url;
 }
 
+// Where a hand-written override lives: %LOCALAPPDATA%\YouTubeLyrics\lyrics\
+// <Artist> - <Title>.lrc (or .txt). Anything dropped there wins over the network.
+std::string manual_path(const TrackInfo& t) {
+  std::string dir = appdata_dir() + "\\lyrics";
+  std::string base = t.artist.empty() ? t.title : (t.artist + " - " + t.title);
+  for (char& c : base) {
+    if (c == '<' || c == '>' || c == ':' || c == '"' || c == '/' || c == '\\' ||
+        c == '|' || c == '?' || c == '*') {
+      c = '_';
+    }
+  }
+  std::string leaf = base + ".lrc";
+  std::string p = dir + "\\" + leaf;
+  if (!read_file(p).empty()) return p;
+  return dir + "\\" + base + ".txt";
+}
+
+std::string build_ovh_url(const TrackInfo& t) {
+  return "https://api.lyrics.ovh/v1/" + url_encode(t.artist) + "/" +
+         url_encode(t.title);
+}
+
+std::string build_title_only_url(const TrackInfo& t) {
+  return "https://lrclib.net/api/search?track_name=" + url_encode(t.title);
+}
+
 std::string build_query_url(const TrackInfo& t) {
   std::string q = t.artist.empty() ? t.title : (t.artist + " " + t.title);
   return "https://lrclib.net/api/search?q=" + url_encode(q);
@@ -280,9 +308,16 @@ bool try_fetch(const TrackInfo& track, const std::string& url, Lyrics& out,
     return false;
   }
   Lyrics parsed;
-  if (!parse_lrclib_payload(body, track, parsed) || parsed.empty()) {
+  const bool ovh = url.find("lyrics.ovh") != std::string::npos;
+  const bool ok = ovh ? parse_lyrics_ovh_payload(body, parsed)
+                      : parse_lrclib_payload(body, track, parsed);
+  if (!ok || parsed.empty()) {
     why = "No usable lyrics in the database for this track.";
     return false;
+  }
+  if (!ovh) {
+    // Record which catalogue answered, so the display can say so honestly.
+    parsed.source = "LRCLIB";
   }
   out = parsed;
   if (out.title.empty()) out.title = track.title;
@@ -292,6 +327,20 @@ bool try_fetch(const TrackInfo& track, const std::string& url, Lyrics& out,
 
 LyricsState do_lookup(const TrackInfo& track, bool force, Lyrics& out,
                       std::string& msg) {
+  // A lyric sheet the user dropped in by hand always wins, including over a
+  // previously cached automatic result.
+  {
+    std::string manual = read_file(manual_path(track));
+    Lyrics l;
+    if (!manual.empty() && parse_local_lyrics(manual, l)) {
+      logf("lyrics: using local override for %s", track_key(track).c_str());
+      l.title = track.title;
+      l.artist = track.artist;
+      out = l;
+      return LyricsState::Ready;
+    }
+  }
+
   if (!force && ensure_cache_dir()) {
     std::string cached = read_file(cache_path(track));
     Lyrics l;
@@ -303,11 +352,58 @@ LyricsState do_lookup(const TrackInfo& track, bool force, Lyrics& out,
   }
 
   std::string why;
-  if (try_fetch(track, build_get_url(track), out, why)) return LyricsState::Ready;
-  // Exact title+artist match failed; fall back to fuzzy search.
-  if (try_fetch(track, build_search_url(track), out, why)) return LyricsState::Ready;
-  if (!track.artist.empty() &&
-      try_fetch(track, build_query_url(track), out, why)) {
+  std::string plain_fallback;   // kept in case nothing timed turns up
+  Lyrics plain_lyrics;
+  int tried = 0;
+  bool lrclib_unreachable = false;
+
+  auto attempt = [&](const std::string& url, const char* name) {
+    const bool lrclib = url.find("lrclib.net") != std::string::npos;
+    if (lrclib && lrclib_unreachable) return false;
+    ++tried;
+    Lyrics l;
+    std::string detail;
+    if (!try_fetch(track, url, l, detail)) {
+      if (!detail.empty()) why = detail;
+      if (lrclib && detail.find("transport error") != std::string::npos)
+        lrclib_unreachable = true;
+      return false;
+    }
+    if (l.synced && !l.empty()) {
+      l.providers_tried = tried;
+      out = l;
+      return true;
+    }
+    // Untimed lyrics are still useful, but only once every timed source has
+    // been tried - a scrolling sheet beats no sheet, and beats a static one.
+    if (plain_fallback.empty() && !l.empty()) {
+      plain_fallback = name;
+      plain_lyrics = l;
+    }
+    return false;
+  };
+
+  // 1. Exact match (fastest, most precise).
+  if (attempt(build_get_url(track), "LRCLIB")) return LyricsState::Ready;
+  // 2. Structured search - title + artist, then free text.
+  if (attempt(build_search_url(track), "LRCLIB")) return LyricsState::Ready;
+  if (!track.artist.empty() && attempt(build_query_url(track), "LRCLIB")) {
+    return LyricsState::Ready;
+  }
+  // 3. A second catalogue. lyrics.ovh is keyless and answers very fast, and it
+  //    covers a lot of tracks LRCLIB has not been given yet.
+  if (!track.artist.empty() && attempt(build_ovh_url(track), "lyrics.ovh")) {
+    return LyricsState::Ready;
+  }
+  // 4. Title-only last resort, heavily filtered by best_candidate().
+  if (attempt(build_title_only_url(track), "LRCLIB")) return LyricsState::Ready;
+
+  if (!plain_fallback.empty()) {
+    plain_lyrics.providers_tried = tried;
+    if (plain_lyrics.title.empty()) plain_lyrics.title = track.title;
+    if (plain_lyrics.artist.empty()) plain_lyrics.artist = track.artist;
+    logf("lyrics: falling back to untimed lyrics from %s", plain_fallback.c_str());
+    out = plain_lyrics;
     return LyricsState::Ready;
   }
 

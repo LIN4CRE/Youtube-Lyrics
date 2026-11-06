@@ -6,6 +6,7 @@
 #include <shlwapi.h>
 #include <knownfolders.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdarg>
 #include <cstdlib>
@@ -22,6 +23,7 @@ const wchar_t* kClassName = L"YoutubeLyricsWindow";
 const wchar_t* kAppName = L"Youtube-Lyrics";
 const UINT_PTR kFrameTimer = 1;
 const int kHotkeyToggle = 1;
+const int kHotkeyWallpaper = 2;
 const UINT kTrayId = 1;
 const UINT WM_APP_SHOW_EXISTING = WM_APP + 9;
 
@@ -33,6 +35,7 @@ HICON g_tray_icon = nullptr;
 // report a timeline (some browsers). See note in README.
 struct PosTracker {
   std::string key;
+  TrackInfo track;
   int64_t reported = -1;
   int64_t last_change = 0;
   int64_t free_anchor = 0;
@@ -200,6 +203,63 @@ std::vector<LyricLine> synthesise_plain_lines(const std::string& plain) {
   return out;
 }
 
+void reset_document(App& app) {
+  app.lyrics = Lyrics();
+  app.disp.clear();
+  app.pending_plain_lines.clear();
+  app.view.line_top.clear();
+  app.view.line_h.clear();
+  app.view.total_h = 0;
+  app.view.scroll = 0;
+  app.active = -1;
+}
+
+void update_position_tracker(App& app, const MediaState& observed) {
+  const bool was_playing = app.active_media.playing;
+  app.active_media = observed;
+  app.active_media.track = app.active_track;
+  const std::string key = track_key(app.active_track);
+
+  if (!observed.playing) {
+    g_pos.key = key;
+    g_pos.track = app.active_track;
+    g_pos.reported = observed.pos_ms;
+    g_pos.last_change = observed.at_ms;
+    g_pos.free_anchor = observed.at_ms;
+    g_pos.free_running = false;
+    return;
+  }
+
+  const bool resumed = !was_playing;
+  const bool new_recording = g_pos.key.empty() || !same_track(g_pos.track, app.active_track);
+  if (new_recording || resumed) {
+    g_pos.key = key;
+    g_pos.track = app.active_track;
+    g_pos.reported = observed.pos_ms;
+    g_pos.last_change = observed.at_ms;
+    g_pos.free_anchor = observed.at_ms;
+    g_pos.free_running = false;
+  } else {
+    g_pos.key = key;
+    g_pos.track = app.active_track;
+    if (std::llabs(observed.pos_ms - g_pos.reported) > 150) {
+      g_pos.reported = observed.pos_ms;
+      g_pos.last_change = observed.at_ms;
+      g_pos.free_running = false;
+    } else if (!g_pos.free_running && observed.at_ms - g_pos.last_change > 2600 &&
+               observed.pos_ms < 1500) {
+      g_pos.free_running = true;
+      g_pos.free_anchor = g_pos.last_change;
+      logf("media: player reports no playhead, running free clock");
+    }
+  }
+
+  if (g_pos.free_running) {
+    app.active_media.at_ms = g_pos.free_anchor;
+    app.active_media.pos_ms = 0;
+  }
+}
+
 void on_media(App& app) {
   MediaState m;
   {
@@ -207,53 +267,104 @@ void on_media(App& app) {
     m = app.media;
   }
   if (!m.raw.empty()) app.helper_heard = true;
+  const int64_t now = m.at_ms > 0 ? m.at_ms : app.now_ms();
 
-  // Some players (notably browsers without Media Session position state) do
-  // not report a moving playhead. Detect that and run our own clock from the
-  // moment the track first appeared, so lyrics still scroll.
-  if (m.have && m.playing) {
-    bool changed_track = (m.key != g_pos.key);
-    if (changed_track) {
-      g_pos.key = m.key;
-      g_pos.reported = m.pos_ms;
-      g_pos.last_change = m.at_ms;
-      g_pos.free_anchor = m.at_ms;
-      g_pos.free_running = false;
+  if (m.have && !m.track.title.empty()) {
+    app.missing_since = 0;
+
+    // A brief withdrawal of artist/duration metadata is the same observation,
+    // not a new track. Keep known-good fields rather than degrading the active
+    // identity until the next SMTC poll.
+    if (!app.active_track.title.empty() && same_track(app.active_track, m.track)) {
+      TrackInfo refined = m.track;
+      if (m.art_path.empty()) m.art_path = app.active_media.art_path;
+      if (refined.artist.empty()) refined.artist = app.active_track.artist;
+      if (refined.album.empty()) refined.album = app.active_track.album;
+      if (refined.duration_s <= 0) refined.duration_s = app.active_track.duration_s;
+      app.active_track = clean_track(refined, false);
+      app.current_key = track_key(app.active_track);
+      app.pending_key.clear();
+      app.pending_track = TrackInfo();
+      app.pending_seen = 0;
+      update_position_tracker(app, m);
     } else {
-      if (std::llabs(m.pos_ms - g_pos.reported) > 150) {
-        g_pos.reported = m.pos_ms;
-        g_pos.last_change = m.at_ms;
-        g_pos.free_running = false;
-      } else if (!g_pos.free_running && m.at_ms - g_pos.last_change > 2600 &&
-                 m.pos_ms < 1500) {
-        g_pos.free_running = true;
-        g_pos.free_anchor = g_pos.last_change;
-        logf("media: player reports no playhead, running free clock");
+      // Require the same, credible track in consecutive polls before replacing
+      // the sheet. A stale SMTC session or a one-poll title glitch cannot make
+      // us fetch lyrics for the wrong song.
+      const bool same_pending = !app.pending_track.title.empty() &&
+                                same_track(app.pending_track, m.track);
+      if (!same_pending) {
+        app.pending_track = m.track;
+        app.pending_key = m.key;
+        app.pending_seen = 1;
+        app.pending_since = now;
+        logf("media: candidate '%s' (%s)", track_label(m.track).c_str(),
+             m.key.c_str());
+      } else {
+        ++app.pending_seen;
+        if (app.pending_track.artist.empty() && !m.track.artist.empty())
+          app.pending_track = m.track;
+      }
+
+      const bool confirmed = app.pending_seen >= 2 &&
+                             now - app.pending_since >= 300;
+      if (confirmed) {
+        TrackInfo next = app.pending_track;
+        if (next.title.empty()) next = m.track;
+        const bool different = app.active_track.title.empty() ||
+                               !same_track(app.active_track, next);
+        app.active_track = clean_track(next, false);
+        app.current_key = track_key(app.active_track);
+        app.pending_key.clear();
+        app.pending_track = TrackInfo();
+        app.pending_seen = 0;
+
+        if (different) {
+          // Starting a distinct song invalidates the old lyric sheet immediately;
+          // never leave Linkin Park words on screen while a new lookup runs.
+          reset_document(app);
+          app.lstate = LyricsState::Loading;
+          app.lmessage.clear();
+          logf("media: now playing '%s' (%s) dur=%.1f",
+               track_label(app.active_track).c_str(), app.current_key.c_str(),
+               m.duration_s);
+          lyrics_enqueue(app.active_track, ++app.lyrics_req_id, false);
+        }
+        update_position_tracker(app, m);
       }
     }
-    if (g_pos.free_running) {
-      std::lock_guard<std::mutex> lock(app.mu);
-      app.media.at_ms = g_pos.free_anchor;
-      app.media.pos_ms = 0;
-    }
-  }
-
-  bool want_lyrics = m.have && !m.track.title.empty();
-  if (want_lyrics) {
-    if (m.key != app.current_key) {
-      app.current_key = m.key;
-      logf("media: now playing '%s' (%s) dur=%.1f", track_label(m.track).c_str(),
-           m.key.c_str(), m.duration_s);
-      app.request_lyrics(m.track, false);
-    }
   } else {
-    app.current_key.clear();
-    if (app.lstate != LyricsState::Idle) {
+    app.pending_key.clear();
+    app.pending_track = TrackInfo();
+    app.pending_seen = 0;
+
+    if (app.missing_since == 0) app.missing_since = now;
+    // Freeze at the last credible position as soon as the session vanishes.
+    // The active song and lyrics survive short SMTC gaps; they are cleared only
+    // after three seconds with no watchable session.
+    if (!app.active_track.title.empty() && app.active_media.playing) {
+      const int64_t duration = static_cast<int64_t>(app.active_media.duration_s * 1000.0);
+      int64_t frozen = interpolate_pos(app.active_media.pos_ms, app.active_media.at_ms,
+                                        now, true, duration);
+      frozen -= app.cfg.offset_ms;
+      if (frozen < 0) frozen = 0;
+      app.active_media.pos_ms = frozen;
+      app.active_media.at_ms = now;
+      app.active_media.playing = false;
+    }
+
+    if (now - app.missing_since >= 3000 && !app.active_track.title.empty()) {
+      logf("media: session gone for 3s; clearing '%s'",
+           track_label(app.active_track).c_str());
+      app.active_track = TrackInfo();
+      app.active_media = MediaState();
+      app.current_key.clear();
+      app.missing_since = 0;
+      ++app.lyrics_req_id;  // ignore any lookup that finishes after the session
       app.lstate = LyricsState::Idle;
-      app.disp.clear();
-      app.view.line_top.clear();
-      app.view.line_h.clear();
-      app.view.total_h = 0;
+      app.lmessage.clear();
+      reset_document(app);
+      g_pos = PosTracker();
     }
   }
 
@@ -286,6 +397,30 @@ void on_lyrics(App& app) {
 
 // ---------------------------------------------------------------- fullscreen
 
+BOOL CALLBACK find_workerw_after_desktop(HWND top, LPARAM param) {
+  HWND def_view = FindWindowExW(top, nullptr, L"SHELLDLL_DefView", nullptr);
+  if (!def_view) return TRUE;
+  HWND worker = FindWindowExW(nullptr, top, L"WorkerW", nullptr);
+  if (!worker) return TRUE;
+  *reinterpret_cast<HWND*>(param) = worker;
+  return FALSE;
+}
+
+HWND find_desktop_host() {
+  // Ask Explorer to create the WorkerW surface behind the desktop icons (the
+  // same documented-in-practice technique used by live wallpaper apps).
+  HWND progman = FindWindowW(L"Progman", nullptr);
+  if (progman) {
+    DWORD_PTR ignored = 0;
+    SendMessageTimeoutW(progman, 0x052C, 0, 0, SMTO_NORMAL, 1000, &ignored);
+  }
+  HWND host = nullptr;
+  EnumWindows(find_workerw_after_desktop, reinterpret_cast<LPARAM>(&host));
+  return host;
+}
+
+void apply_desktop_mode(App& app);
+
 void apply_fullscreen(App& app) {
   if (!app.hwnd) return;
   MONITORINFO mi{};
@@ -295,28 +430,143 @@ void apply_fullscreen(App& app) {
 
   if (!app.windowed) {
     SetWindowLongPtrW(app.hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
-    SetWindowPos(app.hwnd, app.cfg.topmost ? HWND_TOPMOST : HWND_TOP,
-                 mi.rcMonitor.left, mi.rcMonitor.top,
+    SetWindowPos(app.hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
                  mi.rcMonitor.right - mi.rcMonitor.left,
                  mi.rcMonitor.bottom - mi.rcMonitor.top,
-                 SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+                 SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
   } else {
     SetWindowLongPtrW(app.hwnd, GWL_STYLE,
                       WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN);
     RECT r = app.windowed_rect;
-    if (r.right - r.left < 400) {
-      int w = (mi.rcMonitor.right - mi.rcMonitor.left) * 3 / 4;
-      int h = (mi.rcMonitor.bottom - mi.rcMonitor.top) * 3 / 4;
-      r = {mi.rcMonitor.left + w / 6, mi.rcMonitor.top + h / 6,
-           mi.rcMonitor.left + w / 6 + w, mi.rcMonitor.top + h / 6 + h};
+    const int mon_w = mi.rcMonitor.right - mi.rcMonitor.left;
+    const int mon_h = mi.rcMonitor.bottom - mi.rcMonitor.top;
+    if (r.right - r.left < 400 || r.bottom - r.top < 320 ||
+        r.right - r.left >= mon_w * 9 / 10 ||
+        r.bottom - r.top >= mon_h * 9 / 10) {
+      int w = mon_w * 3 / 4;
+      int h = mon_h * 3 / 4;
+      r = {mi.rcMonitor.left + (mon_w - w) / 2,
+           mi.rcMonitor.top + (mon_h - h) / 2,
+           mi.rcMonitor.left + (mon_w - w) / 2 + w,
+           mi.rcMonitor.top + (mon_h - h) / 2 + h};
     }
     SetWindowPos(app.hwnd, HWND_TOP, r.left, r.top, r.right - r.left,
                  r.bottom - r.top, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
   }
+
   app.hidden_to_tray = false;
-  ShowWindow(app.hwnd, SW_SHOW);
-  SetForegroundWindow(app.hwnd);
+  apply_desktop_mode(app);
+  const bool desktop = app.cfg.wallpaper && !app.windowed;
+  ShowWindow(app.hwnd, desktop ? SW_SHOWNOACTIVATE : SW_SHOW);
+  if (!desktop) SetForegroundWindow(app.hwnd);
   invalidate_window(app);
+}
+
+// Places the display in the actual WorkerW desktop layer, behind desktop icons
+// but above the wallpaper. When WorkerW is unavailable, fall back to the bottom
+// of the top-level z-order; the tray toggle remains available either way.
+void apply_desktop_mode(App& app) {
+  if (!app.hwnd) return;
+  const bool want_wallpaper = app.cfg.wallpaper && !app.windowed;
+
+  if (want_wallpaper) {
+    if (!app.desktop_parented) {
+      HWND host = find_desktop_host();
+      if (host) {
+        SetLastError(0);
+        SetParent(app.hwnd, host);
+        if (GetLastError() == 0) {
+          app.desktop_host = host;
+          app.desktop_parented = true;
+        }
+      }
+    }
+
+    LONG_PTR ex = GetWindowLongPtrW(app.hwnd, GWL_EXSTYLE);
+    ex |= WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TRANSPARENT;
+    ex &= ~WS_EX_APPWINDOW;
+    SetWindowLongPtrW(app.hwnd, GWL_EXSTYLE, ex);
+    SetLayeredWindowAttributes(app.hwnd, 0, 255, LWA_ALPHA);
+
+    if (app.desktop_parented && IsWindow(app.desktop_host)) {
+      LONG_PTR style = GetWindowLongPtrW(app.hwnd, GWL_STYLE);
+      style &= ~WS_POPUP;
+      style |= WS_CHILD | WS_VISIBLE;
+      SetWindowLongPtrW(app.hwnd, GWL_STYLE, style);
+      RECT r{};
+      GetClientRect(app.desktop_host, &r);
+      SetWindowPos(app.hwnd, HWND_TOP, 0, 0, r.right - r.left, r.bottom - r.top,
+                   SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
+      logf("window: attached to desktop WorkerW %p", app.desktop_host);
+    } else {
+      // Graceful fallback for Windows configurations where Explorer does not
+      // expose a WorkerW host.
+      MONITORINFO mi{};
+      mi.cbSize = sizeof(mi);
+      GetMonitorInfoW(MonitorFromWindow(app.hwnd, MONITOR_DEFAULTTONEAREST), &mi);
+      LONG_PTR style = GetWindowLongPtrW(app.hwnd, GWL_STYLE);
+      style &= ~WS_CHILD;
+      style |= WS_POPUP | WS_VISIBLE;
+      SetWindowLongPtrW(app.hwnd, GWL_STYLE, style);
+      SetWindowPos(app.hwnd, HWND_BOTTOM, mi.rcMonitor.left, mi.rcMonitor.top,
+                   mi.rcMonitor.right - mi.rcMonitor.left,
+                   mi.rcMonitor.bottom - mi.rcMonitor.top,
+                   SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
+      logf("window: WorkerW unavailable; using bottom z-order fallback");
+    }
+  } else {
+    if (app.desktop_parented) {
+      SetLastError(0);
+      SetParent(app.hwnd, nullptr);
+      app.desktop_parented = false;
+      app.desktop_host = nullptr;
+    }
+
+    LONG_PTR ex = GetWindowLongPtrW(app.hwnd, GWL_EXSTYLE);
+    ex &= ~(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED |
+            WS_EX_TRANSPARENT);
+    ex |= WS_EX_APPWINDOW;
+    SetWindowLongPtrW(app.hwnd, GWL_EXSTYLE, ex);
+
+    if (!app.windowed) {
+      MONITORINFO mi{};
+      mi.cbSize = sizeof(mi);
+      GetMonitorInfoW(MonitorFromWindow(app.hwnd, MONITOR_DEFAULTTONEAREST), &mi);
+      LONG_PTR style = GetWindowLongPtrW(app.hwnd, GWL_STYLE);
+      style &= ~WS_CHILD;
+      style |= WS_POPUP | WS_VISIBLE;
+      SetWindowLongPtrW(app.hwnd, GWL_STYLE, style);
+      SetWindowPos(app.hwnd, app.cfg.topmost ? HWND_TOPMOST : HWND_TOP,
+                   mi.rcMonitor.left, mi.rcMonitor.top,
+                   mi.rcMonitor.right - mi.rcMonitor.left,
+                   mi.rcMonitor.bottom - mi.rcMonitor.top,
+                   SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+    } else {
+      LONG_PTR style = GetWindowLongPtrW(app.hwnd, GWL_STYLE);
+      style &= ~(WS_CHILD | WS_POPUP);
+      style |= WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN;
+      SetWindowLongPtrW(app.hwnd, GWL_STYLE, style);
+      SetWindowPos(app.hwnd, HWND_TOP, 0, 0, 0, 0,
+                   SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
+    }
+  }
+  logf("window: desktop mode %s", want_wallpaper ? "on" : "off");
+}
+
+void toggle_wallpaper_mode(App& app) {
+  app.cfg.wallpaper = !app.cfg.wallpaper;
+  if (app.cfg.wallpaper) {
+    // Wallpaper mode is a full-screen desktop surface, not a floating window.
+    app.windowed = false;
+    app.cfg.fullscreen = true;
+    app.cfg.topmost = false;
+  }
+  app.cfg.save();
+  apply_fullscreen(app);
+  app.rebuild_layout(true);
+  app.show_toast(app.cfg.wallpaper
+                     ? "Desktop background on · Ctrl+Alt+W to switch off"
+                     : "Desktop background off");
 }
 
 // --------------------------------------------------------------- tray plumbing
@@ -349,6 +599,8 @@ void show_tray_menu(App& app) {
   AppendMenuW(menu, MF_STRING, 1, L"Show lyrics\tCtrl+Alt+L");
   AppendMenuW(menu, MF_STRING | (app.windowed ? 0 : MF_CHECKED), 2,
               L"Full screen\tF11");
+  AppendMenuW(menu, MF_STRING | (app.cfg.wallpaper ? MF_CHECKED : 0), 7,
+              L"Desktop background (clicks pass through)\tW");
   AppendMenuW(menu, MF_STRING | (app.cfg.topmost ? MF_CHECKED : 0), 3,
               L"Always on top\tA");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -375,6 +627,9 @@ void show_tray_menu(App& app) {
       break;
     case 3:
       app.toggle_topmost();
+      break;
+    case 7:
+      toggle_wallpaper_mode(app);
       break;
     case 4:
       app.request_lyrics(app.current_track(), true);
@@ -418,7 +673,17 @@ void on_timer(App& app) {
   // Repaint while playing (smooth karaoke), while animating, and occasionally
   // when idle so the clock stays honest.
   static int idle_ticks = 0;
-  bool repaint = animating || app.view.toast_until > now || app.media.playing;
+  // The resting wallpaper has a listening pulse, so idle is not static: repaint
+  // at a low rate while nothing is playing instead of going completely still.
+  bool repaint = animating || app.view.toast_until > now || app.active_media.playing;
+  // Idle wallpaper: repaint about six times a second - enough for the listening
+  // pulse to breathe, cheap enough to leave on a desktop all day.
+  if (!repaint && app.lstate == LyricsState::Idle) {
+    if (now - app.view.last_pulse_paint >= 160) {
+      app.view.last_pulse_paint = now;
+      repaint = true;
+    }
+  }
   if (!repaint) {
     if (++idle_ticks >= 12) {
       idle_ticks = 0;
@@ -544,9 +809,11 @@ void Config::load() {
     else if (k == "wipe") wipe = (v == "1");
     else if (k == "theme") theme = atoi(v.c_str());
     else if (k == "fullscreen") fullscreen = (v == "1");
+    else if (k == "wallpaper") wallpaper = (v == "1");
   }
   if (font_scale < 0.55 || font_scale > 2.2) font_scale = 1.0;
   if (theme < 0 || theme >= 4) theme = 0;
+  if (wallpaper) fullscreen = true;
 }
 
 void Config::save() const {
@@ -559,17 +826,14 @@ void Config::save() const {
   data += std::string("wipe=") + (wipe ? "1" : "0") + "\n";
   data += "theme=" + std::to_string(theme) + "\n";
   data += std::string("fullscreen=") + (fullscreen ? "1" : "0") + "\n";
+  data += std::string("wallpaper=") + (wallpaper ? "1" : "0") + "\n";
   write_file_atomic(appdata_dir() + "\\config.ini", data);
 }
 
 // ----------------------------------------------------------------- App methods
 
 int64_t App::current_pos_ms() const {
-  MediaState m;
-  {
-    std::lock_guard<std::mutex> lock(const_cast<App*>(this)->mu);
-    m = media;
-  }
+  const MediaState& m = active_media;  // committed UI-thread snapshot
   int64_t dur = static_cast<int64_t>(m.duration_s * 1000.0);
   int64_t pos = interpolate_pos(m.pos_ms, m.at_ms, now_ms(), m.playing, dur);
   pos += cfg.offset_ms;
@@ -578,10 +842,9 @@ int64_t App::current_pos_ms() const {
   return pos;
 }
 
-TrackInfo App::current_track() const {
-  std::lock_guard<std::mutex> lock(const_cast<App*>(this)->mu);
-  return media.track;
-}
+double App::current_duration_s() const { return active_media.duration_s; }
+
+TrackInfo App::current_track() const { return active_track; }
 
 void App::request_lyrics(const TrackInfo& track, bool force) {
   if (track.title.empty()) return;
@@ -602,7 +865,24 @@ void App::rebuild_layout(bool force) {
   }
   pending_plain_lines.clear();
   if (lstate == LyricsState::Ready && !lyrics.synced) {
-    pending_plain_lines = synthesise_plain_lines(lyrics.plain);
+    // Untimed lyrics: pace the rows across the song's real length so the sheet
+    // still scrolls with playback instead of sitting frozen on one page. Two
+    // seconds of lead-in keeps the first line off screen at 0:00.
+    const double dur = current_duration_s();
+    const size_t row_count = std::max<size_t>(1, synthesise_plain_lines(lyrics.plain).size());
+    int64_t per_line = 4000;
+    if (dur > 20) {
+      per_line = static_cast<int64_t>(dur * 1000.0 * 0.92) /
+                 static_cast<int64_t>(row_count);
+      per_line = std::max<int64_t>(1500, std::min<int64_t>(9000, per_line));
+    }
+    pending_plain_lines = pace_plain_lyrics(lyrics.plain, 2000, per_line);
+    if (!pending_plain_lines.empty() && lyrics.lines.empty()) {
+      // Give the plain sheet timestamps too, so the active-line spotlight and
+      // the scroll anchor work exactly as they do for synced lyrics.
+      lyrics.lines = pending_plain_lines;
+      lyrics.synced = true;
+    }
   }
   relayout(*this, w, h);
   if (!lyrics.synced) active = -1;
@@ -623,6 +903,10 @@ void App::toggle_fullscreen() {
 }
 
 void App::toggle_topmost() {
+  if (cfg.wallpaper) {
+    show_toast("Always-on-top is unavailable in desktop mode");
+    return;
+  }
   cfg.topmost = !cfg.topmost;
   cfg.save();
   SetWindowPos(hwnd, cfg.topmost ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
@@ -677,11 +961,13 @@ void App::toggle_help() {
 
 void App::show_window() {
   hidden_to_tray = false;
-  ShowWindow(hwnd, SW_SHOW);
-  SetForegroundWindow(hwnd);
-  if (!windowed) {
+  apply_desktop_mode(*this);
+  const bool desktop = cfg.wallpaper && !windowed;
+  ShowWindow(hwnd, desktop ? SW_SHOWNOACTIVATE : SW_SHOW);
+  if (!desktop) SetForegroundWindow(hwnd);
+  if (!windowed && !desktop_parented) {
     SetWindowPos(hwnd, cfg.topmost ? HWND_TOPMOST : HWND_TOP, 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE);
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
   }
   invalidate();
 }
@@ -756,6 +1042,9 @@ void handle_key(App& app, WPARAM key) {
     case 'A':
       app.toggle_topmost();
       break;
+    case 'W':
+      toggle_wallpaper_mode(app);
+      break;
     case 'T':
       app.toggle_theme();
       break;
@@ -813,10 +1102,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
   if (msg == app->taskbar_created_msg && app->taskbar_created_msg != 0) {
     add_tray_icon(*app);
+    if (app->cfg.wallpaper && !app->windowed) {
+      app->desktop_parented = false;
+      app->desktop_host = nullptr;
+      apply_desktop_mode(*app);
+    }
     return 0;
   }
 
   switch (msg) {
+    case WM_NCHITTEST:
+      if (app->cfg.wallpaper && !app->windowed) return HTTRANSPARENT;
+      break;
+    case WM_MOUSEACTIVATE:
+      if (app->cfg.wallpaper && !app->windowed) return MA_NOACTIVATE;
+      break;
     case WM_CREATE:
       return 0;
     case WM_PAINT: {
@@ -859,6 +1159,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         } else {
           app->hide_to_tray();
         }
+      } else if (wParam == kHotkeyWallpaper) {
+        toggle_wallpaper_mode(*app);
       }
       return 0;
     case WM_APP_TRAY: {
@@ -952,9 +1254,9 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show_cmd) {
   if (app.single_instance && GetLastError() == ERROR_ALREADY_EXISTS) {
     HWND existing = FindWindowW(kClassName, nullptr);
     if (existing) {
+      // The running instance decides whether it may activate; in wallpaper mode
+      // a second launch must not pull it above the desktop layer.
       PostMessageW(existing, WM_APP_SHOW_EXISTING, 0, 0);
-      ShowWindow(existing, SW_SHOW);
-      SetForegroundWindow(existing);
     }
     GdiplusShutdown(gdi_token);
     return 0;
@@ -985,8 +1287,13 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show_cmd) {
   int win_w = mi.rcMonitor.right - mi.rcMonitor.left;
   int win_h = mi.rcMonitor.bottom - mi.rcMonitor.top;
 
+  // In desktop-background mode the window is a tool window that never activates,
+  // so it can live behind everything without appearing in alt-tab.
+  const DWORD ex_style = app.cfg.wallpaper
+                             ? (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
+                             : WS_EX_APPWINDOW;
   app.hwnd = CreateWindowExW(
-      WS_EX_APPWINDOW, kClassName, kAppName, style, mi.rcMonitor.left,
+      ex_style, kClassName, kAppName, style, mi.rcMonitor.left,
       mi.rcMonitor.top, app.windowed ? win_w * 3 / 4 : win_w,
       app.windowed ? win_h * 3 / 4 : win_h, nullptr, nullptr, inst, nullptr);
   if (!app.hwnd) {
@@ -1004,14 +1311,19 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show_cmd) {
                  mi.rcMonitor.top + (win_h - h) / 2, w, h, SWP_NOZORDER);
   }
 
-  ShowWindow(app.hwnd, app.windowed ? SW_SHOWNORMAL : SW_SHOW);
+  apply_desktop_mode(app);
+  const bool desktop_start = app.cfg.wallpaper && !app.windowed;
+  ShowWindow(app.hwnd, desktop_start ? SW_SHOWNOACTIVATE : SW_SHOWNORMAL);
   UpdateWindow(app.hwnd);
-  SetForegroundWindow(app.hwnd);
+  if (!desktop_start) SetForegroundWindow(app.hwnd);
 
   app.taskbar_created_msg = RegisterWindowMessageW(L"TaskbarCreated");
   app.create_tray_icon();
   if (!RegisterHotKey(app.hwnd, kHotkeyToggle, MOD_CONTROL | MOD_ALT, 'L')) {
     logf("hotkey Ctrl+Alt+L could not be registered (another app owns it)");
+  }
+  if (!RegisterHotKey(app.hwnd, kHotkeyWallpaper, MOD_CONTROL | MOD_ALT, 'W')) {
+    logf("hotkey Ctrl+Alt+W could not be registered (another app owns it)");
   }
 
   app.started_at = app.now_ms();

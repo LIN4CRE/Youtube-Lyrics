@@ -122,28 +122,52 @@ while ($true) {
         if ($null -eq $manager) { throw 'no session manager' }
 
         $sessions = $manager.GetSessions()
+
+        # Choose only an actually playing session. A paused YouTube tab may
+        # retain the previous song indefinitely; treating it as the current
+        # session is how a stale "In the End" track could replace live audio.
         $chosen = $null
         $firstPlaying = $null
-        $firstAny = $null
+
+        $musicRank = {
+            param($id)
+            $id = ([string]$id).ToLowerInvariant()
+            if ($id -match 'spotify|applemusic|tidal|deezer|music\.ui|amazon') { return 3 }
+            if ($id -match 'chrome|msedge|brave|firefox|opera|vivaldi|chromium') { return 2 }
+            if ($id -match 'vlc|wmplayer|foobar|musicbee|aimp|mpc|plex|itunes') { return 1 }
+            return 0
+        }
 
         foreach ($s in $sessions) {
-            if ($null -eq $firstAny) { $firstAny = $s }
             $info = $null
             try { $info = $s.GetPlaybackInfo() } catch { continue }
             if ($null -eq $info) { continue }
-            $isPlaying = ($info.PlaybackStatus.ToString() -eq 'Playing')
-            if ($isPlaying) {
+            $state = [string]$info.PlaybackStatus
+            if ($state -eq 'Playing') {
                 if ($null -eq $firstPlaying) { $firstPlaying = $s }
-                $id = [string]$s.SourceAppUserModelId
-                if ($id -match '(?i)(chrome|msedge|brave|firefox|opera|vivaldi|chromium|spotify)') {
-                    $chosen = $s
-                    break
+                elseif ((& $musicRank $s.SourceAppUserModelId) -gt (& $musicRank $firstPlaying.SourceAppUserModelId)) {
+                    $firstPlaying = $s
                 }
             }
         }
-        if ($null -eq $chosen) {
-            if ($null -ne $firstPlaying) { $chosen = $firstPlaying }
-            elseif ($null -ne $firstAny) { $chosen = $firstAny }
+
+        # Windows exposes the session it considers current. Prefer it only when
+        # it is itself playing; otherwise use a ranked playing session from the
+        # list. This avoids a paused current session masking another live player.
+        try {
+            $current = $manager.GetCurrentSession()
+            if ($null -ne $current) {
+                $currentInfo = $current.GetPlaybackInfo()
+                $currentRank = & $musicRank $current.SourceAppUserModelId
+                if ($null -ne $currentInfo -and
+                    [string]$currentInfo.PlaybackStatus -eq 'Playing' -and
+                    $currentRank -gt 0) {
+                    $chosen = $current
+                }
+            }
+        } catch { }
+        if ($null -eq $chosen -and $null -ne $firstPlaying) {
+            $chosen = $firstPlaying
         }
 
         if ($null -eq $chosen) {
@@ -202,6 +226,7 @@ while ($true) {
                 dur    = [math]::Round([double]$dur, 3)
                 app    = [string]$chosen.SourceAppUserModelId
                 art    = $art
+                tick   = [int64](([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()))
             })
         $consecutiveErrors = 0
     } catch {

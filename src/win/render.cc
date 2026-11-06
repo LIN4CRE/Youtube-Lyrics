@@ -162,7 +162,7 @@ Gdiplus::Font* get_font(App& app, int px, int weight) {
 
 void refresh_art(App& app) {
   View& v = app.view;
-  std::string want = app.cfg.cover ? app.media.art_path : std::string();
+  std::string want = app.cfg.cover ? app.active_media.art_path : std::string();
   if (want == v.art_path) return;
   if (v.art) {
     delete v.art;
@@ -472,23 +472,20 @@ void paint_centred_message(App& app, Graphics& g, int w, int h,
 void paint_chrome(App& app, Graphics& g, int w, int h) {
   const Theme& th = theme(app.cfg.theme);
 
-  MediaState media;
-  {
-    std::lock_guard<std::mutex> lock(app.mu);
-    media = app.media;
-  }
+  const TrackInfo track = app.current_track();
+  const double duration_s = app.current_duration_s();
 
-  // Header: artist over title.
-  if (!media.track.title.empty()) {
+  // Header: the committed track, never the last unconfirmed SMTC candidate.
+  if (!track.title.empty()) {
     double px = std::min(std::max(h * 0.0175, 12.0), 26.0);
-    if (!media.track.artist.empty()) {
-      draw_text(g, wide(media.track.artist),
+    if (!track.artist.empty()) {
+      draw_text(g, wide(track.artist),
                 get_font(app, static_cast<int>(px * 0.86), 400),
                 RectF(0, static_cast<REAL>(h * 0.028), static_cast<REAL>(w),
                       static_cast<REAL>(px * 2)),
                 (th.text & 0x00FFFFFF) | (0x99 << 24));
     }
-    draw_text(g, wide(media.track.title),
+    draw_text(g, wide(track.title),
               get_font(app, static_cast<int>(px * 1.15), 600),
               RectF(0, static_cast<REAL>(h * 0.028 + px * 1.5),
                     static_cast<REAL>(w), static_cast<REAL>(px * 2)),
@@ -496,8 +493,8 @@ void paint_chrome(App& app, Graphics& g, int w, int h) {
   }
 
   // Progress bar.
-  if (media.duration_s > 0) {
-    int64_t dur = static_cast<int64_t>(media.duration_s * 1000.0);
+  if (duration_s > 0) {
+    int64_t dur = static_cast<int64_t>(duration_s * 1000.0);
     int64_t pos = app.current_pos_ms();
     double p = dur > 0 ? static_cast<double>(pos) / static_cast<double>(dur) : 0.0;
     p = std::min(1.0, std::max(0.0, p));
@@ -539,11 +536,15 @@ void paint_chrome(App& app, Graphics& g, int w, int h) {
   // Source app + sync offset, bottom left.
   double px = std::min(std::max(h * 0.014, 10.0), 18.0);
   std::string status_line;
-  if (!media.app.empty()) {
-    std::string app_name = media.app;
+  if (!app.active_media.app.empty()) {
+    std::string app_name = app.active_media.app;
     size_t bang = app_name.find('!');
     if (bang != std::string::npos) app_name = app_name.substr(bang + 1);
     status_line = "via " + app_name;
+  }
+  if (app.lstate == LyricsState::Ready && !app.lyrics.source.empty()) {
+    if (!status_line.empty()) status_line += "  \xC2\xB7  ";
+    status_line += "lyrics: " + app.lyrics.source;
   }
   if (app.cfg.offset_ms != 0) {
     char buf[64];
@@ -598,8 +599,9 @@ void paint_hint(App& app, Graphics& g, int w, int h) {
   int64_t left = v.hint_until - now;
   double fade = left < 1200 ? left / 1200.0 : 1.0;
   const Theme& th = theme(app.cfg.theme);
-  const std::wstring text =
-      L"F11  full screen   \xC2\xB7   F1  shortcuts   \xC2\xB7   Ctrl+Alt+L  hide";
+  const std::wstring text = app.cfg.wallpaper && !app.windowed
+      ? L"Ctrl+Alt+W  wallpaper mode   \xC2\xB7   Ctrl+Alt+L  hide or show"
+      : L"F11  full screen   \xC2\xB7   F1  shortcuts   \xC2\xB7   Ctrl+Alt+L  hide";
   double px = std::min(std::max(h * 0.017, 11.0), 20.0);
   ARGB c = (th.text & 0x00FFFFFF) | (static_cast<ARGB>(std::min(150.0, 150.0 * fade)) << 24);
   draw_text(g, text, get_font(app, static_cast<int>(px), 400),
@@ -692,6 +694,88 @@ void paint_help(App& app, Graphics& g, int w, int h) {
 
 }  // namespace
 
+
+// The resting wallpaper. This is what is on screen most of the time when the app
+// lives on the desktop, so it is designed rather than a placeholder: the mark
+// from the icon, a slow amber pulse that means "listening", and one quiet line
+// telling you what it is waiting for.
+void paint_idle_wallpaper(App& app, Graphics& g, int w, int h, bool listening,
+                          bool listener_silent) {
+  const Theme& th = theme(app.cfg.theme);
+  const int ar = (th.accent >> 16) & 0xFF, ag = (th.accent >> 8) & 0xFF,
+            ab = th.accent & 0xFF;
+
+  const double unit = std::min(std::max(h * 0.10, 56.0), 190.0);
+  const double cx = w * 0.5;
+  const double cy = h * 0.44;
+
+  // Listening pulse: a ring breathes while the media helper is alive.
+  if (!listener_silent) {
+    const double t = static_cast<double>(app.now_ms() % 2000) / 2000.0;
+    const double r = unit * (0.30 + t * 0.22);
+    Pen ring(Color(static_cast<INT>((1.0 - t) * 46), ar, ag, ab),
+             static_cast<REAL>(std::max(1.0, h * 0.0016)));
+    g.DrawEllipse(&ring, RectF(static_cast<REAL>(cx - r), static_cast<REAL>(cy - r),
+                               static_cast<REAL>(r * 2), static_cast<REAL>(r * 2)));
+  }
+
+  // The mark, drawn at display scale: paper tile, margin rule and lyric bars.
+  {
+    const double tile_size = unit * 0.76;
+    const RectF tile(static_cast<REAL>(cx - tile_size * 0.5),
+                     static_cast<REAL>(cy - tile_size * 0.5),
+                     static_cast<REAL>(tile_size), static_cast<REAL>(tile_size));
+    draw_rounded_rect(g, tile, static_cast<REAL>(tile_size * 0.235),
+                      0xFFF3EFE6, true, 0x280B0A0F);
+    const double mw = unit * 0.62;
+    const double left = cx - mw * 0.5;
+    const double top = cy - mw * 0.62;
+    SolidBrush lit(Color(0xFF, ar, ag, ab));
+    SolidBrush dim(Color(0x8C, 243, 239, 230));
+
+    // margin rule
+    SolidBrush rule(Color(0x46, 243, 239, 230));
+    g.FillRectangle(&rule, RectF(static_cast<REAL>(left), static_cast<REAL>(top),
+                                 static_cast<REAL>(mw * 0.012),
+                                 static_cast<REAL>(mw * 0.74)));
+
+    const double x0 = left + mw * 0.10;
+    const double thin = mw * 0.052, thick = mw * 0.085;
+    auto bar = [&](double y, double span, double height, Brush& b) {
+      RectF r(static_cast<REAL>(x0), static_cast<REAL>(y),
+              static_cast<REAL>(span), static_cast<REAL>(height));
+      g.FillRectangle(&b, r);
+    };
+    bar(top + mw * 0.10, mw * 0.52, thin, dim);
+    bar(top + mw * 0.33, mw * 0.82, thick, lit);
+    bar(top + mw * 0.60, mw * 0.38, thin, dim);
+  }
+
+  const double tpx = std::min(std::max(h * 0.030, 18.0), 40.0);
+  const double bpx = std::min(std::max(h * 0.0155, 12.0), 20.0);
+
+  const std::string big = listening ? "Paused" : "Listening";
+  const std::string sub = listening
+                              ? track_label(app.current_track())
+                              : "Play a song anywhere \u2014 YouTube Music, Spotify, any player.";
+  draw_text(g, wide(big), get_font(app, static_cast<int>(tpx), 600),
+            RectF(0, static_cast<REAL>(cy + unit * 0.62), static_cast<REAL>(w),
+                  static_cast<REAL>(tpx * 2)),
+            (0xD8u << 24) | 0x00F3EFE6);
+  draw_text(g, wide(sub), get_font(app, static_cast<int>(bpx), 400),
+            RectF(0, static_cast<REAL>(cy + unit * 0.62 + tpx * 1.5),
+                  static_cast<REAL>(w), static_cast<REAL>(bpx * 3)),
+            (0x84u << 24) | 0x00F3EFE6);
+
+  if (listener_silent) {
+    draw_text(g, L"No media session yet · check the tray menu or ytlyrics.log",
+              get_font(app, static_cast<int>(bpx * 0.92), 400),
+              RectF(0, static_cast<REAL>(cy + unit * 0.62 + tpx * 1.5 + bpx * 2.1),
+                    static_cast<REAL>(w), static_cast<REAL>(bpx * 3)),
+              (0x55u << 24) | 0x00F3EFE6);
+  }
+}
+
 void render_frame(App& app, Graphics& g, int w, int h) {
   g.SetSmoothingMode(SmoothingModeAntiAlias);
   g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
@@ -731,30 +815,10 @@ void render_frame(App& app, Graphics& g, int w, int h) {
       break;
     case LyricsState::Idle:
     default: {
-      MediaState snapshot;
-      {
-        std::lock_guard<std::mutex> lock(app.mu);
-        snapshot = app.media;
-      }
-      bool listening = snapshot.have;
-      if (listening) {
-        paint_centred_message(app, g, w, h, "Paused", track_label(snapshot.track),
-                              "Resume playback and the words follow along.",
-                              "", "");
-      } else if (!app.helper_heard && app.started_at > 0 &&
-                 app.now_ms() - app.started_at > 12000) {
-        paint_centred_message(
-            app, g, w, h, "Waiting for the media listener…", "",
-            "Windows has not reported any media session yet.",
-            "Press F1 to see exactly what the background listener is saying.",
-            "If it stays empty, check %LOCALAPPDATA%\\YouTubeLyrics\\ytlyrics.log");
-      } else {
-        paint_centred_message(
-            app, g, w, h, "Waiting for music…", "",
-            "Play a song anywhere — YouTube Music, Spotify, any player.",
-            "This window follows along on its own, even in the background.",
-            "F1 for shortcuts  ·  Ctrl+Alt+L shows or hides this window");
-      }
+      const bool listening = !app.current_track().title.empty();
+      const bool silent = !app.helper_heard && app.started_at > 0 &&
+                          app.now_ms() - app.started_at > 12000;
+      paint_idle_wallpaper(app, g, w, h, listening, silent);
       break;
     }
   }

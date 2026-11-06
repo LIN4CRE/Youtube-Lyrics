@@ -339,8 +339,8 @@ def build_flow(path: str, w: int = 1200, h: int = 208) -> None:
     steps = [
         ("01", "play something", "youtube music, spotify,\nanything with media keys"),
         ("02", "windows session", "title, artist, playhead.\nread locally, not recorded"),
-        ("03", "lrclib lookup", "synced .lrc, matched by\nartist, title and length"),
-        ("04", "this display", "one lit line, filling in\nas it is sung"),
+        ("03", "match the lyrics", "LRCLIB + lyrics.ovh,\nvalidated before display"),
+        ("04", "desktop wallpaper", "behind icons, click-through\none lit line follows along"),
     ]
     margin = 40
     col_w = (w - 2 * margin) / len(steps)
@@ -486,7 +486,7 @@ def main() -> int:
 
     build_banner(os.path.join(BRAND_DIR, "banner.png"))
     build_badge(os.path.join(BRAND_DIR, "badge-download.png"),
-                "download", "1.1 \u00b7 640 KB")
+                "download", "1.2 \u00b7 680 KB")
     build_badge(os.path.join(BRAND_DIR, "badge-platform.png"),
                 "runs on", "windows 10 / 11")
     build_badge(os.path.join(BRAND_DIR, "badge-licence.png"), "licence", "MIT")
