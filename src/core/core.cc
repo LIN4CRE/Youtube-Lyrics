@@ -898,7 +898,10 @@ bool is_noise_block(const std::string& block) {
       "slowed", "reverb", "instrumental", "karaoke", "full song", "music video",
       "official music video", "official audio", "topic", "album", "single",
       "mono", "stereo", "deluxe", "bonus", "feat", "ft", "featuring", "prod",
-      "prod.", "prod by", "from the", "soundtrack", "ost", "pt.", "part"};
+      "prod.", "prod by", "from the", "soundtrack", "ost", "pt.", "part",
+      "mashup", "lyrics video", "official video", "slowed + reverb", "slowed and reverb",
+      "bass boosted", "nightcore", "tiktok", "extended mix", "original mix", "radio edit",
+      "club mix", "vip", "remix", "soundtrack", "from", "intro", "outro"};
   std::string b = squish_and_lower(block);
   if (b.empty()) return true;
   for (const char* noise : kNoise) {
@@ -962,6 +965,19 @@ std::string strip_trailing_noise(const std::string& in) {
     if (best != std::string::npos && best_len > 0) {
       s = trim(s.substr(0, best));
       changed = true;
+    }
+  }
+  // Also strip trailing standalone noise tokens (e.g. "4K", "8K", "HD")
+  bool stripped_word = true;
+  while (stripped_word && !s.empty()) {
+    stripped_word = false;
+    size_t last_space = s.rfind(' ');
+    if (last_space != std::string::npos && last_space + 1 < s.size()) {
+      std::string last_word = s.substr(last_space + 1);
+      if (is_noise_block(last_word)) {
+        s = trim(s.substr(0, last_space));
+        stripped_word = true;
+      }
     }
   }
   return squish(s);
@@ -1086,6 +1102,36 @@ bool is_watchable_app(const std::string& app_id, const TrackInfo& t) {
   return browser || player || t.duration_s >= 45;
 }
 
+double token_containment(const std::string& a, const std::string& b) {
+  std::string x = squish_and_lower(a);
+  std::string y = squish_and_lower(b);
+  if (x.empty() || y.empty()) return 0.0;
+  if (x == y) return 1.0;
+  auto tokens = [](const std::string& s) {
+    std::set<std::string> out;
+    std::string cur;
+    for (unsigned char c : s) {
+      bool alnum = std::isalnum(c) != 0 || c >= 0x80;
+      if (alnum) {
+        cur.push_back(static_cast<char>(c));
+      } else if (!cur.empty()) {
+        out.insert(cur);
+        cur.clear();
+      }
+    }
+    if (!cur.empty()) out.insert(cur);
+    return out;
+  };
+  std::set<std::string> ta = tokens(x), tb = tokens(y);
+  if (ta.empty() || tb.empty()) return 0.0;
+  size_t inter = 0;
+  for (const auto& s : ta) {
+    if (tb.count(s)) ++inter;
+  }
+  return static_cast<double>(inter) /
+         static_cast<double>(std::min(ta.size(), tb.size()));
+}
+
 double text_similarity(const std::string& a, const std::string& b) {
   std::string x = squish_and_lower(a);
   std::string y = squish_and_lower(b);
@@ -1157,10 +1203,12 @@ const JValue* best_candidate(const JValue& search_results, const TrackInfo& want
         TrackInfo{rec.get_str("trackName"), rec.get_str("artistName"), "", duration},
         false);
     const double title_sim = text_similarity(want.title, candidate_track.title);
-    if (title_sim < 0.80) continue;
+    const double title_cont = token_containment(want.title, candidate_track.title);
+    if (title_sim < 0.70 && title_cont < 0.80) continue;
 
     const double artist_sim = text_similarity(want.artist, candidate_track.artist);
-    const bool same_artist = artist_sim >= 0.72;
+    const double artist_cont = token_containment(want.artist, candidate_track.artist);
+    const bool same_artist = artist_sim >= 0.65 || artist_cont >= 0.75;
     if (!want.artist.empty() && !candidate_track.artist.empty() && !same_artist) {
       continue;
     }
@@ -1175,6 +1223,8 @@ const JValue* best_candidate(const JValue& search_results, const TrackInfo& want
     }
 
     double score = title_sim * 5.0 + artist_sim * 4.0;
+    if (title_cont >= 0.90) score += 1.0;
+    if (artist_cont >= 0.90) score += 0.8;
     if (has_synced) score += 2.5;
 
     if (want.duration_s > 0 && duration > 0) {

@@ -472,6 +472,23 @@ LyricsState do_lookup(const TrackInfo& track, bool force, Lyrics& out,
   // 3. Title-only LRCLIB search; candidates still pass best_candidate()'s
   //    title/artist/duration checks before any lyrics are shown.
   if (attempt(build_title_only_url(track), "LRCLIB")) return LyricsState::Ready;
+
+  // 3b. Split title search: YouTube titles are frequently formatted as "Artist - Title"
+  size_t dash = track.title.find(" - ");
+  if (dash == std::string::npos) dash = track.title.find(" \xE2\x80\x93 ");  // en dash
+  if (dash == std::string::npos) dash = track.title.find(" \xE2\x80\x94 ");  // em dash
+  if (dash != std::string::npos && dash > 0) {
+    std::string p1 = trim(track.title.substr(0, dash));
+    std::string p2 = trim(track.title.substr(dash + 3));
+    if (!p1.empty() && !p2.empty()) {
+      TrackInfo t1{p2, p1, track.album, track.duration_s};
+      if (attempt(build_search_url(t1), "LRCLIB")) return LyricsState::Ready;
+      if (attempt(build_query_url(t1), "LRCLIB")) return LyricsState::Ready;
+      TrackInfo t2{p1, p2, track.album, track.duration_s};
+      if (attempt(build_search_url(t2), "LRCLIB")) return LyricsState::Ready;
+      if (attempt(build_query_url(t2), "LRCLIB")) return LyricsState::Ready;
+    }
+  }
   // 4. Final, lower-confidence fallback: lyrics.ovh is queried by exact
   //    artist/title but does not return identity metadata for independent checks.
   if (!track.artist.empty() && attempt(build_ovh_url(track), "lyrics.ovh")) {

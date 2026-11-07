@@ -12,13 +12,8 @@ New-Item -ItemType Directory -Force -Path dist, .build | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'version generation failed' }
 
 # 1. Embed the PowerShell helper as a C++ raw string literal.
-& $python -c @"
-src = open('src/win/smtc.ps1', encoding='utf-8').read()
-assert ')YTLYSPLIT"' not in src
-out = ('// Generated - do not edit.\n#pragma once\nnamespace ytl {\nstatic const char kSmtcScript[] = R\"YTLYSPLIT('
-       + src + ')YTLYSPLIT\";\n}\n')
-open('.build/smtc_script.h', 'w', encoding='utf-8').write(out)
-"@
+& $python scripts/generate_smtc.py
+if ($LASTEXITCODE -ne 0) { throw 'smtc script generation failed' }
 
 # 2. Icon + version resources.
 $res = @()
@@ -31,7 +26,7 @@ try {
 # 3. Cross/native compile (Zig drives the linker either way).
 & $zig c++ -target x86_64-windows-gnu -std=c++17 -O2 `
     -DUNICODE -D_UNICODE `
-    -municode -Wl,--subsystem,windows -Wl,--gc-sections `
+    "-municode" "-Wl,--subsystem,windows" "-Wl,--gc-sections" `
     -fno-exceptions -fno-rtti -fno-strict-aliasing `
     -I.build -o dist/YoutubeLyrics.exe `
     src/core/core.cc src/win/app.cc src/win/render.cc src/win/media.cc src/win/lyrics.cc src/win/update.cc `

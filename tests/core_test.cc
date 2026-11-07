@@ -656,6 +656,29 @@ static void test_extra_providers() {
   CHECK_STR(out.plain, "Hello\nworld");
 }
 
+static void test_enhanced_matching() {
+  // Test token containment
+  CHECK(token_containment("Gladiator (from 'The Greatest')", "Gladiator") >= 0.99);
+  CHECK(token_containment("Wyclef Jean and Kofi Black", "Wyclef Jean") >= 0.99);
+  CHECK(token_containment("In the End", "Numb") == 0.0);
+
+  // Test trailing 4K stripping
+  TrackInfo t1{"Messy X Children (Mashup) 4K", "Liam Conner", "", 152};
+  TrackInfo c1 = clean_track(t1);
+  CHECK_STR(c1.title, "Messy X Children");
+
+  // Test best_candidate with subtitle / featured artist
+  JValue v;
+  std::string res =
+      "[{\"trackName\":\"Gladiator\",\"artistName\":\"Wyclef Jean\","
+      "\"duration\":91,\"syncedLyrics\":\"[00:10.00] lyrics line\"}]";
+  CHECK(json_parse(res, v));
+  TrackInfo want{"Gladiator (from \"The Greatest\")", "Wyclef Jean and Kofi Black", "", 91};
+  double score = 0;
+  const JValue* best = best_candidate(v, want, &score);
+  CHECK(best != nullptr);
+}
+
 int main() {
   test_utf8();
   test_json();
@@ -669,6 +692,7 @@ int main() {
   test_playback_simulation();
   test_wrong_song_guards();
   test_extra_providers();
+  test_enhanced_matching();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

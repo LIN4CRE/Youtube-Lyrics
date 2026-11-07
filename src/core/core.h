@@ -247,5 +247,7 @@ std::string format_time(int64_t ms);
 
 // Rough similarity in [0,1] used for ranking search results.
 double text_similarity(const std::string& a, const std::string& b);
+// Token containment in [0,1] (measures whether one string's tokens are contained in the other).
+double token_containment(const std::string& a, const std::string& b);
 
 }  // namespace ytl

@@ -221,7 +221,10 @@ while ($true) {
             $dur = $tl.EndTime.TotalSeconds - $start
             if ($status -eq 'Playing') {
                 $delta = ([DateTimeOffset]::UtcNow - $tl.LastUpdatedTime).TotalSeconds
-                if ($delta -gt 0 -and $delta -lt 60) { $pos += $delta }
+                if ($delta -gt 0) {
+                    $pos += $delta
+                    if ($dur -gt 0 -and $pos -gt $dur) { $pos = $dur }
+                }
             }
         } catch { }
 
@@ -255,5 +258,5 @@ while ($true) {
         continue
     }
 
-    Start-Sleep -Milliseconds 400
+    Start-Sleep -Milliseconds 200
 }

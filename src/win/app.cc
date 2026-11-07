@@ -239,7 +239,7 @@ void update_position_tracker(App& app, const MediaState& observed) {
       g_pos.reported = observed.pos_ms;
       g_pos.last_change = observed.at_ms;
       g_pos.free_running = false;
-    } else if (!g_pos.free_running && observed.at_ms - g_pos.last_change > 2600 &&
+    } else if (!g_pos.free_running && observed.at_ms - g_pos.last_change > 5000 &&
                observed.pos_ms < 1500) {
       g_pos.free_running = true;
       g_pos.free_anchor = g_pos.last_change;
@@ -396,21 +396,50 @@ BOOL CALLBACK find_workerw_after_desktop(HWND top, LPARAM param) {
   HWND def_view = FindWindowExW(top, nullptr, L"SHELLDLL_DefView", nullptr);
   if (!def_view) return TRUE;
   HWND worker = FindWindowExW(nullptr, top, L"WorkerW", nullptr);
-  if (!worker) return TRUE;
-  *reinterpret_cast<HWND*>(param) = worker;
-  return FALSE;
+  if (worker) {
+    *reinterpret_cast<HWND*>(param) = worker;
+    return FALSE;
+  }
+  return TRUE;
 }
 
 HWND find_desktop_host() {
-  // Ask Explorer to create the WorkerW surface behind the desktop icons (the
-  // same documented-in-practice technique used by live wallpaper apps).
   HWND progman = FindWindowW(L"Progman", nullptr);
-  if (progman) {
-    DWORD_PTR ignored = 0;
-    SendMessageTimeoutW(progman, 0x052C, 0, 0, SMTO_NORMAL, 1000, &ignored);
-  }
+  if (!progman) return nullptr;
+
+  DWORD_PTR ignored = 0;
+  SendMessageTimeoutW(progman, 0x052C, 0x0000000D, 0, SMTO_NORMAL, 1000, &ignored);
+  SendMessageTimeoutW(progman, 0x052C, 0, 0, SMTO_NORMAL, 1000, &ignored);
+
   HWND host = nullptr;
-  EnumWindows(find_workerw_after_desktop, reinterpret_cast<LPARAM>(&host));
+  for (int attempt = 0; attempt < 6; ++attempt) {
+    EnumWindows(find_workerw_after_desktop, reinterpret_cast<LPARAM>(&host));
+    if (host && IsWindow(host)) return host;
+
+    // Scan for any top-level WorkerW that does not host SHELLDLL_DefView
+    HWND def_view_parent = nullptr;
+    EnumWindows([](HWND top, LPARAM p) -> BOOL {
+      if (FindWindowExW(top, nullptr, L"SHELLDLL_DefView", nullptr)) {
+        *reinterpret_cast<HWND*>(p) = top;
+        return FALSE;
+      }
+      return TRUE;
+    }, reinterpret_cast<LPARAM>(&def_view_parent));
+
+    if (def_view_parent) {
+      HWND w = nullptr;
+      while ((w = FindWindowExW(nullptr, w, L"WorkerW", nullptr)) != nullptr) {
+        if (w != def_view_parent && !FindWindowExW(w, nullptr, L"SHELLDLL_DefView", nullptr)) {
+          RECT r{};
+          if (GetClientRect(w, &r) && (r.right - r.left) > 100 && (r.bottom - r.top) > 100) {
+            return w;
+          }
+        }
+      }
+    }
+
+    Sleep(50);
+  }
   return host;
 }
 
@@ -882,6 +911,12 @@ void on_timer(App& app) {
     app.view.last_frame = now;
     SetTimer(app.hwnd, kFrameTimer, 1000, nullptr);
     return;
+  }
+
+  static int64_t last_workerw_retry = 0;
+  if (app.cfg.wallpaper && !app.windowed && !app.desktop_parented && now - last_workerw_retry > 2000) {
+    last_workerw_retry = now;
+    apply_desktop_mode(app);
   }
 
   if (app.cfg.wallpaper && app.cfg.wallpaper_auto_rotate) {
