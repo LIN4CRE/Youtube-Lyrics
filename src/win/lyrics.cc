@@ -473,20 +473,46 @@ LyricsState do_lookup(const TrackInfo& track, bool force, Lyrics& out,
   //    title/artist/duration checks before any lyrics are shown.
   if (attempt(build_title_only_url(track), "LRCLIB")) return LyricsState::Ready;
 
-  // 3b. Split title search: YouTube titles are frequently formatted as "Artist - Title"
-  size_t dash = track.title.find(" - ");
-  if (dash == std::string::npos) dash = track.title.find(" \xE2\x80\x93 ");  // en dash
-  if (dash == std::string::npos) dash = track.title.find(" \xE2\x80\x94 ");  // em dash
-  if (dash != std::string::npos && dash > 0) {
-    std::string p1 = trim(track.title.substr(0, dash));
-    std::string p2 = trim(track.title.substr(dash + 3));
-    if (!p1.empty() && !p2.empty()) {
-      TrackInfo t1{p2, p1, track.album, track.duration_s};
-      if (attempt(build_search_url(t1), "LRCLIB")) return LyricsState::Ready;
-      if (attempt(build_query_url(t1), "LRCLIB")) return LyricsState::Ready;
-      TrackInfo t2{p1, p2, track.album, track.duration_s};
-      if (attempt(build_search_url(t2), "LRCLIB")) return LyricsState::Ready;
-      if (attempt(build_query_url(t2), "LRCLIB")) return LyricsState::Ready;
+  // 3b. Split title search: YouTube titles are frequently formatted with separators,
+  // e.g. "Artist - Title" or "Remixer — Title — Original Artist | Channel"
+  std::vector<std::string> parts;
+  std::string rem = track.title;
+  while (!rem.empty()) {
+    size_t best_sep = std::string::npos;
+    size_t sep_len = 0;
+    for (const char* sep : {" | ", " - ", " \xE2\x80\x93 ", " \xE2\x80\x94 ", " / "}) {
+      size_t found = rem.find(sep);
+      if (found != std::string::npos && (best_sep == std::string::npos || found < best_sep)) {
+        best_sep = found;
+        sep_len = std::strlen(sep);
+      }
+    }
+    if (best_sep != std::string::npos) {
+      std::string seg = trim(rem.substr(0, best_sep));
+      if (!seg.empty()) parts.push_back(seg);
+      rem = trim(rem.substr(best_sep + sep_len));
+    } else {
+      std::string seg = trim(rem);
+      if (!seg.empty()) parts.push_back(seg);
+      break;
+    }
+  }
+
+  if (parts.size() >= 2) {
+    for (size_t i = 0; i < parts.size(); ++i) {
+      for (size_t j = 0; j < parts.size(); ++j) {
+        if (i == j) continue;
+        TrackInfo cand = clean_track(TrackInfo{parts[j], parts[i], track.album, track.duration_s}, false);
+        if (!cand.title.empty() && !cand.artist.empty()) {
+          if (attempt(build_search_url(cand), "LRCLIB")) return LyricsState::Ready;
+          if (attempt(build_query_url(cand), "LRCLIB")) return LyricsState::Ready;
+        }
+      }
+      TrackInfo t_only = clean_track(TrackInfo{parts[i], track.artist, track.album, track.duration_s}, false);
+      if (!t_only.title.empty()) {
+        if (attempt(build_search_url(t_only), "LRCLIB")) return LyricsState::Ready;
+        if (attempt(build_query_url(t_only), "LRCLIB")) return LyricsState::Ready;
+      }
     }
   }
   // 4. Final, lower-confidence fallback: lyrics.ovh is queried by exact
