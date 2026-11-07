@@ -367,8 +367,8 @@ void relayout(App& app, int w, int h) {
 
   Graphics& mg = measure_graphics();
   const double col_w = std::min(w * 0.80, 1400.0);
-  const double active_scale = 1.22;
-  const double max_text_w = col_w / active_scale;
+  const double active_scale = 1.0;
+  const double max_text_w = col_w;
 
   const std::vector<LyricLine>& src =
       app.lyrics.synced ? app.lyrics.lines : app.pending_plain_lines;
@@ -464,10 +464,12 @@ double timed_segment_fill_width(Graphics& g, const DispLine& line,
     if (segment_end_ms < segment.t_ms) segment_end_ms = segment.t_ms;
 
     if (segment_end_ms > segment.t_ms && position_ms < segment_end_ms) {
-      const double progress = std::max(
-          0.0, std::min(1.0, static_cast<double>(position_ms - segment.t_ms) /
-                                static_cast<double>(segment_end_ms - segment.t_ms)));
-      filled += segment_width * progress;
+      double raw_p = static_cast<double>(position_ms - segment.t_ms) /
+                     static_cast<double>(segment_end_ms - segment.t_ms);
+      raw_p = std::max(0.0, std::min(1.0, raw_p));
+      // Hermite smoothstep for natural syllable transition
+      const double smooth_p = raw_p * raw_p * (3.0 - 2.0 * raw_p);
+      filled += segment_width * smooth_p;
       return filled;
     }
     filled += segment_width;
@@ -480,6 +482,52 @@ double timed_segment_fill_width(Graphics& g, const DispLine& line,
   return std::max(0.0, filled);
 }
 
+void draw_feathered_wipe(Graphics& g, const std::wstring& text, Font* font,
+                         const RectF& box, double full_w, double filled_w,
+                         double col_x, double col_w,
+                         ARGB base_color, ARGB dim_color) {
+  if (text.empty() || full_w <= 0.0) return;
+
+  // 1. Draw the calm, unsung dimmed text first
+  draw_text(g, text, font, box, dim_color);
+
+  if (filled_w <= 0.5) return;
+
+  const double left = col_x + (col_w - full_w) * 0.5;
+  const double feather = std::max(14.0, std::min(28.0, font->GetSize() * 0.65));
+
+  if (filled_w >= full_w) {
+    // Fully sung: draw crisp 100% lit text
+    draw_text(g, text, font, box, base_color);
+    return;
+  }
+
+  // 2. Draw highlighted text using a LinearGradientBrush with smooth feathered alpha
+  RectF grad_rect(static_cast<REAL>(left), box.Y, static_cast<REAL>(full_w), box.Height);
+  LinearGradientBrush brush(grad_rect,
+                            Color(base_color),
+                            Color(0, (base_color >> 16) & 0xFF, (base_color >> 8) & 0xFF, base_color & 0xFF),
+                            LinearGradientModeHorizontal);
+
+  float p_solid = static_cast<float>((filled_w - feather * 0.5) / full_w);
+  float p_fade  = static_cast<float>((filled_w + feather * 0.5) / full_w);
+  p_solid = std::max(0.0f, std::min(1.0f, p_solid));
+  p_fade  = std::max(p_solid + 0.002f, std::min(1.0f, p_fade));
+
+  Color col_solid(base_color);
+  Color col_clear(0, (base_color >> 16) & 0xFF, (base_color >> 8) & 0xFF, base_color & 0xFF);
+
+  Color colors[4] = { col_solid, col_solid, col_clear, col_clear };
+  REAL positions[4] = { 0.0f, p_solid, p_fade, 1.0f };
+  brush.SetInterpolationColors(colors, positions, 4);
+
+  StringFormat fmt;
+  fmt.SetAlignment(StringAlignmentCenter);
+  fmt.SetLineAlignment(StringAlignmentCenter);
+  fmt.SetFormatFlags(StringFormatFlagsNoWrap | StringFormatFlagsNoClip);
+  g.DrawString(text.c_str(), static_cast<INT>(text.size()), font, box, &fmt, &brush);
+}
+
 void paint_lyrics(App& app, Graphics& g, int w, int h) {
   View& v = app.view;
   const Theme& th = theme(app.cfg.theme);
@@ -489,7 +537,9 @@ void paint_lyrics(App& app, Graphics& g, int w, int h) {
   const int n = static_cast<int>(app.disp.size());
   const int a = app.active;
   const int64_t pos = app.current_pos_ms();
-  const double progress = (a >= 0) ? line_progress(app.disp, a, pos) : 0.0;
+  const double raw_progress = (a >= 0) ? line_progress(app.disp, a, pos) : 0.0;
+  // Apply hermite smoothstep easing to line progress
+  const double progress = raw_progress * raw_progress * (3.0 - 2.0 * raw_progress);
 
   int first = 0;
   if (a >= 0) first = std::max(0, a - 16);
@@ -505,20 +555,29 @@ void paint_lyrics(App& app, Graphics& g, int w, int h) {
     const bool is_gap = app.disp[i].text.empty();
     if (is_gap) continue;
 
+    double act = 0.0;
+    auto it = v.line_activity.find(i);
+    if (it != v.line_activity.end()) act = it->second;
+    if (is_active && act < 0.05) act = 1.0;
+
     const int dist = (a >= 0) ? std::abs(i - a) : 99;
-    int alpha = is_active ? 255 : static_cast<int>(std::max(52.0, 208.0 - dist * 30.0));
+    const int base_alpha = static_cast<int>(std::max(52.0, 208.0 - dist * 30.0));
+    int alpha = static_cast<int>(base_alpha + (255 - base_alpha) * act);
     if (!has_display_timing) alpha = 225;
 
-    const int px = static_cast<int>(std::lround(is_active ? v.act_px : v.base_px));
-    Font* font = get_font(app, px, is_active ? 600 : 400);
+    Font* font = get_font(app, static_cast<int>(std::lround(v.base_px)), (act > 0.4) ? 600 : 400);
     std::wstring text = wide(app.disp[i].text);
+    const double full_w = measure_text(g, text, font);
 
     RectF box(static_cast<REAL>(col_x), static_cast<REAL>(y),
               static_cast<REAL>(v.col_w), static_cast<REAL>(v.line_h[i]));
 
-    if (is_active) {
-      // Soft spotlight behind the line being sung.
-      RectF band(box.X, box.Y + box.Height * 0.08f, box.Width, box.Height * 0.84f);
+    if (act > 0.01) {
+      // Soft contoured spotlight aura behind the singing line, fading smoothly with activity
+      const double band_w = std::min(static_cast<double>(box.Width), full_w + box.Height * 1.5);
+      const double band_x = col_x + (v.col_w - band_w) * 0.5;
+      RectF band(static_cast<REAL>(band_x), box.Y + box.Height * 0.08f,
+                 static_cast<REAL>(band_w), box.Height * 0.84f);
       GraphicsPath p;
       REAL r = band.Height * 0.5f;
       p.AddArc(band.X, band.Y, r, r, 90, 180);
@@ -526,8 +585,9 @@ void paint_lyrics(App& app, Graphics& g, int w, int h) {
       p.CloseFigure();
       int ar = (th.accent >> 16) & 0xFF, ag = (th.accent >> 8) & 0xFF,
           ab = th.accent & 0xFF;
+      int halo_alpha = static_cast<int>(std::min(30.0, 30.0 * act));
       PathGradientBrush halo(&p);
-      halo.SetCenterColor(Color(26, ar, ag, ab));
+      halo.SetCenterColor(Color(halo_alpha, ar, ag, ab));
       Color edge(0, ar, ag, ab);
       int one = 1;
       halo.SetSurroundColors(&edge, &one);
@@ -535,28 +595,25 @@ void paint_lyrics(App& app, Graphics& g, int w, int h) {
     }
 
     ARGB base_color = (th.text & 0x00FFFFFF) | (static_cast<ARGB>(alpha) << 24);
+    ARGB dim_color = (th.text & 0x00FFFFFF) | (static_cast<ARGB>(std::max(48.0, alpha * 0.42)) << 24);
 
-    // Only real source timestamps drive a wipe. Enhanced LRC segments use
-    // their own markers; ordinary LRC uses a continuous line-level wipe.
     if (is_active && app.lyrics.synced && app.cfg.wipe) {
-      const double full_w = measure_text(g, text, font);
-      const double filled_w = app.disp[i].segments.empty()
-                                  ? full_w * progress
-                                  : timed_segment_fill_width(
-                                        g, app.disp[i], app.disp[i].text, font, pos);
-      if (full_w > 0.0 && filled_w < full_w - 0.5) {
-        ARGB dim = (th.text & 0x00FFFFFF) | (0x66 << 24);
-        draw_text(g, text, font, box, dim);
-        const double left = col_x + (v.col_w - full_w) * 0.5;
-        GraphicsState st = g.Save();
-        g.SetClip(RectF(static_cast<REAL>(left), box.Y - 4,
-                        static_cast<REAL>(std::max(0.0, filled_w)),
-                        box.Height + 8));
-        draw_text(g, text, font, box, base_color);
-        g.Restore(st);
+      double filled_w = app.disp[i].segments.empty()
+                            ? full_w * progress
+                            : timed_segment_fill_width(
+                                  g, app.disp[i], app.disp[i].text, font, pos);
+
+      // Smooth sub-frame fill transition to prevent timer-tick stutter
+      if (v.smooth_fill_line != a) {
+        v.smooth_fill_line = a;
+        v.smooth_fill = filled_w;
       } else {
-        draw_text(g, text, font, box, base_color);
+        v.smooth_fill = ease_towards(v.smooth_fill, filled_w, 0.016, 0.04);
+        filled_w = v.smooth_fill;
       }
+
+      draw_feathered_wipe(g, text, font, box, full_w, filled_w, col_x, v.col_w,
+                          base_color, dim_color);
     } else {
       draw_text(g, text, font, box, base_color);
     }

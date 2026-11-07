@@ -204,6 +204,9 @@ void reset_document(App& app) {
   app.view.line_h.clear();
   app.view.total_h = 0;
   app.view.scroll = 0;
+  app.view.line_activity.clear();
+  app.view.smooth_fill = 0.0;
+  app.view.smooth_fill_line = -1;
   app.active = -1;
 }
 
@@ -941,10 +944,32 @@ void on_timer(App& app) {
                              : -1;
   if (new_active != app.active) app.active = new_active;
 
+  // Smooth line-to-line activity transitions
+  bool line_animating = false;
+  if (!app.disp.empty() && (app.lyrics.synced || app.timing_estimated)) {
+    const int count = static_cast<int>(app.disp.size());
+    for (int i = 0; i < count; ++i) {
+      const double target_act = (i == app.active) ? 1.0 : 0.0;
+      double cur_act = 0.0;
+      auto it = app.view.line_activity.find(i);
+      if (it != app.view.line_activity.end()) cur_act = it->second;
+      if (cur_act != target_act) {
+        double next_act = ease_towards(cur_act, target_act, dt, 0.14);
+        if (std::abs(next_act - target_act) < 0.005) next_act = target_act;
+        if (next_act > 0.001) {
+          app.view.line_activity[i] = next_act;
+          if (next_act < 0.999) line_animating = true;
+        } else {
+          app.view.line_activity.erase(i);
+        }
+      }
+    }
+  }
+
   const double target = scroll_target(app, h);
   app.view.scroll = ease_towards(app.view.scroll, target, dt, 0.13);
   if (std::fabs(target - app.view.scroll) < 0.4) app.view.scroll = target;
-  const bool animating = std::fabs(target - app.view.scroll) > 0.4;
+  const bool animating = std::fabs(target - app.view.scroll) > 0.4 || line_animating;
   const bool lyric_progress = app.session_present && app.active_media.playing &&
                               app.lstate == LyricsState::Ready;
   const bool rapid_frame = animating || app.view.toast_until > now || lyric_progress;

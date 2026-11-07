@@ -120,6 +120,9 @@ struct View {
   double scroll = 0;
   int64_t last_frame = 0;
   int last_active = -1;
+  std::map<int, double> line_activity;
+  double smooth_fill = 0.0;
+  int smooth_fill_line = -1;
 
   // transient UI
   std::string toast;
