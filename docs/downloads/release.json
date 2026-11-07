@@ -1,0 +1,11 @@
+{
+  "architecture": "x64",
+  "asset": "YoutubeLyrics.exe",
+  "channel": "stable",
+  "repository": "LIN4CRE/Youtube-Lyrics",
+  "schema_version": 1,
+  "sha256": "be9f632fd733af7aeaef47e642d3ae82f7c73244598609c549a455b56f391e29",
+  "size_bytes": 875008,
+  "tag": "v1.4.0",
+  "version": "1.4.0"
+}
