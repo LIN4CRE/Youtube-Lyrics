@@ -940,17 +940,27 @@ void render_frame(App& app, Graphics& g, int w, int h) {
   g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
   g.SetPixelOffsetMode(PixelOffsetModeHalf);
 
-  ensure_background(app, w, h);
-  if (app.view.bg) {
-    g.DrawImage(app.view.bg,
-                RectF(0, 0, static_cast<REAL>(w), static_cast<REAL>(h)));
+  const bool desktop_wallpaper = app.cfg.wallpaper && !app.windowed;
+  const bool fallback_top = desktop_wallpaper && !app.desktop_parented;
+
+  if (fallback_top) {
+    // In fallback mode where WorkerW could not be parented, clear with the
+    // color-key color RGB(16, 16, 24) so that the user's desktop wallpaper
+    // and desktop icons remain 100% visible and unobstructed.
+    SolidBrush colorkey(Color(255, 16, 16, 24));
+    g.FillRectangle(&colorkey, RectF(0, 0, static_cast<REAL>(w), static_cast<REAL>(h)));
   } else {
-    SolidBrush black(Color(0xFF101018));
-    g.FillRectangle(&black, RectF(0, 0, static_cast<REAL>(w),
-                                  static_cast<REAL>(h)));
+    ensure_background(app, w, h);
+    if (app.view.bg) {
+      g.DrawImage(app.view.bg,
+                  RectF(0, 0, static_cast<REAL>(w), static_cast<REAL>(h)));
+    } else {
+      SolidBrush black(Color(0xFF101018));
+      g.FillRectangle(&black, RectF(0, 0, static_cast<REAL>(w),
+                                    static_cast<REAL>(h)));
+    }
   }
 
-  const bool desktop_wallpaper = app.cfg.wallpaper && !app.windowed;
   const bool has_current_session = app.session_present &&
                                    !app.active_track.title.empty();
   if (desktop_wallpaper && !has_current_session) {

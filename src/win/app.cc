@@ -408,36 +408,26 @@ HWND find_desktop_host() {
   if (!progman) return nullptr;
 
   DWORD_PTR ignored = 0;
-  SendMessageTimeoutW(progman, 0x052C, 0x0000000D, 0, SMTO_NORMAL, 1000, &ignored);
+  // Send 0x052C with 0, 0 to spawn the WorkerW behind desktop icons.
+  // Note: Do not send 0x0000000D because 0x0000000D destroys WorkerW.
   SendMessageTimeoutW(progman, 0x052C, 0, 0, SMTO_NORMAL, 1000, &ignored);
 
+  // Modern Windows 11 check (Build 22000+, 24H2 / 26xxx):
+  // Progman contains SHELLDLL_DefView and WorkerW as direct children!
+  HWND def_view = FindWindowExW(progman, nullptr, L"SHELLDLL_DefView", nullptr);
+  if (def_view) {
+    HWND worker = FindWindowExW(progman, def_view, L"WorkerW", nullptr);
+    if (!worker) worker = FindWindowExW(progman, nullptr, L"WorkerW", nullptr);
+    if (worker && IsWindow(worker)) return worker;
+  }
+
+  // Windows 10 check:
+  // SHELLDLL_DefView is inside a top-level window (WorkerW or Progman),
+  // and the target WorkerW is the top-level sibling directly behind it.
   HWND host = nullptr;
   for (int attempt = 0; attempt < 6; ++attempt) {
     EnumWindows(find_workerw_after_desktop, reinterpret_cast<LPARAM>(&host));
     if (host && IsWindow(host)) return host;
-
-    // Scan for any top-level WorkerW that does not host SHELLDLL_DefView
-    HWND def_view_parent = nullptr;
-    EnumWindows([](HWND top, LPARAM p) -> BOOL {
-      if (FindWindowExW(top, nullptr, L"SHELLDLL_DefView", nullptr)) {
-        *reinterpret_cast<HWND*>(p) = top;
-        return FALSE;
-      }
-      return TRUE;
-    }, reinterpret_cast<LPARAM>(&def_view_parent));
-
-    if (def_view_parent) {
-      HWND w = nullptr;
-      while ((w = FindWindowExW(nullptr, w, L"WorkerW", nullptr)) != nullptr) {
-        if (w != def_view_parent && !FindWindowExW(w, nullptr, L"SHELLDLL_DefView", nullptr)) {
-          RECT r{};
-          if (GetClientRect(w, &r) && (r.right - r.left) > 100 && (r.bottom - r.top) > 100) {
-            return w;
-          }
-        }
-      }
-    }
-
     Sleep(50);
   }
   return host;
@@ -519,10 +509,16 @@ void apply_desktop_mode(App& app) {
     if (!app.desktop_parented) {
       const HWND host = find_desktop_host();
       if (host && IsWindow(host)) {
+        // A child window must have WS_CHILD style before SetParent across processes.
+        LONG_PTR child_style = GetWindowLongPtrW(app.hwnd, GWL_STYLE);
+        child_style &= ~WS_POPUP;
+        child_style |= WS_CHILD | WS_VISIBLE;
+        SetWindowLongPtrW(app.hwnd, GWL_STYLE, child_style);
+
         SetLastError(ERROR_SUCCESS);
         const HWND previous = SetParent(app.hwnd, host);
         const DWORD error = GetLastError();
-        if (previous || error == ERROR_SUCCESS) {
+        if (previous || error == ERROR_SUCCESS || GetParent(app.hwnd) == host) {
           app.desktop_host = host;
           app.desktop_parented = true;
         } else {
@@ -536,9 +532,9 @@ void apply_desktop_mode(App& app) {
     ex |= WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TRANSPARENT;
     ex &= ~WS_EX_APPWINDOW;
     SetWindowLongPtrW(app.hwnd, GWL_EXSTYLE, ex);
-    SetLayeredWindowAttributes(app.hwnd, 0, 255, LWA_ALPHA);
 
     if (app.desktop_parented && IsWindow(app.desktop_host)) {
+      SetLayeredWindowAttributes(app.hwnd, 0, 255, LWA_ALPHA);
       LONG_PTR style = GetWindowLongPtrW(app.hwnd, GWL_STYLE);
       style &= ~WS_POPUP;
       style |= WS_CHILD | WS_VISIBLE;
@@ -551,17 +547,18 @@ void apply_desktop_mode(App& app) {
       }
       // The WorkerW client rectangle is used instead of the primary monitor's
       // dimensions, so Explorer's virtual-desktop surface can cover all displays.
-      SetWindowPos(app.hwnd, HWND_TOP, 0, 0, r.right - r.left, r.bottom - r.top,
+      SetWindowPos(app.hwnd, HWND_BOTTOM, 0, 0, r.right - r.left, r.bottom - r.top,
                    SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
       logf("window: attached to desktop WorkerW %p (%ldx%ld)", app.desktop_host,
            r.right - r.left, r.bottom - r.top);
     } else {
-      // Safe fallback only: remain at the very bottom of the non-topmost z-order
-      // and do not intercept input. This is not claimed as true WorkerW mode.
+      // Safe fallback: transparent bottom-z-order layer so desktop icons are NOT obscured.
       LONG_PTR style = GetWindowLongPtrW(app.hwnd, GWL_STYLE);
       style &= ~WS_CHILD;
       style |= WS_POPUP | WS_VISIBLE;
       SetWindowLongPtrW(app.hwnd, GWL_STYLE, style);
+      SetLayeredWindowAttributes(app.hwnd, RGB(16, 16, 24), 255, LWA_COLORKEY);
+
       MONITORINFO mi{};
       mi.cbSize = sizeof(mi);
       GetMonitorInfoW(MonitorFromWindow(app.hwnd, MONITOR_DEFAULTTONEAREST), &mi);
@@ -569,7 +566,7 @@ void apply_desktop_mode(App& app) {
                    mi.rcMonitor.right - mi.rcMonitor.left,
                    mi.rcMonitor.bottom - mi.rcMonitor.top,
                    SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
-      logf("window: WorkerW unavailable; safe bottom-z-order fallback only");
+      logf("window: WorkerW unavailable; safe transparent bottom-z-order fallback");
     }
   } else {
     if (app.desktop_parented) {
@@ -1373,7 +1370,7 @@ void App::show_window() {
   const bool desktop = cfg.wallpaper && !windowed;
   ShowWindow(hwnd, desktop ? SW_SHOWNOACTIVATE : SW_SHOW);
   if (!desktop) SetForegroundWindow(hwnd);
-  if (!windowed && !desktop_parented) {
+  if (!windowed && !desktop_parented && !cfg.wallpaper) {
     SetWindowPos(hwnd, cfg.topmost ? HWND_TOPMOST : HWND_TOP, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
   }
