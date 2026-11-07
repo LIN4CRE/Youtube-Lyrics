@@ -433,14 +433,14 @@ LyricsState do_lookup(const TrackInfo& track, bool force, Lyrics& out,
   int tried = 0;
   bool lrclib_blocked = false;
 
-  auto attempt = [&](const std::string& url, const char* name) {
+  auto attempt = [&](const TrackInfo& t, const std::string& url, const char* name) {
     if (http_cancel_requested()) return false;
     const bool lrclib = url.find("lrclib.net") != std::string::npos;
     if (lrclib && lrclib_blocked) return false;
     ++tried;
     Lyrics l;
     std::string detail;
-    if (!try_fetch(track, url, l, detail)) {
+    if (!try_fetch(t, url, l, detail)) {
       if (!detail.empty()) why = detail;
       if (lrclib &&
           (detail.find("transport error") != std::string::npos ||
@@ -463,15 +463,15 @@ LyricsState do_lookup(const TrackInfo& track, bool force, Lyrics& out,
   };
 
   // 1. Exact match (fastest, most precise).
-  if (attempt(build_get_url(track), "LRCLIB")) return LyricsState::Ready;
+  if (attempt(track, build_get_url(track), "LRCLIB")) return LyricsState::Ready;
   // 2. Structured search - title + artist, then free text.
-  if (attempt(build_search_url(track), "LRCLIB")) return LyricsState::Ready;
-  if (!track.artist.empty() && attempt(build_query_url(track), "LRCLIB")) {
+  if (attempt(track, build_search_url(track), "LRCLIB")) return LyricsState::Ready;
+  if (!track.artist.empty() && attempt(track, build_query_url(track), "LRCLIB")) {
     return LyricsState::Ready;
   }
   // 3. Title-only LRCLIB search; candidates still pass best_candidate()'s
   //    title/artist/duration checks before any lyrics are shown.
-  if (attempt(build_title_only_url(track), "LRCLIB")) return LyricsState::Ready;
+  if (attempt(track, build_title_only_url(track), "LRCLIB")) return LyricsState::Ready;
 
   // 3b. Split title search: YouTube titles are frequently formatted with separators,
   // e.g. "Artist - Title" or "Remixer — Title — Original Artist | Channel"
@@ -480,7 +480,7 @@ LyricsState do_lookup(const TrackInfo& track, bool force, Lyrics& out,
   while (!rem.empty()) {
     size_t best_sep = std::string::npos;
     size_t sep_len = 0;
-    for (const char* sep : {" | ", " - ", " \xE2\x80\x93 ", " \xE2\x80\x94 ", " / "}) {
+    for (const char* sep : {" | ", " - ", " \xE2\x80\x93 ", " \xE2\x80\x94 ", " / ", " X ", " x ", " vs ", " vs. ", " VS "}) {
       size_t found = rem.find(sep);
       if (found != std::string::npos && (best_sep == std::string::npos || found < best_sep)) {
         best_sep = found;
@@ -504,20 +504,25 @@ LyricsState do_lookup(const TrackInfo& track, bool force, Lyrics& out,
         if (i == j) continue;
         TrackInfo cand = clean_track(TrackInfo{parts[j], parts[i], track.album, track.duration_s}, false);
         if (!cand.title.empty() && !cand.artist.empty()) {
-          if (attempt(build_search_url(cand), "LRCLIB")) return LyricsState::Ready;
-          if (attempt(build_query_url(cand), "LRCLIB")) return LyricsState::Ready;
+          if (attempt(cand, build_search_url(cand), "LRCLIB")) return LyricsState::Ready;
+          if (attempt(cand, build_query_url(cand), "LRCLIB")) return LyricsState::Ready;
         }
       }
       TrackInfo t_only = clean_track(TrackInfo{parts[i], track.artist, track.album, track.duration_s}, false);
       if (!t_only.title.empty()) {
-        if (attempt(build_search_url(t_only), "LRCLIB")) return LyricsState::Ready;
-        if (attempt(build_query_url(t_only), "LRCLIB")) return LyricsState::Ready;
+        if (attempt(t_only, build_search_url(t_only), "LRCLIB")) return LyricsState::Ready;
+        if (attempt(t_only, build_query_url(t_only), "LRCLIB")) return LyricsState::Ready;
+      }
+      TrackInfo t_bare = clean_track(TrackInfo{parts[i], "", track.album, track.duration_s}, false);
+      if (!t_bare.title.empty()) {
+        if (attempt(t_bare, build_title_only_url(t_bare), "LRCLIB")) return LyricsState::Ready;
       }
     }
   }
+
   // 4. Final, lower-confidence fallback: lyrics.ovh is queried by exact
   //    artist/title but does not return identity metadata for independent checks.
-  if (!track.artist.empty() && attempt(build_ovh_url(track), "lyrics.ovh")) {
+  if (!track.artist.empty() && attempt(track, build_ovh_url(track), "lyrics.ovh")) {
     return LyricsState::Ready;
   }
 

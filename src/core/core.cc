@@ -1212,9 +1212,7 @@ const JValue* best_candidate(const JValue& search_results, const TrackInfo& want
     if (!want.artist.empty() && !candidate_track.artist.empty() && !same_artist) {
       continue;
     }
-    // With no artist metadata, a title alone is not enough: common titles such
-    // as "Home" and "Intro" have many unrelated lyric sheets. Require a real
-    // duration match before accepting a provider result in that case.
+    // With no artist metadata, a title alone requires duration match to avoid same-title covers
     if (want.artist.empty()) {
       if (want.duration_s <= 5 || duration <= 5 ||
           std::fabs(duration - want.duration_s) > 8.0) {
