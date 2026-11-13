@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Stable tag to publish from the selected branch (for example v1.4.0)
+        description: Stable tag to publish from the selected branch (for example v1.5.0)
         required: true
         type: string
 
@@ -60,6 +60,24 @@ jobs:
       - name: Run portable and release-metadata tests
         run: ./scripts/test.sh
 
+      - name: Confirm the public download matches the source being released
+        run: |
+          # docs/downloads is the copy the website serves. If it is not the same
+          # file this workflow is about to publish, the site is advertising a
+          # binary that is not the release.
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+          dist = Path('docs/downloads/YoutubeLyrics.exe')
+          if not dist.is_file():
+              raise SystemExit('docs/downloads/YoutubeLyrics.exe is missing from the tag')
+          recorded = Path('docs/downloads/YoutubeLyrics.exe.sha256').read_text().split()[0]
+          actual = hashlib.sha256(dist.read_bytes()).hexdigest()
+          if recorded != actual:
+              raise SystemExit('the checksum sidecar does not match docs/downloads/YoutubeLyrics.exe')
+          print(f'docs/downloads copy verified against its sidecar ({actual})')
+          PY
+
       - name: Install pinned Windows cross-build tools
         run: python3 -m pip install --disable-pip-version-check ziglang==0.17.1 Pillow==13.0.0
 
@@ -84,6 +102,8 @@ jobs:
           assert machine == 0x8664, f'expected x86-64 PE, got 0x{machine:04x}'
           print(f'validated x86-64 Windows executable ({len(image):,} bytes)')
           PY
+          python3 scripts/verify_build.py dist/YoutubeLyrics.exe --ico .build/app.ico
+          python3 scripts/check_docs.py
           python3 scripts/generate_release.py \
             --exe dist/YoutubeLyrics.exe \
             --output-dir .build/release \
