@@ -6,6 +6,7 @@ no third-party photographs, network downloads, fonts, or hotlinked assets are us
 """
 from __future__ import annotations
 
+import math
 import random
 from pathlib import Path
 
@@ -35,6 +36,69 @@ def glow(im: Image.Image, xy: tuple[int, int], radius: int,
     d.ellipse((x - radius, y - radius, x + radius, y + radius), fill=(*color, alpha))
     layer = layer.filter(ImageFilter.GaussianBlur(radius * 0.58))
     im.paste(Image.alpha_composite(im.convert("RGBA"), layer).convert("RGB"))
+
+
+def soft_band(im: Image.Image, y: int, height: int,
+              colour: tuple[int, int, int], alpha: int) -> None:
+    """A horizontal band of light with feathered edges.
+
+    Drawn into its own layer with a per-row alpha gradient and then blurred, so
+    it reads as haze. A flat ImageDraw.rectangle (the obvious version) leaves a
+    hard line that looks like a sheet of glass lying across the scene.
+    """
+    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    px = layer.load()
+    for row in range(max(0, y), min(H, y + height)):
+        t = (row - y) / max(1, height - 1)
+        # sine-window: transparent at both ends, strongest in the middle
+        weight = math.sin(t * math.pi) ** 1.4
+        px_row = int(alpha * weight)
+        if px_row <= 0:
+            continue
+        for x in range(W):
+            px[x, row] = (*colour, px_row)
+    layer = layer.filter(ImageFilter.GaussianBlur(height * 0.35))
+    im.paste(Image.alpha_composite(im.convert("RGBA"), layer).convert("RGB"))
+
+
+def fade_band(layer: Image.Image, top: int, bottom: int, feather: int) -> Image.Image:
+    """Feathers both edges of the content between `top` and `bottom`.
+
+    The layer is transparent outside that band already; this only softens the
+    two transitions so a filled polygon cannot show its own straight base.
+    """
+    px = layer.load()
+    for row in range(layer.height):
+        if row < top or row > bottom:
+            continue
+        distance = min(row - top, bottom - row)
+        if distance >= feather:
+            continue
+        factor = distance / max(1, feather)
+        for x in range(layer.width):
+            r, g, b, a = px[x, row]
+            if a:
+                px[x, row] = (r, g, b, int(a * factor))
+    return layer
+
+
+def fade_from(layer: Image.Image, start_row: int, end_row: int) -> Image.Image:
+    """Ramps a layer's alpha from 0 at start_row to full at end_row."""
+    px = layer.load()
+    span = max(1, end_row - start_row)
+    for row in range(layer.height):
+        if row <= start_row:
+            factor = 0.0
+        elif row >= end_row:
+            continue
+        else:
+            factor = (row - start_row) / span
+        if factor >= 1.0:
+            continue
+        for x in range(layer.width):
+            r, g, b, a = px[x, row]
+            px[x, row] = (r, g, b, int(a * factor))
+    return layer
 
 
 def vignette(im: Image.Image, strength: int = 90) -> Image.Image:
@@ -83,18 +147,28 @@ def city() -> Image.Image:
                     d.rectangle((wx, wy, wx + 4, wy + 8), fill=(232, 157, 84, 82))
                 elif (wx + wy + i) % 9 == 0:
                     d.rectangle((wx, wy, wx + 4, wy + 7), fill=(106, 153, 183, 36))
-    # Wet road, tapering to a quiet vanishing point.
-    d.polygon([(0, 900), (0, 690), (710, 616), (890, 616), (1600, 690), (1600, 900)],
-              fill=(5, 8, 14, 255))
+
+    # Wet road, tapering to a quiet vanishing point. It is drawn into its own
+    # layer and its top edge is faded, so the horizon dissolves into haze
+    # instead of cutting the frame with one flat line.
+    road = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ImageDraw.Draw(road).polygon(
+        [(0, 900), (0, 706), (712, 622), (888, 622), (1600, 706), (1600, 900)],
+        fill=(5, 8, 14, 244))
+    road = fade_band(road, 600, 900, 120)
+    im.paste(Image.alpha_composite(im.convert("RGBA"), road).convert("RGB"))
+    soft_band(im, 578, 150, (34, 52, 70), 30)
+
+    d = ImageDraw.Draw(im, "RGBA")
     # Fine perspective seams and sparse amber reflections, all low contrast.
     for x in (110, 315, 520, 710, 890, 1080, 1290, 1490):
-        d.line((800 + (x - 800) * 0.06, 615, x, 900), fill=(90, 112, 133, 22), width=2)
+        d.line((800 + (x - 800) * 0.06, 622, x, 900), fill=(90, 112, 133, 20), width=2)
     rng = random.Random(241)
     for _ in range(90):
         x = rng.choice([rng.randrange(0, 630), rng.randrange(970, 1600)])
-        y = rng.randrange(660, 895)
+        y = rng.randrange(680, 895)
         length = rng.randrange(18, 110)
-        alpha = rng.randrange(8, 27)
+        alpha = rng.randrange(8, 24)
         color = (226, 152, 82, alpha) if rng.random() < 0.55 else (107, 154, 195, alpha)
         d.line((x, y, x + rng.randrange(-4, 5), min(H, y + length)), fill=color,
                width=rng.choice([1, 2, 3]))
@@ -147,22 +221,34 @@ def forest() -> Image.Image:
     d = ImageDraw.Draw(im, "RGBA")
     # Distant tree line and bands of cool mist.
     rng = random.Random(812)
-    for layer, base_y, color, scale in [
-        (0, 475, (20, 39, 37, 170), 0.72),
-        (1, 545, (13, 29, 28, 205), 0.88),
+    for layer, base_y, color, scale, fade_top in [
+        (0, 486, (20, 39, 37, 150), 0.72, 30),
+        (1, 556, (13, 29, 28, 185), 0.88, 36),
     ]:
-        for x in range(-35, W + 40, 47):
+        trees = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        td = ImageDraw.Draw(trees)
+        x = -40
+        while x < W + 40:
             height = rng.randrange(95, 230) * scale
             width = rng.randrange(27, 56) * scale
-            d.polygon([(x, base_y), (x + width / 2, base_y - height),
-                       (x + width, base_y)], fill=color)
-    for y, alpha in ((480, 23), (545, 19), (608, 13)):
-        d.rectangle((0, y, W, y + 42), fill=(128, 160, 151, alpha))
+            # Jitter the treetops so the tree line does not read as a comb.
+            lean = rng.uniform(-0.10, 0.10) * width
+            td.polygon([(x, base_y), (x + width / 2 + lean, base_y - height),
+                        (x + width, base_y)], fill=color)
+            x += rng.randrange(28, 62)
+        # The base of a tree layer is a straight line by construction; fading it
+        # into the mist below hides that seam.
+        trees = fade_band(trees, base_y - 240, base_y + 10, fade_top * 2)
+        im.paste(Image.alpha_composite(im.convert("RGBA"), trees).convert("RGB"))
+        d = ImageDraw.Draw(im, "RGBA")
+    # Two layers of feathered mist instead of flat rectangles, so there is no
+    # visible seam across the frame.
+    soft_band(im, 400, 280, (128, 160, 151), 26)
     # Path recedes into the clearing without a bright focal point.
-    d.polygon([(475, 900), (680, 605), (770, 552), (840, 552), (945, 612),
-               (1160, 900)], fill=(5, 12, 12, 150))
-    d.line((790, 588, 602, 900), fill=(108, 132, 112, 22), width=4)
-    d.line((840, 588, 1035, 900), fill=(108, 132, 112, 18), width=4)
+    d.polygon([(455, 900), (664, 668), (752, 600), (860, 600), (962, 668),
+               (1185, 900)], fill=(6, 13, 13, 120))
+    d.line((790, 610, 606, 900), fill=(108, 132, 112, 16), width=3)
+    d.line((845, 610, 1042, 900), fill=(108, 132, 112, 13), width=3)
     # Near-black framing trunks and delicate branches at the edges.
     for x, width, lean in ((45, 54, 10), (225, 31, -13), (1510, 62, -7), (1370, 31, 12)):
         d.polygon([(x, 0), (x + width, 0), (x + width + lean, 900), (x - 12, 900)],
