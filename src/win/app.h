@@ -29,7 +29,9 @@ enum : UINT {
   WM_APP_UPDATE_NONE = WM_APP + 8,
 };
 
-constexpr int kWallpaperCount = 3;
+// Three embedded cinematic stills plus one procedural scene that is drawn at
+// runtime, so the fourth choice costs no bytes in the executable.
+constexpr int kWallpaperCount = 4;
 
 enum class LyricsState { Idle, Loading, Ready, NotFound, Error };
 
@@ -52,6 +54,7 @@ struct MediaState {
 // ---------------------------------------------------------------------- config
 
 struct Config {
+  int version = 1;            // written so future migrations can be explicit
   int offset_ms = 0;          // manual sync nudge
   double font_scale = 1.0;    // text size multiplier
   bool topmost = false;
@@ -123,6 +126,7 @@ struct View {
   std::map<int, double> line_activity;
   double smooth_fill = 0.0;
   int smooth_fill_line = -1;
+  int64_t last_wipe_at = 0;  // real elapsed time for the karaoke wipe smoother
 
   // transient UI
   std::string toast;
@@ -192,6 +196,8 @@ struct App {
   bool hidden_to_tray = false;
   bool quitting = false;
   HANDLE single_instance = nullptr;
+  HWND settings_window = nullptr;   // native settings dialog, when open
+  bool first_run = false;           // no config file existed at startup
 
   // ---- helpers ------------------------------------------------------------
   int64_t now_ms() const { return static_cast<int64_t>(GetTickCount64()); }
@@ -223,6 +229,10 @@ struct App {
   void set_font_scale(double scale);
   void show_toast(const std::string& text, int ms = 1800);
   void toggle_help();
+  void open_settings();
+  // Applies cfg.wallpaper/cfg.fullscreen/cfg.topmost to the live window in one
+  // place, so the settings dialog, the tray menu and the hotkeys all converge.
+  void apply_display_mode();
   void show_window();
   void hide_to_tray();
 
@@ -259,6 +269,8 @@ int lyrics_clear_cache();  // returns deleted file count, or -1 on failure
 
 // Implemented in app.cc, used by the other modules
 void logf(const char* fmt, ...);
+// Deliberately fails in release mode instead of shipping a silently missing
+// asset: used for the initial window and tray icon paths.
 std::string appdata_dir();          // %LOCALAPPDATA%\YouTubeLyrics, created on demand
 std::string exe_dir();
 std::string read_file(const std::string& path);

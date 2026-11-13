@@ -1,5 +1,6 @@
 // Youtube-Lyrics - window, tray, hotkeys, orchestration.
 #include "app.h"
+#include "settings.h"
 #include "update.h"
 #include "version.h"
 
@@ -33,6 +34,7 @@ const wchar_t* kSupportUrl = L"https://paypal.me/delinacre16";
 const UINT_PTR kFrameTimer = 1;
 const int kHotkeyToggle = 1;
 const int kHotkeyWallpaper = 2;
+const int kHotkeySettings = 3;
 const UINT kTrayId = 1;
 const UINT WM_APP_SHOW_EXISTING = WM_APP + 9;
 
@@ -119,9 +121,9 @@ HBITMAP make_icon_bitmap(int size) {
     // The margin rule every line of the song hangs from.
     {
       REAL rx = s * (small ? 0.150f : 0.134f);
-      REAL rw = s * (small ? 0.052f : 0.022f);
+      REAL rw = s * (small ? 0.052f : 0.024f);
       tile(path, rx, s * 0.215f, rw, s * 0.570f, rw * 0.5f);
-      Gdiplus::SolidBrush ink(Color(small ? 170 : 96, 11, 10, 15));
+      Gdiplus::SolidBrush ink(Color(small ? 168 : 128, 11, 10, 15));
       g.FillPath(&ink, &path);
     }
 
@@ -141,13 +143,13 @@ HBITMAP make_icon_bitmap(int size) {
       REAL y = s * bars[i].centre_y - h * 0.5f;
       tile(path, x0, y, w, h, h * 0.5f);
       if (bars[i].lit) {
-        Gdiplus::SolidBrush unsung(Color(86, 11, 10, 15));
+        Gdiplus::SolidBrush unsung(Color(132, 11, 10, 15));
         g.FillPath(&unsung, &path);
-        tile(path, x0, y, w * 0.68f, h, h * 0.5f);
+        tile(path, x0, y, w * 0.66f, h, h * 0.5f);
         Gdiplus::SolidBrush amber(Color(255, 245, 165, 36));
         g.FillPath(&amber, &path);
       } else {
-        Gdiplus::SolidBrush ink(Color(small ? 170 : 104, 11, 10, 15));
+        Gdiplus::SolidBrush ink(Color(small ? 190 : 150, 11, 10, 15));
         g.FillPath(&ink, &path);
       }
     }
@@ -627,6 +629,7 @@ void toggle_wallpaper_mode(App& app) {
   app.cfg.save();
   apply_fullscreen(app);
   app.rebuild_layout(true);
+  settings_refresh(app);
   app.show_toast(app.cfg.wallpaper
                      ? "Desktop background on · Ctrl+Alt+W to switch off"
                      : "Desktop background off");
@@ -763,6 +766,8 @@ void close_update_progress(App& app) {
 void show_tray_menu(App& app) {
   HMENU menu = CreatePopupMenu();
   AppendMenuW(menu, MF_STRING, 1, L"Show lyrics\tCtrl+Alt+L");
+  AppendMenuW(menu, MF_STRING, 19, L"Settings…\tCtrl+Alt+S");
+  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING | (app.windowed ? 0 : MF_CHECKED), 2,
               L"Full screen\tF11");
   AppendMenuW(menu, MF_STRING | (app.cfg.wallpaper ? MF_CHECKED : 0), 7,
@@ -856,6 +861,9 @@ void show_tray_menu(App& app) {
       app.show_toast("Checking GitHub for updates…", 2200);
       update_request_check(app, true);
       break;
+    case 19:
+      app.open_settings();
+      break;
     case 10:
       app.cfg.offset_ms = 0;
       app.cfg.save();
@@ -919,16 +927,20 @@ void on_timer(App& app) {
     apply_desktop_mode(app);
   }
 
-  if (app.cfg.wallpaper && app.cfg.wallpaper_auto_rotate) {
-    const int64_t interval = static_cast<int64_t>(app.cfg.wallpaper_interval_minutes) * 60 * 1000;
-    if (app.view.wallpaper_changed_at == 0) app.view.wallpaper_changed_at = now;
-    if (now - app.view.wallpaper_changed_at >= interval) {
-      app.cfg.wallpaper_index = (app.cfg.wallpaper_index + 1) % kWallpaperCount;
-      app.view.wallpaper_changed_at = now;
-      app.view.bg_wallpaper = -1;
-      app.cfg.save();
-      invalidate_window(app);
-    }
+  // Rotation only advances while the desktop layer is actually in use. A timer
+  // that kept cycling the saved index in window mode would silently change the
+  // scene the user next sees on the desktop.
+  const int64_t interval =
+      static_cast<int64_t>(std::max(5, app.cfg.wallpaper_interval_minutes)) * 60 * 1000;
+  if (app.view.wallpaper_changed_at == 0) app.view.wallpaper_changed_at = now;
+  if (app.cfg.wallpaper && app.cfg.wallpaper_auto_rotate &&
+      now - app.view.wallpaper_changed_at >= interval) {
+    app.cfg.wallpaper_index = (app.cfg.wallpaper_index + 1) % kWallpaperCount;
+    app.view.wallpaper_changed_at = now;
+    app.view.bg_wallpaper = -1;
+    app.cfg.save();
+    settings_refresh(app);
+    invalidate_window(app);
   }
 
   double dt = app.view.last_frame ? (now - app.view.last_frame) / 1000.0 : 0.016;
@@ -944,12 +956,25 @@ void on_timer(App& app) {
                              : -1;
   if (new_active != app.active) app.active = new_active;
 
-  // Smooth line-to-line activity transitions
+  // Smooth line-to-line activity transitions. A wrapped line is several display
+  // rows sharing one timestamp, and they light together as one sung line.
   bool line_animating = false;
   if (!app.disp.empty() && (app.lyrics.synced || app.timing_estimated)) {
     const int count = static_cast<int>(app.disp.size());
+    int group_begin = app.active;
+    if (group_begin >= 0 && group_begin < count) {
+      while (group_begin > 0 && app.disp[group_begin].cont &&
+             app.disp[group_begin - 1].start_ms == app.disp[group_begin].start_ms) {
+        --group_begin;
+      }
+    }
     for (int i = 0; i < count; ++i) {
-      const double target_act = (i == app.active) ? 1.0 : 0.0;
+      bool in_active_group = i == app.active;
+      if (!in_active_group && app.active >= 0 && i >= group_begin && i <= app.active &&
+          app.disp[i].start_ms == app.disp[app.active].start_ms) {
+        in_active_group = true;
+      }
+      const double target_act = in_active_group ? 1.0 : 0.0;
       double cur_act = 0.0;
       auto it = app.view.line_activity.find(i);
       if (it != app.view.line_activity.end()) cur_act = it->second;
@@ -1144,7 +1169,10 @@ void Config::load() {
     std::string k = trim(line.substr(0, eq));
     std::string v = trim(line.substr(eq + 1));
     int64_t integer = 0;
-    if (k == "offset_ms" && parse_config_integer(v, &integer)) {
+    if (k == "version" && parse_config_integer(v, &integer) &&
+        integer >= 1 && integer <= 100) {
+      version = static_cast<int>(integer);
+    } else if (k == "offset_ms" && parse_config_integer(v, &integer)) {
       offset_ms = static_cast<int>(std::max<int64_t>(-60000,
                                                      std::min<int64_t>(60000, integer)));
     } else if (k == "font_scale") {
@@ -1177,7 +1205,8 @@ void Config::load() {
 }
 void Config::save() const {
   char buf[512];
-  std::string data = "offset_ms=" + std::to_string(offset_ms) + "\n";
+  std::string data = "version=" + std::to_string(version) + "\n";
+  data += "offset_ms=" + std::to_string(offset_ms) + "\n";
   std::snprintf(buf, sizeof(buf), "font_scale=%.3f\n", font_scale);
   data += buf;
   data += std::string("topmost=") + (topmost ? "1" : "0") + "\n";
@@ -1277,11 +1306,24 @@ void App::toggle_fullscreen() {
   cfg.save();
   apply_fullscreen(*this);
   rebuild_layout(true);
+  settings_refresh(*this);
 }
+
+void App::apply_display_mode() {
+  windowed = !cfg.fullscreen && !cfg.wallpaper;
+  if (cfg.wallpaper) cfg.topmost = false;
+  cfg.save();
+  apply_fullscreen(*this);
+  rebuild_layout(true);
+  settings_refresh(*this);
+}
+
+void App::open_settings() { settings_show(*this); }
 
 void App::toggle_topmost() {
   if (cfg.wallpaper && !windowed) {
     show_toast("Always-on-top is unavailable in desktop mode");
+    settings_refresh(*this);
     return;
   }
   cfg.topmost = !cfg.topmost;
@@ -1290,6 +1332,7 @@ void App::toggle_topmost() {
                SWP_NOMOVE | SWP_NOSIZE);
   show_toast(cfg.topmost ? "Always on top: on" : "Always on top: off");
   invalidate();
+  settings_refresh(*this);
 }
 
 void App::toggle_theme() {
@@ -1299,6 +1342,7 @@ void App::toggle_theme() {
   std::string name = wide_to_utf8(theme_name(cfg.theme));
   show_toast("Theme: " + name);
   invalidate();
+  settings_refresh(*this);
 }
 
 void App::next_wallpaper() {
@@ -1308,6 +1352,7 @@ void App::next_wallpaper() {
   view.bg_wallpaper = -1;
   show_toast("Wallpaper: " + wide_to_utf8(wallpaper_name(cfg.wallpaper_index)));
   invalidate();
+  settings_refresh(*this);
 }
 
 void App::toggle_wallpaper_rotation() {
@@ -1316,6 +1361,7 @@ void App::toggle_wallpaper_rotation() {
   cfg.save();
   show_toast(cfg.wallpaper_auto_rotate ? "Wallpaper rotation: on"
                                        : "Wallpaper rotation: off");
+  settings_refresh(*this);
 }
 
 void App::cycle_wallpaper_interval() {
@@ -1329,6 +1375,7 @@ void App::cycle_wallpaper_interval() {
   cfg.save();
   show_toast("Wallpaper changes every " +
              std::to_string(cfg.wallpaper_interval_minutes) + " minutes");
+  settings_refresh(*this);
 }
 
 void App::cycle_wallpaper_dim() {
@@ -1344,6 +1391,7 @@ void App::cycle_wallpaper_dim() {
   view.bg_dim = -1;
   show_toast("Background darkness: " + std::to_string(cfg.wallpaper_dim) + "%");
   invalidate();
+  settings_refresh(*this);
 }
 
 void App::toggle_random_wallpaper_start() {
@@ -1351,6 +1399,7 @@ void App::toggle_random_wallpaper_start() {
   cfg.save();
   show_toast(cfg.wallpaper_random_start ? "Random wallpaper on launch: on"
                                         : "Random wallpaper on launch: off");
+  settings_refresh(*this);
 }
 
 void App::nudge_offset(int delta_ms) {
@@ -1362,6 +1411,7 @@ void App::nudge_offset(int delta_ms) {
   std::snprintf(buf, sizeof(buf), "Sync %+.2f s", cfg.offset_ms / 1000.0);
   show_toast(buf);
   invalidate();
+  settings_refresh(*this);
 }
 
 void App::set_font_scale(double scale) {
@@ -1375,9 +1425,11 @@ void App::set_font_scale(double scale) {
                 (cfg.font_scale - 1.0) * 100.0 + 100.0);
   show_toast(buf);
   invalidate();
+  settings_refresh(*this);
 }
 
 void App::show_toast(const std::string& text, int ms) {
+  if (!hwnd || quitting) return;
   view.toast = text;
   view.toast_until = now_ms() + ms;
   invalidate();
@@ -1411,6 +1463,8 @@ void App::hide_to_tray() {
 void App::create_tray_icon() { add_tray_icon(*this); }
 
 void App::destroy_view_resources() {
+  if (settings_window && IsWindow(settings_window)) DestroyWindow(settings_window);
+  settings_window = nullptr;
   if (view.mem_dc) {
     SelectObject(view.mem_dc, view.mem_old);
     DeleteObject(view.mem_bmp);
@@ -1532,6 +1586,20 @@ void handle_key(App& app, WPARAM key) {
     case 'H':
       app.toggle_help();
       break;
+    case 'S':
+      app.open_settings();
+      break;
+    case VK_OEM_PLUS:
+    case VK_ADD:
+      app.set_font_scale(app.cfg.font_scale + 0.07);
+      break;
+    case VK_OEM_MINUS:
+    case VK_SUBTRACT:
+      app.set_font_scale(app.cfg.font_scale - 0.07);
+      break;
+    case VK_OEM_4:  // '[' — quieter background
+      app.cycle_wallpaper_dim();
+      break;
     case 'Q':
       app.quitting = true;
       PostMessageW(app.hwnd, WM_CLOSE, 0, 0);
@@ -1546,6 +1614,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   if (!app) return DefWindowProcW(hwnd, msg, wParam, lParam);
 
   if (msg == app->taskbar_created_msg && app->taskbar_created_msg != 0) {
+    // Explorer restarted: the tray icon belonged to the old shell, and any
+    // WorkerW parenting is gone with it.
+    logf("shell: TaskbarCreated, restoring tray icon and desktop layer");
     add_tray_icon(*app);
     if (app->cfg.wallpaper && !app->windowed) {
       app->desktop_parented = false;
@@ -1711,6 +1782,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
       } else if (wParam == kHotkeyWallpaper) {
         toggle_wallpaper_mode(*app);
+      } else if (wParam == kHotkeySettings) {
+        app->open_settings();
       }
       return 0;
     case WM_APP_TRAY: {
@@ -1750,12 +1823,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       DestroyWindow(hwnd);
       return 0;
     case WM_DESTROY:
+      UnregisterHotKey(hwnd, kHotkeyToggle);
+      UnregisterHotKey(hwnd, kHotkeyWallpaper);
+      UnregisterHotKey(hwnd, kHotkeySettings);
       close_update_progress(*app);
       update_stop();
       remove_tray_icon(*app);
       PostQuitMessage(0);
       return 0;
     case WM_POWERBROADCAST:
+      if (wParam == PBT_APMSUSPEND) {
+        // Freeze the clock before the machine sleeps; the wall time between
+        // suspend and resume must not be counted as playback.
+        app->cfg.save();
+        return TRUE;
+      }
       if (wParam == PBT_APMRESUMEAUTOMATIC ||
           wParam == PBT_APMRESUMESUSPEND || wParam == PBT_APMRESUMECRITICAL) {
         MediaState& media = app->active_media;
@@ -1776,8 +1858,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       }
       return TRUE;
     case WM_ENDSESSION:
-      app->cfg.save();
-      break;
+      // Windows is ending the session: save now, and let the normal teardown
+      // path in wWinMain stop the worker threads.
+      if (wParam) {
+        app->quitting = true;
+        app->cfg.save();
+      }
+      return 0;
     default:
       break;
   }
@@ -1828,21 +1915,33 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR command_line, int show_cm
   app.inst = inst;
   g_app = &app;
 
-  // Single instance: focus the running copy instead of starting a second one.
+  // Single instance: ask the running copy to show itself instead of starting a
+  // second one. SetLastError is cleared first because CreateMutexW only sets it
+  // when the named object already exists, and a stale code would make a healthy
+  // first launch think it was the second.
+  SetLastError(ERROR_SUCCESS);
   app.single_instance =
-      CreateMutexW(nullptr, TRUE, L"Local\\YoutubeLyrics_SingleInstance_v1");
+      CreateMutexW(nullptr, FALSE, L"Local\\YoutubeLyrics_SingleInstance_v1");
   if (app.single_instance && GetLastError() == ERROR_ALREADY_EXISTS) {
     HWND existing = FindWindowW(kClassName, nullptr);
     if (existing) {
       // The running instance decides whether it may activate; in wallpaper mode
       // a second launch must not pull it above the desktop layer.
       PostMessageW(existing, WM_APP_SHOW_EXISTING, 0, 0);
+    } else {
+      // The class exists in no window: a previous process died without cleaning
+      // up. Carry on rather than silently doing nothing.
+      logf("startup: stale single-instance mutex, continuing");
     }
+    if (app.single_instance) CloseHandle(app.single_instance);
     GdiplusShutdown(gdi_token);
     return 0;
   }
 
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  // A config file that does not exist yet means this is the first launch: the
+  // idle screen then explains itself once instead of only saying "Listening".
+  app.first_run = read_file(appdata_dir() + "\\config.ini").empty();
   app.cfg.load();
   if (app.cfg.wallpaper_random_start && kWallpaperCount > 1) {
     const unsigned int seed = static_cast<unsigned int>(GetTickCount64()) ^
@@ -1918,6 +2017,9 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR command_line, int show_cm
   if (!RegisterHotKey(app.hwnd, kHotkeyWallpaper, MOD_CONTROL | MOD_ALT, 'W')) {
     logf("hotkey Ctrl+Alt+W could not be registered (another app owns it)");
   }
+  if (!RegisterHotKey(app.hwnd, kHotkeySettings, MOD_CONTROL | MOD_ALT, 'S')) {
+    logf("hotkey Ctrl+Alt+S could not be registered (another app owns it)");
+  }
 
   app.started_at = app.now_ms();
   app.view.last_frame = app.now_ms();
@@ -1944,6 +2046,13 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR command_line, int show_cm
     if (msg.message == WM_APP_SHOW_EXISTING) {
       app.quitting = false;
       app.show_window();
+      continue;
+    }
+    // The settings window is not a dialog box, so nothing gives Tab, arrows and
+    // Escape to the focused owner-drawn control: without this the window could
+    // only be driven with the mouse. IsDialogMessage handles that traversal.
+    if (app.settings_window && IsWindow(app.settings_window) &&
+        IsDialogMessageW(app.settings_window, &msg)) {
       continue;
     }
     TranslateMessage(&msg);
