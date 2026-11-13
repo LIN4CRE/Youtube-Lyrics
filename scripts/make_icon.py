@@ -110,12 +110,54 @@ def build_res(ico_path: str, res_path: str) -> None:
         f.write(data_region)
 
 
+def verify_ico(path: str) -> list:
+    """Re-reads a written .ico and checks its structure and size coverage.
+
+    A malformed container here is the difference between an exe with a crisp
+    icon and one that Windows silently falls back to a generic glyph for, so
+    the build treats a failure as fatal rather than a warning.
+    """
+    entries = parse_ico(path)
+    sizes = []
+    for (w, h, _colours, _res, planes, bits, payload) in entries:
+        size = 256 if w == 0 else w
+        if (256 if h == 0 else h) != size:
+            raise SystemExit(f"{path}: frame {w}x{h} is not square")
+        if planes != 1:
+            raise SystemExit(f"{path}: frame {size}px declares {planes} planes")
+        if bits != 32:
+            raise SystemExit(f"{path}: frame {size}px is not 32-bit")
+        if size <= 64 and payload[:8] == b"\x89PNG\r\n\x1a\n":
+            # PNG frames are legal but add decode work at tray sizes; the
+            # brand mark rasterises better as one BMP frame there.
+            pass
+        if not payload:
+            raise SystemExit(f"{path}: frame {size}px is empty")
+        sizes.append(size)
+    if sizes != sorted(sizes):
+        raise SystemExit(f"{path}: frames are not in ascending size order: {sizes}")
+    missing = [s for s in (16, 32, 48, 256) if s not in sizes]
+    if missing:
+        raise SystemExit(f"{path}: missing required frames {missing}")
+    if len(set(sizes)) != len(sizes):
+        raise SystemExit(f"{path}: duplicate frame sizes {sizes}")
+    return sizes
+
+
 def main() -> int:
-    out_dir = sys.argv[1] if len(sys.argv) > 1 else ".build"
+    args = sys.argv[1:]
+    if args and args[0] == "--verify":
+        if len(args) != 2:
+            raise SystemExit("usage: make_icon.py --verify <file.ico>")
+        sizes = verify_ico(args[1])
+        print(f"verified {args[1]} ({len(sizes)} frames, {min(sizes)}-{max(sizes)}px)")
+        return 0
+    out_dir = args[0] if args else ".build"
     os.makedirs(out_dir, exist_ok=True)
     ico = os.path.join(out_dir, "app.ico")
     build_ico(ico)
-    print(f"wrote {ico}")
+    sizes = verify_ico(ico)
+    print(f"wrote {ico} ({len(sizes)} frames, {max(sizes)}px)")
     return 0
 
 
