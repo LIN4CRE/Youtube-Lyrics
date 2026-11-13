@@ -11,19 +11,7 @@ permissions:
 
 jobs:
   core-and-docs:
-    name: Core tests and documentation links
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-      - name: Run sanitizer-backed core tests
-        run: ./scripts/test.sh
-      - name: Check static-page links
-        run: python3 scripts/check_docs.py
-
-  windows-x64-cross-build:
-    name: Cross-build Windows x64 executable
+    name: Core tests, build tooling and documentation
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -33,22 +21,86 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install pinned cross-build tools
+      - name: Install pinned Python tooling
         run: python3 -m pip install --disable-pip-version-check ziglang==0.17.1 Pillow==13.0.0
+      # The docs check compares the version, size and checksum printed on the
+      # site with the real executable, so a build has to exist first.
       - name: Build the Windows GUI executable
         shell: bash
         run: |
           ZIG="$(python3 -c 'import pathlib, ziglang; print(pathlib.Path(ziglang.__file__).with_name("zig"))')"
           ZIG="$ZIG" ./scripts/build.sh
-      - name: Verify the Windows PE target
+      - name: Sanitizer-backed core tests and tooling tests
+        run: ./scripts/test.sh
+      - name: Check static pages, release facts and local links
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          image = Path('dist/YoutubeLyrics.exe').read_bytes()
-          assert image[:2] == b'MZ', 'missing DOS/PE header'
-          pe = int.from_bytes(image[0x3c:0x40], 'little')
-          assert image[pe:pe + 4] == b'PE\0\0', 'invalid PE signature'
-          machine = int.from_bytes(image[pe + 4:pe + 6], 'little')
-          assert machine == 0x8664, f'expected x86-64 PE, got 0x{machine:04x}'
-          print(f'validated x86-64 Windows executable ({len(image):,} bytes)')
-          PY
+          python3 scripts/check_docs.py
+          python3 scripts/release_facts.py --check
+      - name: Verify the built executable and assets
+        run: |
+          python3 scripts/verify_build.py dist/YoutubeLyrics.exe --ico docs/brand/YoutubeLyrics.ico
+          python3 scripts/verify_build.py docs/downloads/YoutubeLyrics.exe
+          python3 scripts/make_icon.py --verify .build/app.ico
+      - name: Confirm the downloadable copy is the verified build
+        run: |
+          sha256sum dist/YoutubeLyrics.exe docs/downloads/YoutubeLyrics.exe
+          cmp dist/YoutubeLyrics.exe docs/downloads/YoutubeLyrics.exe
+      - name: Prepare release metadata
+        run: python3 scripts/generate_release.py --output-dir .build/release
+
+  windows-native:
+    name: Windows native build and resource check
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Zig and Pillow
+        shell: pwsh
+        run: python -m pip install "Pillow==13.0.0" "ziglang==0.17.1"
+      - name: Build on Windows with the gated PowerShell script
+        shell: pwsh
+        run: |
+          $env:ZIG = (python -c "import pathlib, ziglang; print(pathlib.Path(ziglang.__file__).with_name('zig.exe'))")
+          ./scripts/build.ps1
+      - name: Verify the Windows build output
+        shell: pwsh
+        run: |
+          python scripts/verify_build.py dist/YoutubeLyrics.exe --ico .build/app.ico
+          python scripts/verify_build.py docs/downloads/YoutubeLyrics.exe
+          python scripts/release_facts.py --check
+          python scripts/check_docs.py
+      - name: Report the embedded version resource
+        shell: pwsh
+        run: |
+          $info = (Get-Item dist/YoutubeLyrics.exe).VersionInfo
+          Write-Host "FileVersion:    $($info.FileVersion)"
+          Write-Host "ProductVersion: $($info.ProductVersion)"
+          Write-Host "ProductName:    $($info.ProductName)"
+          if (-not $info.FileVersion) { throw 'the executable carries no version resource' }
+      - name: Load the executable on Windows
+        shell: pwsh
+        run: |
+          # A real Windows PE load: this fails if the binary or its imports are
+          # broken, which cross-compilation alone cannot prove.
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class PeLoad {
+            [DllImport("kernel32", SetLastError = true, CharSet = CharSet.Unicode)]
+            public static extern IntPtr LoadLibraryEx(string path, IntPtr file, uint flags);
+            [DllImport("kernel32", SetLastError = true)]
+            public static extern bool FreeLibrary(IntPtr module);
+          }
+          '@
+          $path = (Resolve-Path dist/YoutubeLyrics.exe).Path
+          $module = [PeLoad]::LoadLibraryEx($path, [IntPtr]::Zero, 0x00000002) # LOAD_LIBRARY_AS_DATAFILE
+          if ($module -eq [IntPtr]::Zero) {
+            throw "Windows could not load the executable as an image (error $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
+          }
+          [void][PeLoad]::FreeLibrary($module)
+          Write-Host 'the executable loaded as a valid Windows image'

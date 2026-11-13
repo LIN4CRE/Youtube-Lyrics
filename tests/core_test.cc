@@ -679,6 +679,61 @@ static void test_enhanced_matching() {
   CHECK(best != nullptr);
 }
 
+
+// Live/remix/instrumental editions are different recordings: they must not be
+// identified, cached or matched as if they were the studio track.
+static void test_track_variants() {
+  CHECK_EQ(detect_variant("In the End"), TrackVariant::Studio);
+  CHECK_EQ(detect_variant("In the End (Official Video)"), TrackVariant::Studio);
+  CHECK_EQ(detect_variant("Numb (Live at Wembley)"), TrackVariant::Live);
+  CHECK_EQ(detect_variant("Song - Live"), TrackVariant::Live);
+  CHECK_EQ(detect_variant("Song (MTV Unplugged)"), TrackVariant::Live);
+  CHECK_EQ(detect_variant("Song (Club Mix)"), TrackVariant::Remix);
+  CHECK_EQ(detect_variant("Song (Slowed + Reverb)"), TrackVariant::Remix);
+  CHECK_EQ(detect_variant("Song (Instrumental)"), TrackVariant::Instrumental);
+  CHECK_EQ(detect_variant("Song (Karaoke Version)"), TrackVariant::Karaoke);
+  // "delivery" and "olive" contain the letters of "live" but not the word.
+  CHECK_EQ(detect_variant("Special Delivery"), TrackVariant::Studio);
+  CHECK_EQ(detect_variant("Olive Branch"), TrackVariant::Studio);
+  CHECK_STR(track_variant_name(TrackVariant::Live), "live");
+  CHECK_STR(track_variant_name(TrackVariant::Studio), "studio");
+
+  // The studio edition accepts anything; a marked edition needs a marker.
+  CHECK(variant_compatible(TrackVariant::Studio, "Song", ""));
+  CHECK(variant_compatible(TrackVariant::Live, "Song (Live)", ""));
+  CHECK(variant_compatible(TrackVariant::Live, "Song", "Live at Leeds"));
+  CHECK(!variant_compatible(TrackVariant::Live, "Song", ""));
+  CHECK(!variant_compatible(TrackVariant::Live, "Song (Remix)", ""));
+  CHECK(!variant_compatible(TrackVariant::Instrumental, "Song", ""));
+
+  // Caching identity and "did the track change" both include the edition.
+  TrackInfo studio{"Song", "Artist", "", 200, "Song"};
+  TrackInfo live{"Song", "Artist", "", 260, "Song (Live)"};
+  CHECK(studio.variant() == TrackVariant::Studio);
+  CHECK(live.variant() == TrackVariant::Live);
+  CHECK(track_key(studio) != track_key(live));
+  CHECK(!same_track(studio, live));
+  CHECK(same_track(studio, TrackInfo{"Song", "Artist", "", 200, "Song"}));
+  // A provider sheet for the wrong edition is rejected before display.
+  const std::string studio_sheet =
+      "[{\"trackName\":\"Song\",\"artistName\":\"Artist\",\"duration\":200,"
+      "\"syncedLyrics\":\"[00:01.00] one\\n[00:05.00] two\"}]";
+  JValue search;
+  CHECK(json_parse(studio_sheet, search));
+  double score = 0;
+  CHECK(best_candidate(search, studio, &score) != nullptr);
+  CHECK(best_candidate(search, live, &score) == nullptr);
+  const std::string live_sheet =
+      "[{\"trackName\":\"Song (Live)\",\"artistName\":\"Artist\",\"duration\":260,"
+      "\"syncedLyrics\":\"[00:01.00] one\\n[00:05.00] two\"}]";
+  CHECK(json_parse(live_sheet, search));
+  const JValue* matched = best_candidate(search, live, &score);
+  CHECK(matched != nullptr);
+  Lyrics parsed;
+  CHECK(parse_lrclib_payload(live_sheet, live, parsed));
+  CHECK_STR(parsed.variant, "live");
+}
+
 int main() {
   test_utf8();
   test_json();
@@ -693,6 +748,7 @@ int main() {
   test_wrong_song_guards();
   test_extra_providers();
   test_enhanced_matching();
+  test_track_variants();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

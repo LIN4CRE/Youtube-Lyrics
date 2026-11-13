@@ -115,6 +115,10 @@ struct Lyrics {
   std::string source;            // e.g. "LRCLIB"
   int providers_tried = 0;       // services attempted for this track
   std::string title, artist, album;
+  // Edition of the matched recording ("live", "remix", "instrumental", ...).
+  // Shown in the status line so a live sheet is never silently presented as
+  // the studio version.
+  std::string variant;
   bool empty() const { return lines.empty() && plain.empty(); }
 };
 
@@ -131,12 +135,49 @@ std::string lyrics_to_lrc(const std::vector<LyricLine>& lines);
 
 // ----------------------------------------------------------- track matching
 
+// Which edition of a song a media session is reporting. Two sessions for the
+// same title and artist are only interchangeable when the variant matches:
+// a live recording, a remix and the studio take have different timings and
+// sometimes different words, so serving one's lyric sheet for another is a
+// wrong answer even though the title looks right.
+enum class TrackVariant { Studio, Live, Remix, Instrumental, Karaoke };
+
 struct TrackInfo {
+  TrackInfo() = default;
+  // Positional form used throughout the tests and the media path; `raw` is the
+  // player's original title when it differs from the cleaned one.
+  TrackInfo(std::string value_title, std::string value_artist = std::string(),
+            std::string value_album = std::string(), double value_duration = 0.0,
+            std::string raw = std::string())
+      : title(std::move(value_title)),
+        artist(std::move(value_artist)),
+        album(std::move(value_album)),
+        duration_s(value_duration),
+        raw_title(std::move(raw)) {}
+
   std::string title;
   std::string artist;
   std::string album;
   double duration_s = 0.0;  // 0 when unknown
+  // Title exactly as the player reported it, before clean_track() removed the
+  // "(Live)", "(Remix)" and similar markers. Kept so the edition can still be
+  // identified after cleaning; empty when the caller never had a raw title.
+  std::string raw_title;
+
+  // Edition of the song, read from the raw (un-cleaned) title when present.
+  TrackVariant variant() const;
 };
+
+// Reads a variant out of a raw (uncleaned) title, e.g. "Numb (Live at Wembley)"
+// or "Song - Sped Up". Studio is the default.
+TrackVariant detect_variant(const std::string& raw_title);
+const char* track_variant_name(TrackVariant variant);
+
+// True when a lyric record may be used for a session of this variant. Checks
+// happen on the provider's own title/album text, which is usually the only
+// edition marker LRCLIB gives us.
+bool variant_compatible(TrackVariant want, const std::string& candidate_title,
+                        const std::string& candidate_album);
 
 // Strips "Official Video", "(feat. X)", "- Topic", "VEVO", trailing "| ..."
 // and similar noise that media apps put in their reported metadata.

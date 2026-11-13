@@ -1,5 +1,6 @@
 // Youtube-Lyrics - lyrics lookup (LRCLIB) + on-disk cache + worker thread.
 #include "app.h"
+#include "version.h"
 
 #include <winhttp.h>
 
@@ -10,9 +11,10 @@
 
 namespace ytl {
 
-// LRCLIB asks API clients to identify themselves.
+// LRCLIB asks API clients to identify themselves. The version comes from
+// VERSION so it can never drift from the published build.
 static const wchar_t* kUserAgent =
-    L"YoutubeLyrics/1.4.0 (https://github.com/LIN4CRE/Youtube-Lyrics)";
+    L"YoutubeLyrics/" YTL_VERSION_WIDE L" (https://github.com/LIN4CRE/Youtube-Lyrics)";
 
 namespace {
 std::mutex g_http_handle_mu;
@@ -254,6 +256,7 @@ std::string serialize_lyrics(const Lyrics& l) {
   s += "artist=" + l.artist + "\n";
   s += "album=" + l.album + "\n";
   s += "source=" + l.source + "\n";
+  s += "variant=" + l.variant + "\n";
   s += std::string("synced=") + (l.synced ? "1" : "0") + "\n";
   s += "--lrc--\n";
   s += lyrics_to_lrc(l.lines);
@@ -288,6 +291,7 @@ bool parse_cache(const std::string& data, Lyrics& out) {
     else if (k == "artist") out.artist = v;
     else if (k == "album") out.album = v;
     else if (k == "source") out.source = v;
+    else if (k == "variant") out.variant = v;
     else if (k == "synced") synced = (v == "1");
   }
   lrc_section = data.substr(lrc_at + 8, plain_at - (lrc_at + 8));
@@ -305,6 +309,28 @@ bool parse_cache(const std::string& data, Lyrics& out) {
   return !out.plain.empty();
 }
 
+namespace {
+
+// The edition word LRCLIB itself uses in track titles, appended to queries so a
+// live or remix session asks for the recording it is actually playing. The
+// studio variant asks with the plain title.
+const char* variant_suffix(TrackVariant variant) {
+  switch (variant) {
+    case TrackVariant::Live: return " (Live)";
+    case TrackVariant::Remix: return " (Remix)";
+    case TrackVariant::Instrumental: return " (Instrumental)";
+    case TrackVariant::Karaoke: return " (Karaoke)";
+    case TrackVariant::Studio:
+    default: return "";
+  }
+}
+
+std::string variant_query_title(const TrackInfo& t) {
+  return t.title + variant_suffix(t.variant());
+}
+
+}  // namespace
+
 std::string build_get_url(const TrackInfo& t) {
   std::string url = "https://lrclib.net/api/get?";
   url += "artist_name=" + url_encode(t.artist);
@@ -319,6 +345,13 @@ std::string build_get_url(const TrackInfo& t) {
   return url;
 }
 
+std::string build_variant_get_url(const TrackInfo& t) {
+  if (t.variant() == TrackVariant::Studio) return build_get_url(t);
+  TrackInfo variant = t;
+  variant.title = variant_query_title(t);
+  return build_get_url(variant);
+}
+
 std::string build_search_url(const TrackInfo& t) {
   std::string url = "https://lrclib.net/api/search?";
   url += "track_name=" + url_encode(t.title);
@@ -326,11 +359,20 @@ std::string build_search_url(const TrackInfo& t) {
   return url;
 }
 
+std::string build_variant_search_url(const TrackInfo& t) {
+  if (t.variant() == TrackVariant::Studio) return build_search_url(t);
+  TrackInfo variant = t;
+  variant.title = variant_query_title(t);
+  return build_search_url(variant);
+}
+
 // Where a hand-written override lives: %LOCALAPPDATA%\YouTubeLyrics\lyrics\
 // <Artist> - <Title>.lrc (or .txt). Anything dropped there wins over the network.
 std::string manual_path(const TrackInfo& t) {
   std::string dir = appdata_dir() + "\\lyrics";
   std::string base = t.artist.empty() ? t.title : (t.artist + " - " + t.title);
+  const TrackVariant variant = t.variant();
+  if (variant != TrackVariant::Studio) base += std::string(" (") + track_variant_name(variant) + ")";
   for (char& c : base) {
     if (c == '<' || c == '>' || c == ':' || c == '"' || c == '/' || c == '\\' ||
         c == '|' || c == '?' || c == '*') {
@@ -397,6 +439,25 @@ bool try_fetch(const TrackInfo& track, const std::string& url, Lyrics& out,
   return true;
 }
 
+// A sheet is only reused on a later attempt when it is still the right song:
+// the same recording, the same edition, and (when both sides report one) a
+// comparable length. This is what stops a rejection earlier in the chain from
+// being undone by a looser query later.
+bool sheet_fits(const Lyrics& sheet, const TrackInfo& want) {
+  if (sheet.empty()) return false;
+  // The lyrics carry the provider's own title/artist, not the session's.
+  TrackInfo found{sheet.title, sheet.artist, sheet.album, 0.0, std::string()};
+  if (!found.title.empty() && text_similarity(found.title, want.title) < 0.62 &&
+      token_containment(found.title, want.title) < 0.70) {
+    return false;
+  }
+  if (want.variant() != TrackVariant::Studio &&
+      !variant_compatible(want.variant(), sheet.title, sheet.album)) {
+    return false;
+  }
+  return true;
+}
+
 LyricsState do_lookup(const TrackInfo& track, bool force, Lyrics& out,
                       std::string& msg) {
   // A lyric sheet the user dropped in by hand always wins, including over a
@@ -432,11 +493,15 @@ LyricsState do_lookup(const TrackInfo& track, bool force, Lyrics& out,
   Lyrics plain_lyrics;
   int tried = 0;
   bool lrclib_blocked = false;
+  // A bounded chain: the split-title fallback can generate dozens of queries,
+  // and a track that needs more than this many is not going to be found.
+  constexpr int kMaxProviderAttempts = 14;
 
   auto attempt = [&](const TrackInfo& t, const std::string& url, const char* name) {
     if (http_cancel_requested()) return false;
     const bool lrclib = url.find("lrclib.net") != std::string::npos;
     if (lrclib && lrclib_blocked) return false;
+    if (tried >= kMaxProviderAttempts) return false;
     ++tried;
     Lyrics l;
     std::string detail;
@@ -446,6 +511,16 @@ LyricsState do_lookup(const TrackInfo& track, bool force, Lyrics& out,
           (detail.find("transport error") != std::string::npos ||
            detail.find("rate-limited or unavailable") != std::string::npos))
         lrclib_blocked = true;
+      return false;
+    }
+    // Timed lyrics for the wrong edition are a worse answer than no lyrics:
+    // fall back to "not found" rather than putting the studio sheet under a
+    // live recording.
+    if (!sheet_fits(l, track)) {
+      logf("lyrics: rejected '%s' from %s (edition mismatch)",
+           track_label(TrackInfo{l.title, l.artist, l.album, 0, std::string()}).c_str(),
+           name);
+      why = "No lyrics found for this recording.";
       return false;
     }
     if (l.synced && !l.empty()) {
@@ -462,10 +537,14 @@ LyricsState do_lookup(const TrackInfo& track, bool force, Lyrics& out,
     return false;
   };
 
-  // 1. Exact match (fastest, most precise).
+  // 1. Exact match (fastest, most precise). For a live/remix/instrumental
+  //    session, ask for that edition first so the plain studio sheet cannot win
+  //    the race on a title-only search.
   if (attempt(track, build_get_url(track), "LRCLIB")) return LyricsState::Ready;
+  if (attempt(track, build_variant_get_url(track), "LRCLIB")) return LyricsState::Ready;
   // 2. Structured search - title + artist, then free text.
   if (attempt(track, build_search_url(track), "LRCLIB")) return LyricsState::Ready;
+  if (attempt(track, build_variant_search_url(track), "LRCLIB")) return LyricsState::Ready;
   if (!track.artist.empty() && attempt(track, build_query_url(track), "LRCLIB")) {
     return LyricsState::Ready;
   }
@@ -502,18 +581,24 @@ LyricsState do_lookup(const TrackInfo& track, bool force, Lyrics& out,
     for (size_t i = 0; i < parts.size(); ++i) {
       for (size_t j = 0; j < parts.size(); ++j) {
         if (i == j) continue;
-        TrackInfo cand = clean_track(TrackInfo{parts[j], parts[i], track.album, track.duration_s}, false);
+        TrackInfo cand = clean_track(TrackInfo{parts[j], parts[i], track.album,
+                                               track.duration_s, track.raw_title},
+                                     false);
         if (!cand.title.empty() && !cand.artist.empty()) {
           if (attempt(cand, build_search_url(cand), "LRCLIB")) return LyricsState::Ready;
           if (attempt(cand, build_query_url(cand), "LRCLIB")) return LyricsState::Ready;
         }
       }
-      TrackInfo t_only = clean_track(TrackInfo{parts[i], track.artist, track.album, track.duration_s}, false);
+      TrackInfo t_only = clean_track(TrackInfo{parts[i], track.artist, track.album,
+                                               track.duration_s, track.raw_title},
+                                     false);
       if (!t_only.title.empty()) {
         if (attempt(t_only, build_search_url(t_only), "LRCLIB")) return LyricsState::Ready;
         if (attempt(t_only, build_query_url(t_only), "LRCLIB")) return LyricsState::Ready;
       }
-      TrackInfo t_bare = clean_track(TrackInfo{parts[i], "", track.album, track.duration_s}, false);
+      TrackInfo t_bare = clean_track(TrackInfo{parts[i], "", track.album,
+                                               track.duration_s, track.raw_title},
+                                     false);
       if (!t_bare.title.empty()) {
         if (attempt(t_bare, build_title_only_url(t_bare), "LRCLIB")) return LyricsState::Ready;
       }

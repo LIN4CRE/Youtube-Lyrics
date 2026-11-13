@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
@@ -142,15 +143,17 @@ def draw_mark(size: int, transparent: bool = False,
 
     # The sheet margin every line of the song hangs from.
     rule_x = s * (0.150 if small else 0.134)
-    rule_w = s * (0.052 if small else 0.022)
+    rule_w = s * (0.052 if small else 0.024)
     img = over(img, lambda d: d.rounded_rectangle(
         (rule_x, s * 0.215, rule_x + rule_w, s * 0.785), radius=rule_w / 2,
-        fill=INK + (150 if small else 96,)))
+        fill=INK + (168 if small else 128,)))
 
     thin_h = s * (0.120 if small else 0.075)
     mid_h = s * (0.175 if small else 0.125)
     x0 = s * (0.268 if small else 0.240)
-    thin_a = 170 if small else 104
+    # Quiet lines are printed ink, not pencil: at 105 alpha the tile read as
+    # grey-on-cream and lost its lyric-sheet character at large sizes.
+    thin_a = 190 if small else 150
 
     # (width, centre-y, height, colour) - None marks the line being sung.
     rows = [
@@ -166,8 +169,8 @@ def draw_mark(size: int, transparent: bool = False,
                 # The whole line still to be sung, then the sung part in amber:
                 # the karaoke wipe, caught mid-line.
                 d.rounded_rectangle((x0, top, x1, bottom), radius=height / 2,
-                                    fill=INK + (86,))
-                d.rounded_rectangle((x0, top, x0 + (x1 - x0) * 0.68, bottom),
+                                    fill=INK + (132,))
+                d.rounded_rectangle((x0, top, x0 + (x1 - x0) * 0.66, bottom),
                                     radius=height / 2, fill=AMBER + (255,))
             img = over(img, lit)
         else:
@@ -183,15 +186,15 @@ def _mark_svg() -> str:
     return '''<g id="lyric-mark">
   <rect x="4" y="4" width="1016" height="1016" rx="240" fill="#f3efe6"
         stroke="#0b0a0f" stroke-opacity=".16" stroke-width="6"/>
-  <rect x="137" y="220" width="23" height="584" rx="11.5"
-        fill="#0b0a0f" fill-opacity=".376"/>
+  <rect x="137" y="220" width="24" height="584" rx="12"
+        fill="#0b0a0f" fill-opacity=".502"/>
   <rect x="246" y="314" width="348" height="77" rx="38.5"
-        fill="#0b0a0f" fill-opacity=".408"/>
+        fill="#0b0a0f" fill-opacity=".588"/>
   <rect x="246" y="448" width="614" height="128" rx="64"
-        fill="#0b0a0f" fill-opacity=".337"/>
-  <rect x="246" y="448" width="418" height="128" rx="64" fill="#f5a524"/>
+        fill="#0b0a0f" fill-opacity=".518"/>
+  <rect x="246" y="448" width="405" height="128" rx="64" fill="#f5a524"/>
   <rect x="246" y="632" width="271" height="77" rx="38.5"
-        fill="#0b0a0f" fill-opacity=".408"/>
+        fill="#0b0a0f" fill-opacity=".588"/>
 </g>'''
 
 
@@ -432,6 +435,19 @@ def build_display(path: str, w: int = 2560, h: int = 1440) -> None:
     min(w * 0.80, 1400), active row anchored at 0.42 * h, 3 px progress track
     on the bottom edge."""
     img = vertical_gradient((w, h), (13, 12, 18), (23, 19, 29))
+    # The same three-layer background the renderer caches: the selected still,
+    # a theme-coloured haze, then a vignette and the readability scrims.
+    # Framed like the app frames it (aspect fill, centred), then pushed down so
+    # the skyline sits behind the lower half of the lyric stack instead of
+    # directly behind the first line.
+    still = Image.open(os.path.join("src", "win", "wallpapers", "mountain-night.jpg"))
+    still = still.convert("RGB").resize((w, h), Image.LANCZOS)
+    tall = still.crop((0, 0, w, h - int(h * 0.06)))
+    still = Image.new("RGB", (w, h))
+    still.paste(tall, (0, int(h * 0.06)))
+    img = Image.blend(img.convert("RGB"), still, 0.82).convert("RGBA")
+    img = Image.composite(img, img.convert("RGB").point(lambda v: int(v * 0.86)).convert("RGBA"),
+                          Image.new("L", (w, h), 255))
     img.alpha_composite(radial_glow((w, h), (w * 0.18, h * 0.16), h * 0.55, AMBER, 0.13))
     img.alpha_composite(radial_glow((w, h), (w * 0.86, h * 0.88), h * 0.50, AMBER, 0.075))
 
@@ -441,6 +457,18 @@ def build_display(path: str, w: int = 2560, h: int = 1440) -> None:
     vig = vig.filter(ImageFilter.GaussianBlur(w / 26))
     shade = Image.new("RGBA", (w, h), (0, 0, 0, 160))
     img = Image.composite(img, Image.alpha_composite(img, shade), vig)
+
+    # Readability scrims: the renderer darkens the top and bottom 15-16 % of the
+    # frame so chrome text never sits on busy artwork.
+    scrim = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(scrim)
+    for y in range(int(h * 0.20)):
+        sd.line((0, y, w, y), fill=(0, 0, 0, int(96 * (1 - y / (h * 0.20)))))
+    for y in range(int(h * 0.84), h):
+        sd.line((0, y, w, y), fill=(0, 0, 0, int(120 * (y - h * 0.84) / (h * 0.16))))
+    # The art is still legible behind the words, so the scrim is built once and
+    # then flattened, not laid over the lyric text.
+    img = Image.alpha_composite(img, scrim)
 
     d = ImageDraw.Draw(img)
 
@@ -469,18 +497,29 @@ def build_display(path: str, w: int = 2560, h: int = 1440) -> None:
         "burns a little brighter now",
         "so sing it with me",
         "we are not lost, we are just far",
-        "from everything we thought we knew",
     ]
-    active = 4
+    active = 3
     f_line = font("Inter-Regular.ttf", int(base))
     f_active = font("Inter-SemiBold.ttf", int(act))
 
     anchor_y = h * 0.42 - box / 2
     first_top = anchor_y - active * box
 
+    # Pacing: the renderer adds half a line of breathing room after a long gap,
+    # which is why a real chorus is not an evenly spaced block of text.
+    gap_after = {1: 0.55, 4: 0.55}
+    offsets = []
+    running = 0.0
+    for i in range(len(lines)):
+        offsets.append(running)
+        running += box + box * gap_after.get(i, 0.0)
+
     for i, text in enumerate(lines):
-        y = first_top + i * box
-        if y < -box * 2 or y > h + box:
+        # The active row is anchored at 0.42 * h and the block grows around it;
+        # rows that would collide with the header or the progress bar are simply
+        # not drawn, exactly as the renderer skips off-screen rows.
+        y = h * 0.42 - box / 2 + (offsets[i] - offsets[active])
+        if y < h * 0.105 or y > h * 0.90:
             continue
         if i == active:
             tw = d.textlength(text, font=f_active)
@@ -515,13 +554,33 @@ def build_display(path: str, w: int = 2560, h: int = 1440) -> None:
     times = "1:28 / 3:36"
     d.text((w - 26 - d.textlength(times, font=mono), h - 54), times, font=mono,
            fill=PAPER + (144,))
-    d.text((26, h - 54), "via chrome.exe", font=mono, fill=PAPER + (92,))
+    d.text((26, h - 54),
+           "via chrome.exe  ·  lyrics: LRCLIB  ·  Enhanced LRC",
+           font=mono, fill=PAPER + (92,))
 
     img.convert("RGB").save(path, optimize=True)
     print(f"wrote {path}")
 
 
 # ----------------------------------------------------------------------- main
+
+
+def read_version() -> str:
+    return Path("VERSION").read_text(encoding="ascii").strip()
+
+
+def read_download_size() -> str:
+    """Size of the shipped executable, in KiB, read from the file itself.
+
+    The download badge used to hard-code "1.4.0 · 842 KiB" and drifted the
+    moment the binary changed. If the executable does not exist yet (a fresh
+    checkout before the first build) the badge says so instead of lying.
+    """
+    exe = Path("dist/YoutubeLyrics.exe")
+    if not exe.is_file():
+        return "build pending"
+    kib = exe.stat().st_size / 1024.0
+    return f"{kib:.0f} KiB"
 
 
 def main() -> int:
@@ -544,7 +603,7 @@ def main() -> int:
     build_banner(os.path.join(BRAND_DIR, "banner.png"))
     shutil.copyfile(os.path.join(BRAND_DIR, "banner.png"), "banner.png")
     build_badge(os.path.join(BRAND_DIR, "badge-download.png"),
-                "download", "1.4.0 \u00b7 842 KiB")
+                "download", f"{read_version()} \u00b7 {read_download_size()}")
     build_badge(os.path.join(BRAND_DIR, "badge-support.png"),
                 "help me out", "paypal")
     build_badge(os.path.join(BRAND_DIR, "badge-platform.png"),

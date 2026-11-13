@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <map>
 
@@ -151,7 +152,7 @@ const wchar_t* theme_name(int index) { return theme(index).name; }
 
 const wchar_t* wallpaper_name(int index) {
   static const wchar_t* names[kWallpaperCount] = {
-      L"Rainfall District", L"Midnight Range", L"Stillwood"};
+      L"Rainfall District", L"Midnight Range", L"Stillwood", L"Drift"};
   if (index < 0 || index >= kWallpaperCount) index = 0;
   return names[index];
 }
@@ -201,8 +202,11 @@ void load_wallpaper(App& app, int index) {
   }
   v.wallpaper_loaded_index = index;
 
+  // The last entry is procedural: no resource, nothing to decode, nothing to
+  // free. ensure_background() paints it when no image is loaded.
   const int resource_ids[kWallpaperCount] = {
-      IDR_WALLPAPER_CITY, IDR_WALLPAPER_MOUNTAIN, IDR_WALLPAPER_FOREST};
+      IDR_WALLPAPER_CITY, IDR_WALLPAPER_MOUNTAIN, IDR_WALLPAPER_FOREST, 0};
+  if (resource_ids[index] == 0) return;
   HRSRC resource = FindResourceW(app.inst, MAKEINTRESOURCEW(resource_ids[index]), RT_RCDATA);
   if (!resource) return;
   HGLOBAL loaded = LoadResource(app.inst, resource);
@@ -235,6 +239,103 @@ void load_wallpaper(App& app, int index) {
 }
 
 // --------------------------------------------------------------- background
+
+// "Drift": a procedural scene, drawn once into the background cache and then
+// reused like an embedded still. It is a slow aurora over a still horizon with
+// a quiet star field — drawn with GDI+ gradients only, so it costs no bytes in
+// the executable and scales to any resolution without resampling artefacts.
+void paint_procedural_background(Graphics& g, int bw, int bh, const Theme& th) {
+  const double w = bw, h = bh;
+  RectF full(0, 0, static_cast<REAL>(w), static_cast<REAL>(h));
+  LinearGradientBrush sky(full, Color(0xFF0A0E18), Color(0xFF141626),
+                          LinearGradientModeVertical);
+  g.FillRectangle(&sky, full);
+
+  // Star field on a fixed lattice with hashed offsets: deterministic, so the
+  // background looks identical every time it is rebuilt.
+  {
+    SolidBrush star(Color(0xFFFFFFFF));
+    for (int i = 0; i < 190; ++i) {
+      const uint32_t hash = static_cast<uint32_t>(i) * 2654435761u;
+      const double x = static_cast<double>((hash >> 7) % 4096) / 4096.0;
+      const double y = static_cast<double>((hash >> 19) % 4096) / 4096.0;
+      const double px = x * w;
+      const double py = y * h * 0.66;
+      const double size = 0.6 + static_cast<double>((hash >> 3) % 7) * 0.18;
+      const BYTE alpha = static_cast<BYTE>(26 + (hash >> 11) % 90);
+      star.SetColor(Color(alpha, 226, 234, 255));
+      g.FillEllipse(&star, RectF(static_cast<REAL>(px), static_cast<REAL>(py),
+                                 static_cast<REAL>(size), static_cast<REAL>(size)));
+    }
+  }
+
+  const int ar = (th.accent >> 16) & 0xFF, ag = (th.accent >> 8) & 0xFF,
+            ab = th.accent & 0xFF;
+
+  // Aurora ribbons: three wide, very low-opacity bands, each leaning differently.
+  auto ribbon = [&](double cx, double cy, double rx, double ry, ARGB tint) {
+    GraphicsPath path;
+    path.AddEllipse(RectF(static_cast<REAL>(cx - rx), static_cast<REAL>(cy - ry),
+                          static_cast<REAL>(rx * 2), static_cast<REAL>(ry * 2)));
+    PathGradientBrush b(&path);
+    b.SetCenterColor(Color(tint));
+    Color surround(0, 0, 0, 0);
+    int one = 1;
+    b.SetSurroundColors(&surround, &one);
+    g.FillPath(&b, &path);
+  };
+  ribbon(w * 0.30, h * 0.30, w * 0.42, h * 0.16, (0x2A << 24) | (ar << 16) | (ag << 8) | ab);
+  ribbon(w * 0.62, h * 0.22, w * 0.34, h * 0.12,
+         (0x22 << 24) | (0x6E << 16) | (0x9B << 8) | 0xC8);
+  ribbon(w * 0.80, h * 0.40, w * 0.30, h * 0.14, (0x1C << 24) | (ar << 16) | (ag << 8) | ab);
+
+  // Horizon: two soft hills and a thin water line, all faded into the haze.
+  SolidBrush hill(Color(0xFF0D1220));
+  GraphicsPath ridge;
+  ridge.AddBezier(0.0f, static_cast<REAL>(h * 0.70f),
+                  static_cast<REAL>(w * 0.26f), static_cast<REAL>(h * 0.58f),
+                  static_cast<REAL>(w * 0.40f), static_cast<REAL>(h * 0.74f),
+                  static_cast<REAL>(w * 0.58f), static_cast<REAL>(h * 0.70f));
+  ridge.AddBezier(static_cast<REAL>(w * 0.58f), static_cast<REAL>(h * 0.70f),
+                  static_cast<REAL>(w * 0.76f), static_cast<REAL>(h * 0.66f),
+                  static_cast<REAL>(w * 0.86f), static_cast<REAL>(h * 0.76f),
+                  static_cast<REAL>(w), static_cast<REAL>(h * 0.68f));
+  ridge.AddLine(static_cast<REAL>(w), static_cast<REAL>(h),
+                static_cast<REAL>(0), static_cast<REAL>(h));
+  ridge.CloseFigure();
+  g.FillPath(&hill, &ridge);
+
+  // Mist rising off the water, then the water itself. Both are gradients: a
+  // flat fill for the sea met the horizon in a perfectly straight hard line,
+  // which is the one thing that makes a generated background look fake.
+  LinearGradientBrush haze(RectF(0, static_cast<REAL>(h * 0.58f),
+                                 static_cast<REAL>(w), static_cast<REAL>(h * 0.20f)),
+                           Color(0, 150, 180, 200), Color(48, 150, 180, 200),
+                           LinearGradientModeVertical);
+  g.FillRectangle(&haze, RectF(0, static_cast<REAL>(h * 0.58f), static_cast<REAL>(w),
+                               static_cast<REAL>(h * 0.20f)));
+  LinearGradientBrush water(RectF(0, static_cast<REAL>(h * 0.74f),
+                                  static_cast<REAL>(w), static_cast<REAL>(h * 0.26f)),
+                            Color(0xFF1B2436), Color(0xFF080B12),
+                            LinearGradientModeVertical);
+  g.FillRectangle(&water, RectF(0, static_cast<REAL>(h * 0.74f), static_cast<REAL>(w),
+                               static_cast<REAL>(h * 0.26f)));
+  // The aurora's own light bleeding down into the water, so the two halves of
+  // the scene belong together.
+  glow(g, w * 0.36, h * 0.80, w * 0.26, h * 0.10,
+       (0x1E << 24) | (ar << 16) | (ag << 8) | ab);
+  // A few faint horizontal glints on the water, never bright enough to compete
+  // with the lyrics above them.
+  for (int i = 0; i < 26; ++i) {
+    const uint32_t hash = static_cast<uint32_t>(i) * 2246822519u;
+    const double y = h * (0.78 + static_cast<double>((hash >> 5) % 1000) / 1000.0 * 0.2);
+    const double x = w * static_cast<double>((hash >> 15) % 1000) / 1000.0;
+    const double len = w * (0.01 + static_cast<double>((hash >> 25) % 40) / 4000.0);
+    SolidBrush glint(Color(static_cast<BYTE>(10 + (hash >> 9) % 22), ar, ag, ab));
+    g.FillRectangle(&glint, RectF(static_cast<REAL>(x), static_cast<REAL>(y),
+                                  static_cast<REAL>(len), 1.0f));
+  }
+}
 
 void ensure_background(App& app, int w, int h) {
   View& v = app.view;
@@ -276,6 +377,8 @@ void ensure_background(App& app, int w, int h) {
                 RectF(static_cast<REAL>((bw - dw) / 2),
                       static_cast<REAL>((bh - dh) / 2), static_cast<REAL>(dw),
                       static_cast<REAL>(dh)));
+  } else if (app.cfg.wallpaper_index == kWallpaperCount - 1) {
+    paint_procedural_background(g, bw, bh, th);
   } else {
     LinearGradientBrush base(full, Color(th.bg_top), Color(th.bg_bottom),
                              LinearGradientModeVertical);
@@ -537,9 +640,10 @@ void paint_lyrics(App& app, Graphics& g, int w, int h) {
   const int n = static_cast<int>(app.disp.size());
   const int a = app.active;
   const int64_t pos = app.current_pos_ms();
-  const double raw_progress = (a >= 0) ? line_progress(app.disp, a, pos) : 0.0;
-  // Apply hermite smoothstep easing to line progress
-  const double progress = raw_progress * raw_progress * (3.0 - 2.0 * raw_progress);
+  // Line progress is already an eased position in time; easing it a second time
+  // here made the wipe visibly lag behind the vocal on fast lines. The feathered
+  // gradient in draw_feathered_wipe supplies the visual softening instead.
+  const double progress = (a >= 0) ? line_progress(app.disp, a, pos) : 0.0;
 
   int first = 0;
   if (a >= 0) first = std::max(0, a - 16);
@@ -560,9 +664,21 @@ void paint_lyrics(App& app, Graphics& g, int w, int h) {
     if (it != v.line_activity.end()) act = it->second;
     if (is_active && act < 0.05) act = 1.0;
 
+    // Continuation rows belong to the same sung line, so they light with it
+    // rather than staying at full distance while the first row turns amber.
+    double row_act = act;
+    if (!is_active && i > 0 && app.disp[i].cont &&
+        app.disp[i - 1].start_ms == app.disp[i].start_ms) {
+      auto prev = v.line_activity.find(i - 1);
+      if (prev != v.line_activity.end()) row_act = std::max(row_act, prev->second);
+    }
+
     const int dist = (a >= 0) ? std::abs(i - a) : 99;
-    const int base_alpha = static_cast<int>(std::max(52.0, 208.0 - dist * 30.0));
-    int alpha = static_cast<int>(base_alpha + (255 - base_alpha) * act);
+    // 208 -> 52 across roughly five rows: close lines stay readable, distant
+    // ones recede instead of disappearing. Readability beats deep fading when
+    // the sheet is projected onto a cinematic still.
+    const int base_alpha = static_cast<int>(std::max(62.0, 208.0 - dist * 26.0));
+    int alpha = static_cast<int>(base_alpha + (255 - base_alpha) * row_act);
     if (!has_display_timing) alpha = 225;
 
     Font* font = get_font(app, static_cast<int>(std::lround(v.base_px)), (act > 0.4) ? 600 : 400);
@@ -603,12 +719,19 @@ void paint_lyrics(App& app, Graphics& g, int w, int h) {
                             : timed_segment_fill_width(
                                   g, app.disp[i], app.disp[i].text, font, pos);
 
-      // Smooth sub-frame fill transition to prevent timer-tick stutter
-      if (v.smooth_fill_line != a) {
+      // Sub-frame smoothing only has to hide the 16 ms timer tick; it must be
+      // measured against real elapsed time so a slower frame does not leave the
+      // wipe behind the audio, and so seeking backwards snaps immediately.
+      const int64_t now_frame = app.now_ms();
+      double dt = v.last_wipe_at ? (now_frame - v.last_wipe_at) / 1000.0 : 0.016;
+      dt = std::max(0.0, std::min(dt, 0.25));
+      v.last_wipe_at = now_frame;
+      if (v.smooth_fill_line != a || filled_w + 0.5 < v.smooth_fill) {
         v.smooth_fill_line = a;
         v.smooth_fill = filled_w;
       } else {
-        v.smooth_fill = ease_towards(v.smooth_fill, filled_w, 0.016, 0.04);
+        v.smooth_fill = ease_towards(v.smooth_fill, filled_w, dt, 0.035);
+        if (std::fabs(v.smooth_fill - filled_w) < 0.25) v.smooth_fill = filled_w;
         filled_w = v.smooth_fill;
       }
 
@@ -621,17 +744,27 @@ void paint_lyrics(App& app, Graphics& g, int w, int h) {
 }
 
 void paint_plain(App& app, Graphics& g, int w, int h) {
-  // Unsynced lyrics: a calm, centred sheet.
+  // Unsynced lyrics: a calm, centred sheet. There is no active line to anchor
+  // to, so one optional focal row (the paced estimate) is emphasised and the
+  // rest fade with distance exactly like the timed view.
   View& v = app.view;
   const Theme& th = theme(app.cfg.theme);
   const double col_x = (w - v.col_w) * 0.5;
+  const int focus = app.timing_estimated ? app.active : -1;
   for (size_t i = 0; i < app.disp.size() && i < v.line_top.size(); ++i) {
     double y = v.line_top[i] + v.scroll;
     if (y > h + 100) break;
     if (y + v.line_h[i] < -100) continue;
     if (app.disp[i].text.empty()) continue;
-    Font* font = get_font(app, static_cast<int>(std::lround(v.base_px)), 400);
-    ARGB c = (th.text & 0x00FFFFFF) | (0xE0 << 24);
+    const bool lit = focus >= 0 && static_cast<int>(i) == focus;
+    Font* font = get_font(app, static_cast<int>(std::lround(v.base_px)),
+                          lit ? 600 : 400);
+    int alpha = 0xE4;
+    if (focus >= 0) {
+      const int dist = std::abs(static_cast<int>(i) - focus);
+      alpha = std::max(70, 0xE4 - dist * 24);
+    }
+    ARGB c = (th.text & 0x00FFFFFF) | (static_cast<ARGB>(alpha) << 24);
     draw_text(g, wide(app.disp[i].text), font,
               RectF(static_cast<REAL>(col_x), static_cast<REAL>(y),
                     static_cast<REAL>(v.col_w), static_cast<REAL>(v.line_h[i])),
@@ -828,44 +961,70 @@ void paint_help(App& app, Graphics& g, int w, int h) {
   View& v = app.view;
   if (!v.help) return;
 
-  SolidBrush dim(Color(0xC4, 4, 4, 8));
+  SolidBrush dim(Color(0xD0, 4, 4, 8));
   g.FillRectangle(&dim, RectF(0, 0, static_cast<REAL>(w), static_cast<REAL>(h)));
 
   struct Row {
     const wchar_t* key;
     const wchar_t* what;
   };
-  const Row rows[] = {
+  struct Group {
+    const wchar_t* title;
+    const Row* rows;
+    int count;
+  };
+  static const Row kWindow[] = {
       {L"F11", L"Full screen / windowed"},
       {L"Esc", L"Leave full screen, then hide to tray"},
-      {L"A", L"Always on top"},
-      {L"↑ / ↓", L"Bigger / smaller text"},
-      {L"← / →", L"Nudge lyric timing by 0.25 s"},
-      {L"R", L"Look the lyrics up again"},
-      {L"C", L"Subtle cover-art tint on / off"},
-      {L"B", L"Next cinematic wallpaper"},
-      {L"K", L"Karaoke wipe on / off"},
-      {L"T", L"Theme"},
-      {L"Ctrl+Alt+W", L"Toggle desktop wallpaper mode"},
-      {L"F1  /  H", L"Show / hide this help"},
+      {L"A", L"Always on top (window mode)"},
+      {L"Ctrl+Alt+W", L"Lyrics on the desktop, or back to a window"},
       {L"Ctrl+Alt+L", L"Show / hide from any app"},
+  };
+  static const Row kLyrics[] = {
+      {L"\u2191 / \u2193  + / \u2212", L"Bigger / smaller text"},
+      {L"\u2190 / \u2192", L"Nudge lyric timing by 0.25 s"},
+      {L"F", L"Reset text size"},
+      {L"R", L"Look the lyrics up again"},
+      {L"K", L"Karaoke wipe on / off"},
+  };
+  static const Row kLook[] = {
+      {L"T", L"Theme"},
+      {L"C", L"Album-art tint on / off"},
+      {L"B", L"Next cinematic wallpaper"},
+      {L"[", L"Quieter / brighter background"},
+      {L"Ctrl+Alt+S", L"Settings"},
+      {L"F1 / H", L"Show / hide this help"},
       {L"Q", L"Quit"},
   };
-  const int row_count = static_cast<int>(sizeof(rows) / sizeof(rows[0]));
+  static const Group kGroups[] = {
+      {L"WINDOW", kWindow, static_cast<int>(sizeof(kWindow) / sizeof(kWindow[0]))},
+      {L"LYRICS", kLyrics, static_cast<int>(sizeof(kLyrics) / sizeof(kLyrics[0]))},
+      {L"LOOK", kLook, static_cast<int>(sizeof(kLook) / sizeof(kLook[0]))},
+  };
+  constexpr int kGroupCount = 3;
+  int row_total = 0;
+  for (const Group& group : kGroups) row_total += group.count;
 
-  double panel_w = std::min(w * 0.76, 760.0);
-  double key_px = std::min(std::max(h * 0.019, 12.0), 22.0);
-  double row_h = key_px * 2.35;
-  double panel_h = row_h * (row_count + 2.6);
+  double panel_w = std::min(w * 0.82, 940.0);
+  double key_px = std::min(std::max(h * 0.0165, 11.0), 19.0);
+  double row_h = key_px * 2.1;
+  double panel_h = row_h * (row_total + 4.4);
+  panel_h = std::min(panel_h, h * 0.92);
   RectF panel(static_cast<REAL>((w - panel_w) / 2),
               static_cast<REAL>((h - panel_h) / 2), static_cast<REAL>(panel_w),
               static_cast<REAL>(panel_h));
-  draw_rounded_rect(g, panel, 18.0f, 0xEE0E0E18, true, 0x33FFFFFF);
+  draw_rounded_rect(g, panel, 18.0f, 0xF20E0E18, true, 0x33FFFFFF);
 
-  draw_text(g, L"Youtube-Lyrics", get_font(app, static_cast<int>(key_px * 1.6), 600),
-            RectF(panel.X, panel.Y + static_cast<REAL>(row_h * 0.4),
-                  panel.Width, static_cast<REAL>(row_h)),
+  const double pad = panel_w * 0.045;
+  draw_text(g, L"Keyboard and mouse", get_font(app, static_cast<int>(key_px * 1.5), 600),
+            RectF(panel.X + static_cast<REAL>(pad), panel.Y + static_cast<REAL>(row_h * 0.3),
+                  panel.Width - static_cast<REAL>(pad * 2), static_cast<REAL>(row_h * 1.3)),
             0xFFF2F2F8);
+  draw_text(g, L"Everything below is also in the tray menu. F1 or Esc closes this.",
+            get_font(app, static_cast<int>(key_px * 0.85), 400),
+            RectF(panel.X + static_cast<REAL>(pad), panel.Y + static_cast<REAL>(row_h * 1.35),
+                  panel.Width - static_cast<REAL>(pad * 2), static_cast<REAL>(row_h)),
+            0x88F0F0F8);
 
   StringFormat right;
   right.SetAlignment(StringAlignmentFar);
@@ -874,21 +1033,32 @@ void paint_help(App& app, Graphics& g, int w, int h) {
   left.SetAlignment(StringAlignmentNear);
   left.SetLineAlignment(StringAlignmentCenter);
 
-  double y = panel.Y + row_h * 1.7;
-  for (int i = 0; i < row_count; ++i) {
-    Font* kf = get_font(app, static_cast<int>(key_px), 600);
-    Font* wf = get_font(app, static_cast<int>(key_px), 400);
-    SolidBrush kb{Color(0xFFE8E8F2)};
-    g.DrawString(rows[i].key, -1, kf,
-                 RectF(panel.X + 30, static_cast<REAL>(y),
-                       static_cast<REAL>(panel.Width * 0.32), static_cast<REAL>(row_h)),
-                 &right, &kb);
-    SolidBrush wb{Color(0x9EF0F0F8)};
-    g.DrawString(rows[i].what, -1, wf,
-                 RectF(panel.X + panel.Width * 0.36f, static_cast<REAL>(y),
-                       static_cast<REAL>(panel.Width * 0.6), static_cast<REAL>(row_h)),
-                 &left, &wb);
-    y += row_h;
+  const double column_w = (panel.Width - pad * 2) / kGroupCount;
+  double y = panel.Y + row_h * 2.5;
+  for (int gi = 0; gi < kGroupCount; ++gi) {
+    const Group& group = kGroups[gi];
+    const double x = panel.X + pad + column_w * gi;
+    draw_text(g, group.title, get_font(app, static_cast<int>(key_px * 0.72), 600),
+              RectF(static_cast<REAL>(x), static_cast<REAL>(y),
+                    static_cast<REAL>(column_w - 12), static_cast<REAL>(row_h)),
+              0xFFF5A524u);
+    double ry = y + row_h * 1.15;
+    for (int i = 0; i < group.count; ++i) {
+      Font* kf = get_font(app, static_cast<int>(key_px * 0.92), 600);
+      Font* wf = get_font(app, static_cast<int>(key_px * 0.92), 400);
+      SolidBrush kb{Color(0xFFE8E8F2)};
+      g.DrawString(group.rows[i].key, -1, kf,
+                   RectF(static_cast<REAL>(x), static_cast<REAL>(ry),
+                         static_cast<REAL>(key_px * 5.4), static_cast<REAL>(row_h)),
+                   &left, &kb);
+      SolidBrush wb{Color(0x9EF0F0F8)};
+      g.DrawString(group.rows[i].what, -1, wf,
+                   RectF(static_cast<REAL>(x + key_px * 5.6), static_cast<REAL>(ry),
+                         static_cast<REAL>(column_w - key_px * 5.6),
+                         static_cast<REAL>(row_h)),
+                   &left, &wb);
+      ry += row_h;
+    }
   }
 
   // Diagnostics line: what the media helper last reported.
@@ -897,14 +1067,15 @@ void paint_help(App& app, Graphics& g, int w, int h) {
     std::lock_guard<std::mutex> lock(app.mu);
     raw = app.media.raw;
   }
-  Font* mono = get_font(app, static_cast<int>(key_px * 0.72), 400);
+  Font* mono = get_font(app, static_cast<int>(key_px * 0.66), 400);
   std::string diag = "media helper: ";
   diag += raw.empty() ? std::string("(waiting)") : raw;
-  if (diag.size() > 220) diag = diag.substr(0, 220) + "...";
+  if (diag.size() > 240) diag = diag.substr(0, 240) + "...";
   SolidBrush db{Color(0x66C8C8D8)};
   g.DrawString(wide(diag).c_str(), -1, mono,
-               RectF(panel.X + 30, static_cast<REAL>(panel.Y + panel.Height - row_h * 1.5),
-                     panel.Width - 60, static_cast<REAL>(row_h * 1.4)),
+               RectF(panel.X + static_cast<REAL>(pad),
+                     static_cast<REAL>(panel.Y + panel.Height - row_h * 1.6),
+                     panel.Width - static_cast<REAL>(pad * 2), static_cast<REAL>(row_h * 1.4)),
                &left, &db);
 }
 
@@ -970,10 +1141,14 @@ void paint_idle_wallpaper(App& app, Graphics& g, int w, int h, bool listening,
   const double tpx = std::min(std::max(h * 0.030, 18.0), 40.0);
   const double bpx = std::min(std::max(h * 0.0155, 12.0), 20.0);
 
+  // A first launch with no config at all gets one extra line explaining what
+  // will happen, so "Listening" is not a mystery.
+  const bool welcome = app.first_run && !listening && !listener_silent;
   const std::string big = listening ? "Paused" : "Listening";
-  const std::string sub = listening
-                              ? track_label(app.current_track())
-                              : "Play a song anywhere \u2014 YouTube Music, Spotify, any player.";
+  const std::string sub =
+      listening ? track_label(app.current_track())
+                : (welcome ? "Youtube-Lyrics is running in the tray and on your desktop."
+                           : "Play a song anywhere \u2014 YouTube Music, Spotify, any player.");
   draw_text(g, wide(big), get_font(app, static_cast<int>(tpx), 600),
             RectF(0, static_cast<REAL>(cy + unit * 0.62), static_cast<REAL>(w),
                   static_cast<REAL>(tpx * 2)),
@@ -984,11 +1159,19 @@ void paint_idle_wallpaper(App& app, Graphics& g, int w, int h, bool listening,
             (0x84u << 24) | 0x00F3EFE6);
 
   if (listener_silent) {
-    draw_text(g, L"No media session yet · check the tray menu or ytlyrics.log",
+    draw_text(g, L"No media session yet \u00b7 check the tray menu or ytlyrics.log",
               get_font(app, static_cast<int>(bpx * 0.92), 400),
               RectF(0, static_cast<REAL>(cy + unit * 0.62 + tpx * 1.5 + bpx * 2.1),
                     static_cast<REAL>(w), static_cast<REAL>(bpx * 3)),
               (0x55u << 24) | 0x00F3EFE6);
+  } else if (welcome) {
+    draw_text(g,
+              L"Ctrl+Alt+S  settings   \u00b7   F1  shortcuts   \u00b7   "
+              L"Ctrl+Alt+W  desktop layer",
+              get_font(app, static_cast<int>(bpx * 0.92), 400),
+              RectF(0, static_cast<REAL>(cy + unit * 0.62 + tpx * 1.5 + bpx * 2.1),
+                    static_cast<REAL>(w), static_cast<REAL>(bpx * 3)),
+              (0x66u << 24) | 0x00F3EFE6);
   }
 }
 
@@ -1037,16 +1220,22 @@ void render_frame(App& app, Graphics& g, int w, int h) {
                               track_label(app.current_track()), "", "", "");
         break;
       case LyricsState::NotFound:
+        // In wallpaper mode a failed lookup leaves the still image alone rather
+        // than printing an error across the desktop; the tray menu can reopen
+        // this view. A windowed/full-screen session shows the detail.
         if (!desktop_wallpaper)
           paint_centred_message(app, g, w, h, "No lyrics found",
                                 track_label(app.current_track()), app.lmessage,
-                                "Press R to search again", "F1 for shortcuts");
+                                "R  search again   \u00b7   add a .lrc file to the "
+                                "local lyrics folder",
+                                "Ctrl+Alt+S  settings   \u00b7   F1  shortcuts");
         break;
       case LyricsState::Error:
         if (!desktop_wallpaper)
           paint_centred_message(app, g, w, h, "Lyrics lookup failed",
                                 track_label(app.current_track()), app.lmessage,
-                                "Press R to retry", "F1 for shortcuts");
+                                "R  retry   \u00b7   check your connection, then retry",
+                                "Ctrl+Alt+S  settings   \u00b7   F1  shortcuts");
         break;
       case LyricsState::Idle:
       default:

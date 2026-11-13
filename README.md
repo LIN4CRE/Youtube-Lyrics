@@ -1,6 +1,6 @@
 <div align="center">
 
-<a href="https://github.com/LIN4CRE/Youtube-Lyrics/releases/latest/download/YoutubeLyrics.exe"><img src="docs/brand/badge-download.png" alt="Download YoutubeLyrics.exe — version 1.4.0 for Windows x64"></a>
+<a href="https://github.com/LIN4CRE/Youtube-Lyrics/releases/latest/download/YoutubeLyrics.exe"><img src="docs/brand/badge-download.png" alt="Download YoutubeLyrics.exe for Windows x64"></a>
 &nbsp; · &nbsp;
 <a href="https://paypal.me/delinacre16"><img src="docs/brand/badge-support.png" alt="Help me out via PayPal"></a>
 
@@ -20,8 +20,10 @@
 A single Windows executable that follows Windows' current music session,
 prioritizing what is playing while retaining its current paused track. In desktop
 wallpaper mode it sits behind the icons, does not take focus, and passes clicks
-through. Three original cinematic backgrounds are bundled, with rotation and
-readability preferences. LRCLIB results are matched before display; lyrics.ovh is
+through. Four original cinematic backgrounds ship inside the executable — three drawn
+stills and one procedural scene painted at runtime — with rotation and
+readability preferences. Everything you can change is in one native settings
+window (`Ctrl+Alt+S`), not buried in the tray menu. LRCLIB results are matched before display; lyrics.ovh is
 an untimed fallback without response-side track metadata.
 
 [![Windows 10 / 11](docs/brand/badge-platform.png)](#requirements)
@@ -82,7 +84,8 @@ Windows executable embeds that same multi-size icon.
 | **Cover art, if you want it** | The album cover, aspect-filled and heavily darkened behind the text. `C` toggles. |
 | **A real desktop layer** | Uses Explorer's WorkerW desktop surface when available; it does not take focus or intercept clicks. `Ctrl+Alt+W` switches wallpaper mode; `Ctrl+Alt+L` hides or restores it. A bottom-of-z-order fallback is used if WorkerW cannot be found. |
 | **The right media session** | A playing session takes priority; Windows' current known music session remains visible while paused, with its position frozen. Stopped sessions are ignored, track changes are confirmed across polls, and lyrics are checked against title, artist and duration. |
-| **Bundled scenes** | Three original procedural cinematic wallpapers ship inside the executable. Cycle them, choose random launch, set rotation, and adjust darkness from the tray. |
+| **One native settings window** | `Ctrl+Alt+S` (or **Settings…** in the tray) opens a compact Win32 window: display mode, theme, text size, sync offset, karaoke wipe, album-art tint, wallpaper choice, rotation, random launch and background darkness. No web view, no framework. |
+| **Bundled scenes** | Three original cinematic stills plus a fourth procedural scene (*Drift*, drawn with GDI+ and costing no bytes) ship inside the executable. Cycle them with `B`, choose random launch, set rotation, and adjust darkness. |
 | **Stable updates** | Checks the project's stable GitHub Releases at startup; it asks before downloading and verifies the manifest, SHA-256, size, and x64 executable before staging. No background service. |
 | **Out of the way** | Runs in the tray; use the global hotkeys or the tray menu. Turn wallpaper mode off to use the normal full-screen/windowed display. |
 | **Offline after the first play** | Lyrics are cached per track on disk. Replay a song on a plane and it still works. |
@@ -102,7 +105,7 @@ Optional integrity check (PowerShell):
 Get-FileHash .\YoutubeLyrics.exe -Algorithm SHA256
 ```
 
-Expected SHA-256 for the current 1.4.0 download is listed in [`YoutubeLyrics.exe.sha256`](docs/downloads/YoutubeLyrics.exe.sha256) and beside the download on the [project website](https://lin4cre.github.io/Youtube-Lyrics/). Compare it before running the file. The checksum is served by GitHub over HTTPS; it is an integrity check, not a code signature.
+Expected SHA-256 for the current 1.5.0 download is listed in [`YoutubeLyrics.exe.sha256`](docs/downloads/YoutubeLyrics.exe.sha256) and beside the download on the [project website](https://lin4cre.github.io/Youtube-Lyrics/). Compare it before running the file. The checksum is served by GitHub over HTTPS; it is an integrity check, not a code signature.
 
 Windows may show **"Windows protected your PC"** because the file is not
 code-signed. The source is public; continue only if you trust the download. If
@@ -135,23 +138,28 @@ raw media-session state when the window is focused.
 | :--- | :--- | :--- | :--- | :--- |
 | `Ctrl`+`Alt`+`W` | Toggle desktop wallpaper mode | | `F` | Reset text size |
 | `Ctrl`+`Alt`+`L` | Show / hide from any app | | `R` | Look the lyrics up again |
+| `Ctrl`+`Alt`+`S` | Settings window | | `[` | Quieter / brighter background |
 | `F11` | Full screen ⇄ windowed (normal mode) | | `C` | Cover-art background |
 | `Esc` | Leave full screen, then hide to tray | | `K` | Karaoke wipe |
 | `A` | Always on top (normal mode) | | `Q` | Quit |
-| `↑` `↓` | Bigger / smaller text | | `T` | Theme |
+| `↑` `↓` `+` `−` | Bigger / smaller text | | `T` | Theme |
 | `←` `→` | Shift lyric timing ±0.25 s | | `F1` `H` | Help overlay |
 
-Double-clicking toggles full screen. The tray icon's right-click menu includes
-the same controls, wallpaper preferences, an About dialog, a manual stable-update
-check, and an optional “Help out via PayPal” link. Display settings are saved as
-you change them.
+Double-clicking toggles full screen. Pressing `S` in the display (or `Ctrl+Alt+S`
+from anywhere) opens the settings window; `F1` lists every shortcut. The tray
+icon's right-click menu carries the same controls, wallpaper preferences, an
+About dialog, a manual stable-update check, and an optional “Help out via PayPal”
+link. Display settings are saved as you change them, and an open settings window
+follows changes made from the tray or a hotkey instead of showing stale values.
 
 ### Desktop scenes
 
-Three locally generated, original 1600×900 scenes (City Rain, Mountain Night, and
-Forest Mist) are embedded in the executable; there are no hotlinked or third-party
-wallpapers. Press `B` or choose **Next cinematic wallpaper** in the tray menu to
-cycle them. Automatic rotation and a random wallpaper on launch are enabled by
+Three locally generated, original 1600×900 scenes (Rainfall District, Midnight
+Range, Stillwood) are embedded in the executable, and a fourth — *Drift*, an
+aurora over still water — is drawn procedurally at the moment the background
+cache is built, so it adds nothing to the download. There are no hotlinked or
+third-party wallpapers. Press `B` or choose **Next cinematic wallpaper** in the
+tray menu to cycle them. Automatic rotation and a random wallpaper on launch are enabled by
 default; the tray menu can turn either off, cycle the rotation interval (15, 30,
 or 60 minutes), and change background darkness (0%, 12%, 24%, or 36%). These
 preferences are stored locally.
@@ -269,7 +277,10 @@ detected. YouTube Music sometimes reports `Artist - Topic` or a video suffix;
 the app cleans the noise and scores LRCLIB results against the track metadata.
 The lyrics.ovh fallback does not return identity metadata, so it cannot be
 independently checked; if its result is wrong, add a local `.lrc`/`.txt`
-override under `%LOCALAPPDATA%\YouTubeLyrics\lyrics\`. `R` retries.
+override under `%LOCALAPPDATA%\YouTubeLyrics\lyrics\`. `R` retries. Remixes, live versions, karaoke and instrumental editions are
+matched separately: a result tagged as a different edition of the same song is
+rejected rather than shown, and the search asks for the edition the player
+reports.
 
 </details>
 

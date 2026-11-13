@@ -232,6 +232,9 @@ bool media_parse_line(const std::string& line, MediaState& out, int64_t now) {
   t.title = title;
   t.artist = artist;
   t.album = v.get_str("album");
+  // Kept so a live take, remix or instrumental is distinguishable from the
+  // studio recording once clean_track() has stripped its markers.
+  t.raw_title = title;
   constexpr double kMaxTrackDurationSeconds = 24.0 * 60.0 * 60.0;
   const double reported_duration = v.get_num("dur", 0);
   t.duration_s = (reported_duration > 0.0)

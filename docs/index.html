@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#0b0c10" />
+    <meta name="theme-color" content="var(--bg)" />
     <meta
       name="description"
       content="Download Youtube-Lyrics for Windows: a portable desktop lyrics display with one bright line at a time and honest timing cues."
@@ -19,13 +19,18 @@
     <style>
       :root {
         color-scheme: dark;
-        --bg: #0b0c10;
-        --panel: #13151b;
-        --panel-soft: #191b21;
-        --text: #f5f1e8;
-        --muted: #c3c2c5;
-        --line: #34353b;
-        --amber: #ffc46c;
+        /* The same palette the application paints with: Midnight background
+           #0b0a0f, lyric paper #f3efe6 and the one amber #f5a524. The derived
+           tokens below are the same hues at different weights, so the site and
+           the app read as one product. */
+        --bg: #0b0a0f;
+        --panel: #17151d;
+        --panel-soft: #1d1a24;
+        --text: #f3efe6;
+        --muted: #a8a29a;
+        --line: #35323d;
+        --amber: #f5a524;
+        --amber-soft: #ffd28b;
         --amber-dark: #21170c;
         --green: #b7e7c5;
         font-family: Inter, "Segoe UI", system-ui, -apple-system, sans-serif;
@@ -47,7 +52,7 @@
       }
 
       a { color: var(--amber); text-underline-offset: 0.2em; }
-      a:hover { color: #ffdb9c; }
+      a:hover { color: var(--amber-soft); }
       a:focus-visible { outline: 3px solid var(--amber); outline-offset: 4px; border-radius: 4px; }
       img { display: block; max-width: 100%; }
       .skip-link {
@@ -114,19 +119,19 @@
         border: 1px solid transparent;
         border-radius: 0.72rem;
         background: var(--amber);
-        color: #21170c;
+        color: var(--amber-dark);
         font-size: 0.98rem;
         font-weight: 800;
         text-align: center;
         text-decoration: none;
         transition: transform 140ms ease, background-color 140ms ease;
       }
-      .button:hover { transform: translateY(-1px); background: #ffd28b; color: #21170c; }
+      .button:hover { transform: translateY(-1px); background: var(--amber-soft); color: var(--amber-dark); }
       .button svg { flex: none; }
       .button.secondary { border-color: var(--line); background: var(--panel); color: var(--text); }
       .button.secondary:hover { background: var(--panel-soft); }
-      .button.support { border-color: #655235; background: var(--amber-dark); color: #ffe0b3; }
-      .button.support:hover { background: #302214; color: #fff0d4; }
+      .button.support { border-color: #6a5a3f; background: var(--amber-dark); color: var(--amber-soft); }
+      .button.support:hover { background: #2a2013; color: #fff4e2; }
       .file-note { margin: 0.95rem 0 0; color: var(--muted); font-size: 0.9rem; }
       .file-note strong { color: var(--text); font-weight: 650; }
 
@@ -154,6 +159,16 @@
         border-radius: 0.8rem;
         background: rgb(19 21 27 / 78%);
       }
+      kbd {
+        display: inline-block;
+        padding: 0.05rem 0.32rem;
+        border: 1px solid var(--line);
+        border-bottom-width: 2px;
+        border-radius: 0.32rem;
+        background: var(--panel-soft);
+        color: var(--text);
+        font: 600 0.86em/1.5 "JetBrains Mono", ui-monospace, monospace;
+      }
       .feature-mark { color: var(--amber); font-size: 0.78rem; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; }
       .feature h3 { margin: 0.65rem 0 0.35rem; font-size: 1.05rem; }
       .feature p { margin: 0; color: var(--muted); font-size: 0.91rem; }
@@ -166,7 +181,7 @@
         padding: clamp(1.3rem, 4vw, 2.2rem);
         border: 1px solid rgb(255 255 255 / 10%);
         border-radius: 1rem;
-        background: linear-gradient(135deg, #17181e, #101116);
+        background: linear-gradient(135deg, #17151d, #141219);
       }
       .steps { display: grid; gap: 1rem; margin: 1.35rem 0 0; padding: 0; list-style: none; counter-reset: step; }
       .steps li { position: relative; min-height: 2rem; padding-left: 2.6rem; color: var(--muted); counter-increment: step; }
@@ -178,7 +193,7 @@
         width: 1.85rem;
         height: 1.85rem;
         place-items: center;
-        border: 1px solid #655235;
+        border: 1px solid #6a5a3f;
         border-radius: 50%;
         background: var(--amber-dark);
         color: var(--amber);
@@ -192,10 +207,10 @@
         padding: 1.1rem;
         border: 1px solid #6b5636;
         border-radius: 0.75rem;
-        background: rgb(255 196 108 / 7%);
+        background: rgb(245 165 36 / 7%);
       }
-      .warning h3 { margin: 0; color: #ffe0b3; font-size: 1rem; }
-      .warning p { margin: 0.6rem 0 0; color: #ded0bd; font-size: 0.9rem; }
+      .warning h3 { margin: 0; color: var(--amber-soft); font-size: 1rem; }
+      .warning p { margin: 0.6rem 0 0; color: #d8d2c6; font-size: 0.9rem; }
       .privacy { margin: 1.15rem 0 0; color: var(--muted); font-size: 0.9rem; }
 
       footer { padding: 1.5rem 0 2.5rem; border-top: 1px solid rgb(255 255 255 / 9%); color: var(--muted); font-size: 0.88rem; }
@@ -245,7 +260,7 @@
     <main id="main" class="shell">
       <section class="hero" aria-labelledby="hero-title">
         <div class="hero-copy">
-          <p class="eyebrow">For Windows 10 and 11 · Version 1.4.0</p>
+          <p class="eyebrow">For Windows 10 and 11 · Version <span data-version>1.5.0</span></p>
           <h1 id="hero-title">Lyrics for the whole room.</h1>
           <p class="lead">
             A quiet desktop layer that follows the music and brings one large line
@@ -270,9 +285,11 @@
               Help out
             </a>
           </div>
-          <p class="file-note"><strong>YoutubeLyrics.exe</strong> · 64-bit · about 842 KiB · portable Windows x64 build</p>
+          <!-- release-facts:start -->
+          <p class="file-note"><strong>YoutubeLyrics.exe</strong> · 64-bit · about 890 KiB (910,848 bytes) · portable Windows x64 build</p>
           <p class="file-note">No installer, account, or administrator rights required. Public download hosted by GitHub.</p>
-          <p class="file-note">SHA-256: <code>1730585365d1607476a8416f61f1326fd4e7fea2775e51851d007ad0f7a13fd1</code> · <a href="downloads/YoutubeLyrics.exe.sha256">checksum file</a></p>
+          <p class="file-note">SHA-256: <code>55de6cd3a4bcbd08f6bef8482f16ce79c17416acede9dea6231e3d034a2c0631</code> · <a href="downloads/YoutubeLyrics.exe.sha256">checksum file</a></p>
+          <!-- release-facts:end -->
         </div>
 
         <figure class="preview">
@@ -313,9 +330,14 @@
             <p>One standalone Windows executable. It lives in the tray and remembers your display settings.</p>
           </article>
           <article class="feature">
+            <span class="feature-mark">07 · Settings</span>
+            <h3>One native window</h3>
+            <p><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>S</kbd> opens a compact Win32 settings window — mode, theme, text size, sync, wipe, cover tint and every wallpaper preference. No web view.</p>
+          </article>
+          <article class="feature">
             <span class="feature-mark">05 · Backdrops</span>
             <h3>Original scenes included</h3>
-            <p>Three bundled procedural wallpapers with rotation, random launch, and background-darkness preferences.</p>
+            <p>Three bundled stills plus a fourth procedural scene drawn at runtime, with rotation, random launch, and background-darkness preferences.</p>
           </article>
           <article class="feature">
             <span class="feature-mark">06 · Updates</span>
