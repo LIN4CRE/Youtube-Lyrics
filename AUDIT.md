@@ -1,48 +1,171 @@
 # Youtube-Lyrics — engineering audit
 
-**Reviewed:** 6 November 2026
+**Reviewed:** 12 November 2026
 
-**Version under review:** 1.4.0
+**Version under review:** 1.5.0
 
 **Repository:** `LIN4CRE/Youtube-Lyrics`
 
-**Base commit:** `91b13c56f51e313ae1baa8c4d41d2b6994434a48`
+**Branch:** `arena/f0895620-youtube-lyrics`, from `febb2c154d4ddb9d3b12ab9b3403d08d1e8e165e`
+
+> **Scope of this audit.** Everything below was measured in a Linux sandbox with
+> the Zig/MinGW-w64 cross toolchain. There was no Windows machine, no VM and no
+> Wine in that environment, so **no Windows runtime claim is made anywhere in this
+> document**. Where a statement depends on runtime behaviour it is marked as
+> unverified rather than asserted.
 
 ## Summary
 
-Youtube-Lyrics remains a portable native C++17/Win32 application. The portable core handles lyric parsing, source timing, metadata validation, matching, and layout; the Windows layer provides the tray, GDI+ renderer, Windows media-session listener, and HTTPS networking. The application does not capture audio, use telemetry, require an account, or run as a service.
+Youtube-Lyrics is still a portable native C++17/Win32 application with no
+framework, no web view, no installer, no account, no telemetry and no audio
+capture. The portable core handles LRC parsing, source timing, metadata
+validation, matching and layout; the Windows layer provides the tray, the GDI+
+renderer, the Windows media-session listener and HTTPS networking.
 
-Version 1.4.0 adds an Explorer WorkerW desktop-wallpaper mode, bundled original procedural scenes, saved wallpaper preferences, and a consent-based stable GitHub Release updater. The artwork is generated locally from code and does not download third-party photographs. Existing lyrics providers, cache and local files, Enhanced LRC, sync controls, themes, hotkeys, tray, and normal display mode remain in the application.
+1.5.0 is a usability and integrity release rather than a rewrite:
 
-## Behavior and trust boundaries
+- a native settings window now exposes everything that used to be reachable only
+  through the tray menu or a hotkey, and it reads and writes the same `Config` the
+  rest of the app uses;
+- a fourth, procedural background was added that costs no bytes;
+- the build pipeline became a gate on both platforms: a build that cannot embed
+  its icon and version resource now fails instead of quietly shipping an iconless
+  executable, and nothing is published to `docs/downloads` before verification;
+- the version, size and checksum printed on the website are generated from the
+  binary instead of being maintained by hand.
 
-- **Media sessions:** the listener prefers playing sessions and may retain only Windows' current known music session while it is explicitly paused. Paused position is frozen; stopped or missing sessions are not promoted to a track. A short SMTC withdrawal grace avoids flicker while Windows changes sessions, after which the old sheet is cleared.
-- **Lyric timing:** Enhanced LRC inline timestamps and ordinary LRC line timestamps are preserved. Untimed lyrics can be paced for navigation only when explicitly labeled as estimated; they do not gain a fabricated karaoke wipe. Player-position fallback, where used, is not a source lyric timestamp.
-- **Lyrics and privacy:** LRCLIB candidates are checked against track metadata; lyrics.ovh is a lower-confidence untimed fallback because its response has no track identity. Local `.lrc`/`.txt` files take priority. Lookups send title and artist, and LRCLIB's exact-match request also sends album and duration when Windows provides them. Logs, settings, cache, and cover art remain local.
-- **Desktop layer:** the code asks Explorer for a WorkerW host and uses no-activate, transparent input, and child-window styles. It has a safe bottom-of-z-order fallback if WorkerW cannot be found. WorkerW behavior and click-through have **not** been exercised on Windows in this environment; the implementation and cross-build are not runtime proof.
-- **Updates:** the app queries only the project's latest stable GitHub Release. It validates the repository, version/tag, channel, architecture, asset name and size; compares the release manifest and SHA-256 sidecar; verifies downloaded bytes and the x64 PE header; stages the update; and uses a local replacement helper with rollback. Checksums delivered by the same GitHub HTTPS origin provide integrity checking, not an independent digital signature. The user is asked before installation.
-- **Distribution:** the executable is a portable x64 Windows GUI build, not code-signed. Windows SmartScreen may warn. The stable-release and GitHub Pages workflows publish only after their GitHub Actions runs succeed; a local build alone does not establish that a public release or site is live.
+Two defects found during this review were *cosmetic on Linux but real on
+Windows*, which is worth stating plainly: the settings dialog's layout had
+overlapping and clipped controls, and the dialog could not be driven from the
+keyboard at all. Both are fixed, and a test now re-runs the layout geometry.
+
+## What changed since the 1.4.0 review
+
+### Defects found and fixed
+
+| # | Defect | Where | Evidence |
+| --- | --- | --- | --- |
+| 1 | Settings window listed themes and wallpapers in a different order from the renderer, with its own `% 3` — it displayed the wrong scene name and could not represent a fourth wallpaper | `src/win/settings.cc` | a second, divergent copy of `kThemes`/`kScenes` in the settings file |
+| 2 | Settings controls and their painted labels were positioned by two independent hand-counted sequences; the DISPLAY column overflowed the footer and the sync buttons ran into the other column | `src/win/settings.cc` | offline geometry replay found 6 collisions and 5 clipped controls |
+| 3 | The settings window could not be operated from the keyboard: nothing forwarded Tab/Escape/arrows to the owner-drawn controls | `src/win/app.cc` message loop | no `IsDialogMessage` call anywhere |
+| 4 | A resource-compiler failure produced an iconless executable on Windows, because `build.ps1` caught the failure and continued | `scripts/build.ps1` | catch-and-continue around `zig rc` |
+| 5 | The download page and README advertised a version, size and SHA-256 that no longer matched the binary | `docs/index.html`, `README.md` | page said `842 KiB` / `173058…`, build was `875,008` / `be9f632…` |
+| 6 | `Stillwood`'s mist was three flat rectangles with hard edges across the whole frame; `Rainfall District`'s road cut the composition in half | `scripts/wallpapers.py` | 9.77-step luma discontinuity at the band edge |
+| 7 | The quiet lyric lines in the app mark were too pale to read at large sizes | `scripts/brand.py`, `src/win/app.cc` | visual comparison against the dark and light backgrounds |
+| 8 | An unused `destroy_settings` field had been added to `App` | `src/win/app.h` | leftover from an earlier patch |
+| 9 | The settings window could show stale values after a tray/hotkey change | `src/win/app.cc` | `settings_refresh` added at 12 call sites |
+| 10 | `Ctrl+Alt+S` did not exist; the tray menu had no settings entry | `src/win/app.cc` | tray ids stopped at 18 |
+
+### Features added
+
+- **Settings window** (`src/win/settings.cc`, 1 new file): owner-drawn Win32
+  window, four palettes mirroring the renderer, custom control class, painted
+  labels/sections/brand mark, `DwmSetWindowAttribute(20)` dark title bar, keyboard
+  traversal and focus rings, and a height derived from its own row table. Native
+  `BUTTON`/`STATIC` controls were tried first and rejected: with a dark painted
+  background their text is illegible or invisible, because `WM_CTLCOLOR*` theming
+  does not cover checkbox and push-button drawing reliably.
+- **Procedural background** (`paint_procedural_background` in `render.cc`): a
+  star field on a hashed lattice, three aurora ribbons, a Bézier horizon and
+  gradient water, drawn once into the existing background cache.
+- **Text-size and background keys** (`+`, `-`, `[`) and a grouped help overlay.
+- **First-run line** in the idle state, keyed off `config.ini` being absent.
+- **`scripts/verify_build.py`**: PE32+ / x64 / GUI-subsystem check, resource walk,
+  icon group cross-check (every group entry must reference an existing RT_ICON of
+  the declared size), wallpaper JPEG integrity, and VERSIONINFO comparison against
+  `VERSION`.
+- **`scripts/release_facts.py`**: rewrites the generated version/size/checksum
+  block from `VERSION` and the built binary, with a `--check` mode for CI.
+- **`tests/build_test.py`** and **`tests/settings_layout_test.py`**.
+- **A Windows-native CI job** that builds with `build.ps1`, reports the embedded
+  version resource and loads the executable with `LoadLibraryEx`.
+- **`Config::version`** written to `config.ini` for future migrations.
 
 ## Verification performed
 
-- `./scripts/test.sh` — **3,363 C++ checks passed** with AddressSanitizer and UndefinedBehaviorSanitizer; four Python release-generator tests also passed.
-- `ZIG="$PWD/.cache/pydeps/ziglang/zig" PYTHONPATH="$PWD/.cache/pydeps" ./scripts/build.sh` — successful Zig/MinGW x86-64 Windows GUI cross-build, including embedded resources and updater code.
-- PE-header inspection — both distributable copies are valid x86-64 PE32+ executables, each **862,208 bytes**. The cross-build does not prove that the app launches on Windows.
-- `dist/YoutubeLyrics.exe` and `docs/downloads/YoutubeLyrics.exe` are byte-identical. SHA-256: `1730585365d1607476a8416f61f1326fd4e7fea2775e51851d007ad0f7a13fd1`.
-- `scripts/generate_release.py` produced a local `v1.4.0` manifest and sidecar from the built PE; the release-generator tests cover invalid tags, repositories, architecture, PE headers, size, and version strings.
-- `python3 scripts/check_docs.py` — the local links and fragments in both static HTML pages resolve.
+Run on 12 November 2026 in this sandbox:
+
+- `./scripts/test.sh` — **3,400 portable-core checks, 0 failures**, compiled with
+  `-fsanitize=address,undefined` and `-Wall -Wextra`. Plus:
+  - 4 release-metadata tests,
+  - 10 build-verification/documentation tests,
+  - 5 settings-layout geometry tests,
+  - `scripts/check_docs.py` and `scripts/release_facts.py --check` (links,
+    fragments, `alt` text, simulated-preview labelling, version/size/checksum).
+- `./scripts/build.sh` — Zig/MinGW x86-64 Windows GUI cross-build. The build is
+  gated: icon generation → icon verification → resource compilation → compile to a
+  temporary path → `verify_build.py` → publish → re-verify the published copy.
+  - **Distributed build: 910,848 bytes (890 KiB)**, SHA-256
+    `55de6cd3a4bcbd08f6bef8482f16ce79c17416acede9dea6231e3d034a2c0631`.
+  - `verify_build.py`: `0x8664 windows-gui`, version `1.5.0`, icon frames
+    `[16, 20, 24, 32, 40, 48, 64, 96, 128, 256]`, wallpapers
+    `city-rain.jpg, forest-mist.jpg, mountain-night.jpg`.
+- `dist/YoutubeLyrics.exe` and `docs/downloads/YoutubeLyrics.exe` are
+  byte-identical; the sidecar and `release.json` are regenerated from the same
+  bytes by `scripts/generate_release.py`.
+- `scripts/make_icon.py --verify` — 10 frames, 16–256 px, every size present.
+- Import-table inspection of the built PE: `gdiplus`, `gdi32`, `user32`, `ole32`,
+  `shell32`, `dwmapi`, `winhttp`, `bcrypt`, `comctl32` and `kernel32`. `dwmapi` is
+  linked for the dark title bar; the call is best-effort and its failure is
+  ignored on Windows 10 builds that predate attribute 20.
+- Wallpaper regression check: the maximum row-to-row luma step in each scene is
+  **0.90 / 0.46 / 0.54** (previously 9.77 in *Stillwood*), and no row is flagged
+  as a hard edge.
 
 ## Not verified / residual risks
 
-- No Windows runtime or VM was available. Startup, SMTC behavior, the WorkerW layer and click-through, hotkeys, tray menus, DPI/display changes, PowerShell media access, and update replacement/rollback still require real Windows 10/11 testing.
-- No genuine Windows application screenshot was captured. `docs/img/display.png` is generated project artwork, and `docs/preview.html` is an interactive browser simulation; neither is runtime evidence.
-- No browser visual or assistive-technology audit, provider-availability test, or battery/CPU measurement was performed.
-- GitHub Pages and stable-release publication must be verified from successful Actions runs and by opening the public endpoints. This audit treats publication as a separate step from source changes and cross-compilation.
-- LRCLIB and lyrics.ovh are third-party services and may be unavailable or rate-limited. The lyrics.ovh result cannot be independently matched from response metadata.
+- **No Windows runtime.** The executable has never been launched on Windows in
+  this environment. Startup, shutdown, SMTC behaviour, WorkerW parenting,
+  click-through, tray recovery after an Explorer restart, global hotkeys, the
+  settings window, DPI changes and the updater's replacement/rollback path all
+  remain unverified at runtime. The new `windows-native` CI job is the first
+  automated step that actually loads the image on Windows; it does not replace
+  interactive testing.
+- **No genuine screenshot.** `docs/img/display.png` is artwork generated by
+  `scripts/brand.py` from the renderer's real constants, and `docs/preview.html` is
+  an interactive simulation. Both are labelled as such in the repository. No
+  screenshot from a running Windows build exists, and none is claimed.
+- **No performance measurement.** No CPU, memory, GDI-handle or startup-time
+  numbers are quoted, because none were measured. The only performance statements
+  in the README are design facts (background cache capped at ~2 MP, one composited
+  back buffer, 16 ms frame timer used only while the display is animating).
+- **Providers are untested live.** LRCLIB and lyrics.ovh availability, rate limits
+  and result quality were not exercised; no network call was made from the app.
+- **No browser accessibility audit.** The site's contrast, focus states, skip
+  link and reduced-motion handling were reviewed by reading the CSS, not with an
+  assistive-technology browser.
+- **Publication is a separate step.** A tag push runs the stable-release workflow
+  and Pages deploys from `main`. Neither was executed here; a local build is not
+  evidence that a release exists.
+
+## Deliberate design decisions
+
+- **Owner-drawn settings controls.** The alternative — native `BUTTON`/`STATIC`
+  controls with `WM_CTLCOLOR*` theming — renders unreadable text against a painted
+  dark background. Owner drawing costs ~900 lines and keeps every theme exact.
+- **Settings height derived from content.** A fixed 500 px client height could
+  never fit eleven LYRICS rows at a comfortable row height; deriving the height
+  from the row table keeps the two in step, and the geometry test enforces it.
+- **The fourth background is procedural.** Adding a fourth JPEG would have grown
+  the download for no new idea. The procedural scene reuses the existing cached
+  background path and scales to any resolution.
+- **Generated release facts.** Version, size and checksum are data about a
+  specific binary; making the site cite them by hand guarantees drift.
 
 ## Recommended Windows checks
 
-1. Run the executable on Windows 10 (1809+) and Windows 11. Exercise YouTube Music, another media player, paused-current and playing sessions, stopped/missing sessions, track changes, sleep/resume, and app exit during a slow lookup.
-2. Test wallpaper on/off, WorkerW recovery after Explorer restarts, icon/taskbar/context-menu use, ordinary foreground windows, mixed-DPI monitors, monitor removal, and the safe fallback. Confirm no focus theft or click interception.
-3. Test tray actions, global `Ctrl+Alt+W` / `Ctrl+Alt+L` hotkeys, wallpaper cycling/preferences, Enhanced LRC, local BOM-encoded lyric files, cache clearing, update consent/cancellation, successful replacement, and rollback.
-4. Capture genuine screenshots only from the running Windows application; keep the simulated preview clearly labeled.
+1. Run the executable on Windows 10 (1809+) and Windows 11. Exercise YouTube
+   Music, another media player, paused-current and playing sessions,
+   stopped/missing sessions, track changes, sleep/resume, and exiting during a
+   slow lookup.
+2. Open settings with `Ctrl+Alt+S`, `S` and the tray item on each theme; check the
+   dark title bar, that Tab/Shift+Tab reach every control with a visible focus
+   ring, that Escape closes, and that changing a value from the tray while the
+   dialog is open updates it.
+3. Test wallpaper on/off, WorkerW recovery after an Explorer restart, mixed-DPI
+   monitors, monitor removal and the safe fallback. Confirm no focus theft and no
+   click interception.
+4. Confirm the redistributed copy still verifies:
+   `python scripts/verify_build.py docs/downloads/YoutubeLyrics.exe`.
+5. Capture genuine screenshots only from the running Windows application and keep
+   the simulated preview labelled.
