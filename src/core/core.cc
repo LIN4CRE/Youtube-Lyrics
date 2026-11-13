@@ -1004,6 +1004,9 @@ TrackInfo clean_track(TrackInfo t, bool infer_artist_from_title) {
   }
   t.artist = strip_trailing_noise(squish(t.artist));
 
+  // Remember the un-cleaned title before the edition markers are stripped, so
+  // a live/remix/instrumental session is still identifiably that recording.
+  if (t.raw_title.empty()) t.raw_title = t.title;
   t.title = strip_trailing_noise(strip_noise_blocks(t.title));
   // YouTube often formats as "Artist - Title" in the plain page title.
   t.title = trim(t.title);
@@ -1023,11 +1026,92 @@ TrackInfo clean_track(TrackInfo t, bool infer_artist_from_title) {
   }
   if (t.title.empty()) t.title = trim(t.artist);
   t.album = squish(t.album);
+  t.raw_title = squish(t.raw_title);
   return t;
+}
+
+TrackVariant TrackInfo::variant() const {
+  return detect_variant(raw_title.empty() ? title : raw_title);
+}
+
+const char* track_variant_name(TrackVariant variant) {
+  switch (variant) {
+    case TrackVariant::Live: return "live";
+    case TrackVariant::Remix: return "remix";
+    case TrackVariant::Instrumental: return "instrumental";
+    case TrackVariant::Karaoke: return "karaoke";
+    case TrackVariant::Studio:
+    default: return "studio";
+  }
+}
+
+namespace {
+
+// Loudness/length hints that identify an edition without naming it.
+bool has_any(const std::string& haystack, std::initializer_list<const char*> needles) {
+  for (const char* needle : needles) {
+    if (haystack.find(needle) != std::string::npos) return true;
+  }
+  return false;
+}
+
+// Matches a whole word inside `text`, so "live" does not fire on "delivery".
+bool has_word(const std::string& text, const char* word) {
+  const size_t n = std::strlen(word);
+  if (n == 0) return false;
+  for (size_t pos = text.find(word); pos != std::string::npos;
+       pos = text.find(word, pos + 1)) {
+    const bool left_ok = pos == 0 ||
+                         !std::isalnum(static_cast<unsigned char>(text[pos - 1]));
+    const bool right_ok = pos + n >= text.size() ||
+                          !std::isalnum(static_cast<unsigned char>(text[pos + n]));
+    if (left_ok && right_ok) return true;
+  }
+  return false;
+}
+
+}  // namespace
+
+TrackVariant detect_variant(const std::string& raw_title) {
+  const std::string t = squish_and_lower(raw_title);
+  if (t.empty()) return TrackVariant::Studio;
+  // Karaoke is detected first: a karaoke backing track is often also labelled
+  // "instrumental version", and it must not be shown as the sung song.
+  if (has_word(t, "karaoke") || has_any(t, {"backing track", "sing along version"}))
+    return TrackVariant::Karaoke;
+  if (has_word(t, "instrumental") || has_any(t, {"no vocals", "off vocal",
+                                                "minus one", "\xe3\x82\xab\xe3\x83\xa9\xe3\x82\xaa\xe3\x82\xb1"}))
+    return TrackVariant::Instrumental;
+  if (has_any(t, {"remix", "remixed", "bootleg", "flip", "rework", "mashup",
+                  "medley", "nightcore", "sped up", "slowed", "reverb",
+                  "bass boosted", "club mix", "extended mix", "vip mix"}))
+    return TrackVariant::Remix;
+  if (has_word(t, "live") || has_any(t, {"in concert", "unplugged", "session",
+                                         "en vivo", "ao vivo", "acoustic version"}))
+    return TrackVariant::Live;
+  return TrackVariant::Studio;
+}
+
+bool variant_compatible(TrackVariant want, const std::string& candidate_title,
+                        const std::string& candidate_album) {
+  if (want == TrackVariant::Studio) return true;
+  // The provider's title is the primary marker; its album ("... (Live)") is a
+  // secondary one that LRCLIB often carries when the title is plain.
+  const TrackVariant title_variant = detect_variant(candidate_title);
+  if (title_variant == want) return true;
+  if (candidate_album.empty()) return false;
+  return detect_variant(candidate_album) == want;
 }
 
 std::string track_key(const TrackInfo& t) {
   std::string k = squish_and_lower(t.title) + "|" + squish_and_lower(t.artist);
+  const TrackVariant variant = t.variant();
+  if (variant != TrackVariant::Studio) {
+    k += "|";
+    k += track_variant_name(variant);
+  }
+  // Duration is rounded to whole seconds, so two players disagreeing by a few
+  // hundred milliseconds still share one cache entry and one lyric sheet.
   if (t.duration_s > 0) {
     char buf[24];
     std::snprintf(buf, sizeof(buf), "|%d", static_cast<int>(std::lround(t.duration_s)));
@@ -1058,6 +1142,11 @@ bool same_track(const TrackInfo& a, const TrackInfo& b) {
       std::fabs(a.duration_s - b.duration_s) > 8.0) {
     return false;
   }
+  // A live take, remix, instrumental or karaoke marker means a different
+  // recording. Two studio observations are always compatible.
+  const TrackVariant va = a.variant();
+  const TrackVariant vb = b.variant();
+  if (va != vb) return false;
   return true;
 }
 
@@ -1199,8 +1288,11 @@ const JValue* best_candidate(const JValue& search_results, const TrackInfo& want
     // gate: a query for one track must not be won by another track from the
     // same artist merely because its duration happens to match.
     const double duration = rec.get_num("duration", 0);
+    const std::string candidate_raw_title = rec.get_str("trackName");
+    const std::string candidate_album = rec.get_str("albumName");
     TrackInfo candidate_track = clean_track(
-        TrackInfo{rec.get_str("trackName"), rec.get_str("artistName"), "", duration},
+        TrackInfo{candidate_raw_title, rec.get_str("artistName"), candidate_album,
+                  duration, std::string()},
         false);
     const double title_sim = text_similarity(want.title, candidate_track.title);
     const double title_cont = token_containment(want.title, candidate_track.title);
@@ -1210,6 +1302,16 @@ const JValue* best_candidate(const JValue& search_results, const TrackInfo& want
     const double artist_cont = token_containment(want.artist, candidate_track.artist);
     const bool same_artist = artist_sim >= 0.65 || artist_cont >= 0.75;
     if (!want.artist.empty() && !candidate_track.artist.empty() && !same_artist) {
+      continue;
+    }
+    // Edition gate. A live take, remix, instrumental or karaoke backing track
+    // is a different recording with its own timings; showing the studio sheet
+    // for it is a wrong answer even when the title and artist agree. When a
+    // session is the plain studio song we stay permissive, because providers
+    // routinely omit edition markers.
+    const TrackVariant want_variant = want.variant();
+    if (want_variant != TrackVariant::Studio &&
+        !variant_compatible(want_variant, candidate_raw_title, candidate_album)) {
       continue;
     }
     // With no artist metadata, a title alone requires duration match to avoid same-title covers
@@ -1345,6 +1447,8 @@ bool parse_lrclib_payload(const std::string& body, const TrackInfo& want,
   out.title = rec->get_str("trackName", want.title.c_str());
   out.artist = rec->get_str("artistName", want.artist.c_str());
   out.album = rec->get_str("albumName");
+  const TrackVariant matched = detect_variant(out.title);
+  if (matched != TrackVariant::Studio) out.variant = track_variant_name(matched);
 
   std::string synced = rec->get_str("syncedLyrics");
   if (!trim(synced).empty()) {
