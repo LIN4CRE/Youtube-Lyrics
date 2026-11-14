@@ -2,6 +2,59 @@
 
 User-visible changes to Youtube-Lyrics are recorded here. The executable's version is shown in Windows file properties and in the About item in the tray menu.
 
+## 1.8.0 — unreleased
+
+Desktop mode is rebuilt to be what the program was meant to be: lyrics that are
+part of the desktop while music plays, and nothing at all when it does not.
+**This version has been compiled and its portable logic tested, but the new
+desktop layer has not been run on Windows.** It is not published as a stable
+release until `--desktop-test` and the manual checks in `AUDIT.md` have passed
+on a real PC.
+
+### Why desktop mode could look like an ordinary window
+
+- When Explorer's wallpaper window could not be found or would not take the
+  window, the app silently used a top-level window at the bottom of the window
+  stack and still called it desktop mode. That window sits in front of the
+  desktop icons, on one monitor, and is not a wallpaper. On current Windows 11
+  builds, where the desktop is laid out differently, the old lookup had no
+  window to find.
+- Even when attached, the app painted its own opaque scene over the whole
+  desktop permanently, including when nothing was playing.
+- Leaving desktop mode (`Ctrl+Alt+W`, `F11`, a double-click, the tray) was
+  saved, as it should be, but nothing said how to get back.
+
+### Changed
+
+- **A separate desktop layer.** Lyrics in desktop mode are drawn by a
+  transparent, click-through child window created inside Explorer's desktop,
+  beneath the icon layer. Three Explorer layouts are recognised, including the
+  one used by Windows 11 24H2 and later. The main window is no longer moved
+  into Explorer, so an Explorer restart cannot close the program.
+- **No pretend wallpaper.** If the layer cannot be attached, nothing is drawn.
+  The state is retried, reported in Settings, the tray menu and the diagnostic
+  report, and announced once from the tray.
+- **Your wallpaper stays.** The layer has per-pixel transparency; lyrics are
+  drawn over the existing Windows wallpaper with a soft dark edge for contrast.
+  The bundled scenes are now an option (*Cinematic scene instead of my
+  wallpaper*).
+- **Clean when idle.** With no music, or no lyrics for the song, the desktop
+  shows nothing from this program: no "looking for lyrics", hint, toast,
+  progress bar or status line. Lyrics fade in when ready, dim slightly while
+  paused (optional), and fade out on stop or when the session closes. A pause
+  longer than two minutes also fades out.
+- **Settings.** Three explicit modes (Desktop wallpaper / Full screen /
+  Ordinary window), a live attachment status line, a *Restore desktop mode* /
+  *Try attaching again* button, and switches for the artist/title caption,
+  pause dimming and the scene background.
+- **Recovery.** The layer is re-attached after Explorer restarts, and checked
+  again on display changes, DPI changes and resume from sleep.
+- **Diagnostics.** New `--desktop-test [file]` command and a *DESKTOP
+  INTEGRATION* section in the diagnostic report.
+
+Existing settings, caches, lyric files and sync corrections are untouched. A
+saved choice of window or full-screen mode is respected.
+
 ## 1.7.1 — 2026-11-14
 
 A second, independent review of the previous release: reliability fixes in the

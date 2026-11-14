@@ -80,7 +80,7 @@ rm -f "$TEMP_EXE"
   src/win/media.cc \
   src/win/lyrics.cc \
   src/win/update.cc \
-  src/win/diag.cc \
+  src/win/diag.cc src/win/desktop.cc \
   src/win/settings.cc \
   $RES_ARG \
   -lgdiplus -lgdi32 -luser32 -lole32 -luuid -lshell32 -lshlwapi -ldwmapi \
