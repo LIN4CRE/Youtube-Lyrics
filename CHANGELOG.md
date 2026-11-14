@@ -2,6 +2,33 @@
 
 User-visible changes to Youtube-Lyrics are recorded here. The executable's version is shown in Windows file properties and in the About item in the tray menu.
 
+## 1.6.0 — 2026-11-14
+
+A reliability release. It fixes full screen, the wrong-song lyric sheets, the
+unreadably small text and several ways the display could stop following the
+music. It was cross-compiled and its portable logic is tested, but it has not
+been run on a Windows machine as part of this release; see `AUDIT.md`.
+
+### Fixed
+
+- **Full screen did nothing.** With the desktop layer switched on (the default), `F11`, double-click and the settings tick changed a saved flag but not the window, so nothing visible happened. There are now three explicit modes, *on the desktop*, *full screen* and *window*, applied in one place. `F11`, double-click and the new global `Ctrl+Alt+F` go to full screen from any mode and back to a window; the tray and settings show the three as one choice.
+- **`Esc` made the display disappear.** It left full screen and then hid the window to the tray, which looked like a crash. `Esc` now closes help, then leaves full screen, and stops there. Hiding to the tray shows a one-time notice saying where it went.
+- **Long, wrong lyrics that played to the end.** A search result was accepted on a loose title match alone, so another song with a similar name (or a longer live cut) could be shown and timed against the wrong recording. A result now needs the exact title or a length within 3 s; anything over a minute out is refused; a 12–60 s difference shows the words without pretending to time them; a timed sheet must fit the track's length; and a lyrics.ovh answer is refused when its own credit line names another song or it is far longer than a song. Cached sheets from older versions are discarded.
+- **Titles lost their last word.** Clean-up removed words such as "Radio" or "Clean" from the end of a title ("Car Radio" was searched as "Car"). Only quality tags such as `4K` and `HD` are removed now.
+- **Tiny lyrics.** Text was shrunk until the longest line of the song fitted on one row, and untimed sheets until the whole song fitted the screen, down to 13 px. Size now comes from the window, long lines wrap, and there is a floor. One oversized setting from an older config is brought back into range once.
+- **Lyrics lost in the background.** Distant lines faded to near-invisible and the scene behind the text was not darkened. Lines keep a readable minimum opacity, every line has a soft shadow, the middle of the scene is dimmed slightly, and the line being sung is larger.
+- **A new song opening on its last lines.** Browsers change the title before the playback position, so a new track briefly reported the end of the previous one. The position is now counted from when the track appeared until the player reports a fresh one.
+- **The display stopping after a while.** The media helper could wait for ever on a player that never answered; it was restarted after 12 s of silence even while PowerShell was still starting on a slow machine, so it could loop without ever running; and its script was only written once per run. Calls are bounded, start-up gets 45 s, and the script is checked on every start. A paused tab in another app no longer replaces the song being listened to, and players that report no "last updated" time no longer freeze the lyrics.
+- **Stutter when the desktop layer is unavailable.** Attaching to it was retried every two seconds for ever, blocking the display each time. It is tried five times and then once a minute.
+- **Failed lookups stayed failed.** A network or provider error is retried up to three times; a lookup for a song that has already been skipped is abandoned instead of holding up the next one.
+- **The settings window was tiny on high-DPI screens**, and the mouse pointer could vanish over it while the display was full screen.
+- **Smaller things:** seeking jumps to the new line instead of scrolling through the whole song; a second launch brings up the running copy (and opens Settings when it is on the desktop); the log file is rotated at 1 MB; *Reset display settings* also resets the mode and scene; the text-size button in Settings wraps round instead of stopping.
+
+### Changed
+
+- **The download page serves its own file.** The button used GitHub's "latest release" link, which was still handing out 1.4.0. It now points at the copy published with the site, so the page, its checksum and the file always match.
+- An application manifest declares Windows 10/11 support and per-monitor DPI awareness.
+
 ## 1.5.0 — 2026-11-12
 
 A usability and polish release. Everything that was already working still works

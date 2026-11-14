@@ -53,7 +53,7 @@ def render(page: Path, text: str, f: dict[str, str]) -> str:
         f'<p class="file-note"><strong>YoutubeLyrics.exe</strong> · 64-bit · about '
         f'{f["kib"]} KiB ({f["bytes"]} bytes) · portable Windows x64 build</p>\n'
         f'          <p class="file-note">No installer, account, or administrator rights '
-        f'required. Public download hosted by GitHub.</p>\n'
+        f'required. The download is served from this site.</p>\n'
         f'          <p class="file-note">SHA-256: <code>{f["sha256"]}</code> · '
         f'<a href="downloads/YoutubeLyrics.exe.sha256">checksum file</a></p>'
     )

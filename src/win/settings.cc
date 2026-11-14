@@ -508,11 +508,12 @@ void refresh_values(SettingsWindow& s) {
   set_label(kIdFont, buf);
   set_checked(kIdWipe, cfg.wipe);
   set_checked(kIdModeWallpaper, cfg.wallpaper);
-  set_checked(kIdFullscreen, !s.app->windowed);
-  set_checked(kIdTopmost, cfg.topmost && !(cfg.wallpaper && !s.app->windowed));
+  set_checked(kIdFullscreen, cfg.mode() == DisplayMode::Fullscreen);
+  set_checked(kIdTopmost, cfg.topmost && cfg.mode() != DisplayMode::Desktop);
   set_checked(kIdCover, cfg.cover);
-  static const wchar_t* kThemes[] = {L"Aurora", L"Ember", L"Mono", L"Midnight"};
-  set_label(kIdTheme, kThemes[(cfg.theme % 4 + 4) % 4]);
+  // The renderer owns the theme table; a second list here was in a different
+  // order and named every theme wrongly.
+  set_label(kIdTheme, theme_name(cfg.theme));
   // Ask the renderer for the name: the settings window previously carried its
   // own list in a different order and its own modulus, so it showed the wrong
   // scene and could not represent a fourth choice at all.
@@ -525,7 +526,7 @@ void refresh_values(SettingsWindow& s) {
   set_label(kIdDim, buf);
   // Always-on-top cannot apply to the desktop layer; disable rather than offer
   // a switch that silently does nothing.
-  set_enabled(kIdTopmost, !(cfg.wallpaper && !s.app->windowed));
+  set_enabled(kIdTopmost, cfg.mode() != DisplayMode::Desktop);
   set_enabled(kIdInterval, cfg.wallpaper_auto_rotate);
   InvalidateRect(s.hwnd, nullptr, TRUE);
 }
@@ -722,7 +723,7 @@ void handle_command(SettingsWindow& s, int id) {
       refresh_values(s);
       return;
     case kIdFont:
-      app.set_font_scale(app.cfg.font_scale >= 1.45 ? 0.85
+      app.set_font_scale(app.cfg.font_scale >= 1.55 ? 0.70
                                                     : app.cfg.font_scale + 0.1);
       refresh_values(s);
       return;
@@ -760,24 +761,20 @@ void handle_command(SettingsWindow& s, int id) {
     case kIdModeWallpaper: {
       const bool want = find_control(kIdModeWallpaper)->checked;
       if (want == app.cfg.wallpaper) return;
-      app.cfg.wallpaper = want;
-      if (want) {
-        app.cfg.fullscreen = true;
-        app.cfg.topmost = false;
-      }
-      app.apply_display_mode();
+      // Off returns to the foreground mode that was last used.
+      app.set_display_mode(want ? DisplayMode::Desktop
+                                : (app.cfg.fullscreen ? DisplayMode::Fullscreen
+                                                      : DisplayMode::Window));
       refresh_values(s);
       repaint_all(s);
       return;
     }
     case kIdFullscreen: {
+      // Always does what it says: ticking it brings the lyrics to the front in
+      // full screen (leaving the desktop layer if necessary); clearing it gives
+      // an ordinary window. It used to be ignored while the desktop layer was on.
       const bool want = find_control(kIdFullscreen)->checked;
-      // Full screen is meaningless while the lyrics live on the desktop.
-      if (app.cfg.wallpaper) {
-        set_checked(kIdFullscreen, !app.windowed);
-        return;
-      }
-      if (want != !app.windowed) app.toggle_fullscreen();
+      app.set_display_mode(want ? DisplayMode::Fullscreen : DisplayMode::Window);
       refresh_values(s);
       repaint_all(s);
       return;
@@ -832,7 +829,11 @@ void handle_command(SettingsWindow& s, int id) {
       app.cfg.wallpaper_interval_minutes = defaults.wallpaper_interval_minutes;
       app.cfg.wallpaper_random_start = defaults.wallpaper_random_start;
       app.view.bg_theme = -1;
+      app.cfg.wallpaper_index = defaults.wallpaper_index;
+      app.cfg.fullscreen = defaults.fullscreen;
+      app.view.bg_wallpaper = -1;
       app.view.wallpaper_changed_at = app.now_ms();
+      app.set_display_mode(DisplayMode::Desktop);
       app.apply_display_mode();
       refresh_values(s);
       repaint_all(s);
@@ -872,8 +873,8 @@ LRESULT CALLBACK settings_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
       add_control(s, kIdOpenLyrics, ControlKind::Button, L"Open lyrics folder");
       add_control(s, kIdClearCache, ControlKind::Button, L"Clear lyrics cache");
       add_control(s, kIdCheckUpdates, ControlKind::Button, L"Check for updates");
-      add_control(s, kIdModeWallpaper, ControlKind::Check, L"Lyrics on the desktop");
-      add_control(s, kIdFullscreen, ControlKind::Check, L"Full screen");
+      add_control(s, kIdModeWallpaper, ControlKind::Check, L"On the desktop (behind windows)");
+      add_control(s, kIdFullscreen, ControlKind::Check, L"Full screen (in front)");
       add_control(s, kIdTopmost, ControlKind::Check, L"Above other windows");
       add_control(s, kIdCover, ControlKind::Check, L"Album-art tint");
       add_control(s, kIdTheme, ControlKind::Button, L"Midnight");
@@ -991,6 +992,30 @@ void settings_show(App& app) {
     app.show_toast("Could not open the settings window.");
     return;
   }
+
+  // The dialog is laid out in fixed pixels. On a high-DPI display that made it
+  // a small window with small text, so it is created in a DPI-virtualised
+  // context: Windows scales the whole window to the monitor, and GDI text in
+  // it stays sharp. Unavailable before Windows 10 1607, where this is skipped.
+  using SetThreadContextFn = HANDLE(WINAPI*)(HANDLE);
+  SetThreadContextFn set_thread_context = nullptr;
+  if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
+    set_thread_context = reinterpret_cast<SetThreadContextFn>(reinterpret_cast<void*>(
+        GetProcAddress(user32, "SetThreadDpiAwarenessContext")));
+  }
+  HANDLE previous_context = nullptr;
+  if (set_thread_context) {
+    previous_context = set_thread_context(reinterpret_cast<HANDLE>(-5));  // UNAWARE_GDISCALED
+    if (!previous_context)
+      previous_context = set_thread_context(reinterpret_cast<HANDLE>(-1));  // UNAWARE
+  }
+  struct RestoreContext {
+    SetThreadContextFn fn;
+    HANDLE previous;
+    ~RestoreContext() {
+      if (fn && previous) fn(previous);
+    }
+  } restore_context{set_thread_context, previous_context};
 
   const int width = 820;
   // +39 for a standard caption and border, so the client matches the table.

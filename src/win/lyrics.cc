@@ -5,6 +5,7 @@
 #include <winhttp.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -30,6 +31,18 @@ void cancel_active_http_request() {
     g_active_http_request = nullptr;
   }
   // Closing the active WinHTTP request cancels an in-flight synchronous call.
+  if (request) WinHttpCloseHandle(request);
+}
+
+// Aborts the request in flight without latching the "shutting down" flag: used
+// when a newer track supersedes the lookup that is currently on the wire.
+void abort_active_http_request() {
+  HINTERNET request = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(g_http_handle_mu);
+    request = g_active_http_request;
+    g_active_http_request = nullptr;
+  }
   if (request) WinHttpCloseHandle(request);
 }
 
@@ -217,6 +230,10 @@ struct Job {
 };
 
 std::mutex g_job_mu;
+// Newest request id handed to lyrics_enqueue(). A lookup that is no longer the
+// newest gives up between provider attempts instead of holding the only worker
+// for a song that has already finished.
+std::atomic<int> g_latest_job_id{0};
 bool g_has_job = false;
 int g_job_id = 0;
 TrackInfo g_job_track;
@@ -251,7 +268,7 @@ std::string cache_path(const TrackInfo& t) {
 }
 
 std::string serialize_lyrics(const Lyrics& l) {
-  std::string s = "YTLY1\n";
+  std::string s = "YTLY2\n";
   s += "title=" + l.title + "\n";
   s += "artist=" + l.artist + "\n";
   s += "album=" + l.album + "\n";
@@ -267,7 +284,9 @@ std::string serialize_lyrics(const Lyrics& l) {
 }
 
 bool parse_cache(const std::string& data, Lyrics& out) {
-  if (!starts_with(data, "YTLY1\n")) return false;
+  // "YTLY1" sheets were stored by builds whose matching accepted look-alike
+  // titles and other cuts of a song; they are ignored and fetched again.
+  if (!starts_with(data, "YTLY2\n")) return false;
   out = Lyrics();
   size_t pos = 6;
   bool synced = false;
@@ -404,7 +423,7 @@ bool try_fetch(const TrackInfo& track, const std::string& url, Lyrics& out,
                std::string& why) {
   int status = 0;
   std::string err;
-  std::string body = http_get(utf8_to_wide(url), 12000, &status, &err);
+  std::string body = http_get(utf8_to_wide(url), 8000, &status, &err);
   if (!err.empty()) {
     why = "Lyrics provider transport error: " + err;
     logf("lyrics: %s -> transport error: %s", url.c_str(), err.c_str());
@@ -423,7 +442,7 @@ bool try_fetch(const TrackInfo& track, const std::string& url, Lyrics& out,
   }
   Lyrics parsed;
   const bool ovh = url.find("lyrics.ovh") != std::string::npos;
-  const bool ok = ovh ? parse_lyrics_ovh_payload(body, parsed)
+  const bool ok = ovh ? parse_lyrics_ovh_payload(body, track, parsed)
                       : parse_lrclib_payload(body, track, parsed);
   if (!ok || parsed.empty()) {
     why = "No usable lyrics in the database for this track.";
@@ -455,11 +474,14 @@ bool sheet_fits(const Lyrics& sheet, const TrackInfo& want) {
       !variant_compatible(want.variant(), sheet.title, sheet.album)) {
     return false;
   }
+  // Timestamps that run past the end of this recording are for another cut.
+  if (!lyrics_fit_duration(sheet, want.duration_s)) return false;
   return true;
 }
 
-LyricsState do_lookup(const TrackInfo& track, bool force, Lyrics& out,
-                      std::string& msg) {
+LyricsState do_lookup(const TrackInfo& track, bool force, int job_id, Lyrics& out,
+                      std::string& msg, bool& cacheable) {
+  cacheable = true;
   // A lyric sheet the user dropped in by hand always wins, including over a
   // previously cached automatic result.
   {
@@ -482,9 +504,15 @@ LyricsState do_lookup(const TrackInfo& track, bool force, Lyrics& out,
     }
     Lyrics l;
     if (!cached.empty() && parse_cache(cached, l)) {
-      logf("lyrics: cache hit for %s", track_key(track).c_str());
-      out = l;
-      return LyricsState::Ready;
+      // A cached sheet is re-checked against the track it is about to be shown
+      // for; a stale or mismatched entry is dropped rather than trusted.
+      if (sheet_fits(l, track)) {
+        logf("lyrics: cache hit for %s", track_key(track).c_str());
+        out = l;
+        return LyricsState::Ready;
+      }
+      logf("lyrics: cached sheet no longer fits %s; refetching",
+           track_key(track).c_str());
     }
   }
 
@@ -495,10 +523,16 @@ LyricsState do_lookup(const TrackInfo& track, bool force, Lyrics& out,
   bool lrclib_blocked = false;
   // A bounded chain: the split-title fallback can generate dozens of queries,
   // and a track that needs more than this many is not going to be found.
-  constexpr int kMaxProviderAttempts = 14;
+  constexpr int kMaxProviderAttempts = 12;
+  // ...and a wall-clock budget, so one slow provider cannot keep the display
+  // on "Looking for lyrics" for minutes.
+  const ULONGLONG started = GetTickCount64();
+  constexpr ULONGLONG kLookupBudgetMs = 30000;
 
   auto attempt = [&](const TrackInfo& t, const std::string& url, const char* name) {
     if (http_cancel_requested()) return false;
+    if (g_latest_job_id.load() != job_id) return false;  // superseded
+    if (GetTickCount64() - started > kLookupBudgetMs) return false;
     const bool lrclib = url.find("lrclib.net") != std::string::npos;
     if (lrclib && lrclib_blocked) return false;
     if (tried >= kMaxProviderAttempts) return false;
@@ -517,7 +551,7 @@ LyricsState do_lookup(const TrackInfo& track, bool force, Lyrics& out,
     // fall back to "not found" rather than putting the studio sheet under a
     // live recording.
     if (!sheet_fits(l, track)) {
-      logf("lyrics: rejected '%s' from %s (edition mismatch)",
+      logf("lyrics: rejected '%s' from %s (wrong edition or length)",
            track_label(TrackInfo{l.title, l.artist, l.album, 0, std::string()}).c_str(),
            name);
       why = "No lyrics found for this recording.";
@@ -611,6 +645,11 @@ LyricsState do_lookup(const TrackInfo& track, bool force, Lyrics& out,
     return LyricsState::Ready;
   }
 
+  // An untimed sheet found while LRCLIB was unreachable (or the time budget ran
+  // out) is shown, but not cached: the next play should try for timed lyrics
+  // again instead of being stuck with the fallback for ever.
+  if (lrclib_blocked || GetTickCount64() - started > kLookupBudgetMs)
+    cacheable = false;
   if (!plain_fallback.empty()) {
     plain_lyrics.providers_tried = tried;
     if (plain_lyrics.title.empty()) plain_lyrics.title = track.title;
@@ -642,10 +681,14 @@ DWORD WINAPI thread_main(LPVOID) {
 
     Lyrics lyr;
     std::string msg;
-    LyricsState state = do_lookup(job.track, job.force, lyr, msg);
+    bool cacheable = true;
+    LyricsState state = do_lookup(job.track, job.force, job.id, lyr, msg, cacheable);
+    // A newer track arrived while this one was on the wire: its result would
+    // be ignored by the UI anyway, and must not be cached from a cut-short run.
+    if (g_latest_job_id.load() != job.id) continue;
     // Manual overrides are re-read on every lookup; never leave a stale copy
     // in the automatic cache if the user later removes that local file.
-    if (state == LyricsState::Ready && lyr.source != "local file") {
+    if (state == LyricsState::Ready && cacheable && lyr.source != "local file") {
       std::lock_guard<std::mutex> lock(g_cache_mu);
       if (ensure_cache_dir())
         write_file_atomic(cache_path(job.track), serialize_lyrics(lyr));
@@ -676,7 +719,10 @@ void lyrics_enqueue(const TrackInfo& track, int req_id, bool force) {
     g_job_track = track;
     g_job_force = force;
     g_has_job = true;
+    g_latest_job_id.store(req_id);
   }
+  // Whatever is on the wire is for an older track now.
+  abort_active_http_request();
   if (g_wake) SetEvent(g_wake);
 }
 

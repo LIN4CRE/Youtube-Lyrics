@@ -202,8 +202,20 @@ std::string track_label(const TrackInfo& t);
 
 // Picks the best record out of an LRCLIB /api/search array for `want`.
 // Returns nullptr when nothing is remotely close. `*score` gets the score.
+// `*timing_trusted` is false when the words are very likely right but the
+// record is for a cut of a different length, so its timestamps must not drive
+// the display (the caller shows it as untimed text instead).
 const JValue* best_candidate(const JValue& search_results, const TrackInfo& want,
-                             double* score = nullptr);
+                             double* score = nullptr,
+                             bool* timing_trusted = nullptr);
+
+// True when two titles are the same words, ignoring case and punctuation.
+bool same_title_text(const std::string& a, const std::string& b);
+
+// False when a timed sheet cannot belong to a recording of `duration_s`: its
+// last line starts after the track ends, or it stops in the first third.
+// Always true for untimed text and unknown durations.
+bool lyrics_fit_duration(const Lyrics& lyrics, double duration_s);
 
 // Reads a lyrics payload: either an LRCLIB /api/get object or the best entry of
 // a /api/search array. Returns false when no usable lyrics were found.
@@ -211,6 +223,10 @@ bool parse_lrclib_payload(const std::string& body, const TrackInfo& want, Lyrics
 
 // lyrics.ovh /api/v1/{artist}/{title}: {"lyrics":"..."}. Always untimed.
 bool parse_lyrics_ovh_payload(const std::string& body, Lyrics& out);
+// As above, but also rejects an answer whose own credit line names a different
+// song than `want`, and strips that credit line from the text.
+bool parse_lyrics_ovh_payload(const std::string& body, const TrackInfo& want,
+                              Lyrics& out);
 
 // Plain (untimed) lyrics are turned into evenly paced display rows for the
 // fallback view. `lead_ms` delays the first row and `per_line_ms` paces them.

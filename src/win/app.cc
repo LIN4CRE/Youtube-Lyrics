@@ -35,6 +35,7 @@ const UINT_PTR kFrameTimer = 1;
 const int kHotkeyToggle = 1;
 const int kHotkeyWallpaper = 2;
 const int kHotkeySettings = 3;
+const int kHotkeyFullscreen = 4;
 const UINT kTrayId = 1;
 const UINT WM_APP_SHOW_EXISTING = WM_APP + 9;
 
@@ -51,6 +52,12 @@ struct PosTracker {
   int64_t last_change = 0;
   int64_t free_anchor = 0;
   bool free_running = false;
+  // Timeline bookkeeping, see MediaState::timeline_stamp.
+  int64_t stamp = 0;             // stamp of the most recent observation
+  int64_t inherited_stamp = 0;   // stamp the previous track left behind
+  int64_t inherited_reported = 0;  // ...and the position it left behind
+  bool await_fresh = false;      // new track whose timeline is not written yet
+  int64_t track_started_at = 0;  // tick when this track was first seen
 };
 PosTracker g_pos;
 
@@ -212,15 +219,78 @@ void reset_document(App& app) {
   app.active = -1;
 }
 
-void update_position_tracker(App& app, const MediaState& observed) {
+// Commits one media observation as the playback clock. `first_seen_at` is the
+// tick at which a newly confirmed track was first reported (0 otherwise).
+void update_position_tracker(App& app, const MediaState& observed,
+                             int64_t first_seen_at = 0) {
   const bool was_playing = app.active_media.playing;
+  const bool had_track = !g_pos.key.empty();
+  const bool new_recording = !had_track || !same_track(g_pos.track, app.active_track);
+  const int64_t previous_stamp = g_pos.stamp;
+  const int64_t previous_reported = g_pos.reported;
+
   app.active_media = observed;
   app.active_media.track = app.active_track;
-  const std::string key = track_key(app.active_track);
+  g_pos.key = track_key(app.active_track);
+  g_pos.track = app.active_track;
+  g_pos.stamp = observed.timeline_stamp;
+
+  if (new_recording) {
+    g_pos.reported = observed.pos_ms;
+    g_pos.last_change = observed.at_ms;
+    g_pos.free_anchor = observed.at_ms;
+    g_pos.free_running = false;
+    g_pos.track_started_at = first_seen_at > 0 ? first_seen_at : observed.at_ms;
+    g_pos.inherited_stamp = previous_stamp;
+    // Browsers change the title first and rewrite the timeline a moment (or
+    // many seconds) later. Until they do, the reported position is the *end
+    // of the previous song*, which is what made a new track open on its last
+    // lines. A timeline that still carries the old stamp, or that the helper
+    // flagged as older than the track, is not this track's position.
+    // "Inherited" also requires the position to be impossible for a track that
+    // has only just appeared; a player that rewrites the timeline *before* the
+    // title is already reporting the right thing.
+    const int64_t existed_for = std::max<int64_t>(0, observed.at_ms - g_pos.track_started_at);
+    const bool implausible = observed.pos_ms > existed_for + 4000;
+    const bool same_stamp = observed.timeline_stamp != 0 &&
+                            observed.timeline_stamp == previous_stamp;
+    const bool same_raw = observed.timeline_stamp == 0 &&
+                          std::llabs(observed.pos_ms - previous_reported) <= 150;
+    g_pos.inherited_reported = observed.pos_ms;
+    g_pos.await_fresh = had_track && observed.playing &&
+                        (observed.timeline_stale ||
+                         (implausible && (same_stamp || same_raw)));
+    if (g_pos.await_fresh)
+      logf("media: timeline not updated for the new track yet; counting from 0");
+  }
+
+  if (g_pos.await_fresh) {
+    const bool fresh =
+        !observed.timeline_stale &&
+        (observed.timeline_stamp != 0
+             ? observed.timeline_stamp != g_pos.inherited_stamp
+             : std::llabs(observed.pos_ms - g_pos.inherited_reported) > 150);
+    if (fresh) {
+      g_pos.await_fresh = false;
+      g_pos.reported = observed.pos_ms;
+      g_pos.last_change = observed.at_ms;
+    } else {
+      // Count from the moment the track appeared. Paused before any real
+      // timeline arrived: hold what has elapsed so far.
+      const int64_t elapsed = std::max<int64_t>(0, observed.at_ms - g_pos.track_started_at);
+      if (observed.playing) {
+        app.active_media.pos_ms = 0;
+        app.active_media.at_ms = g_pos.track_started_at;
+      } else {
+        app.active_media.pos_ms = was_playing ? elapsed : 0;
+        app.active_media.at_ms = observed.at_ms;
+        g_pos.await_fresh = false;
+      }
+      return;
+    }
+  }
 
   if (!observed.playing) {
-    g_pos.key = key;
-    g_pos.track = app.active_track;
     g_pos.reported = observed.pos_ms;
     g_pos.last_change = observed.at_ms;
     g_pos.free_anchor = observed.at_ms;
@@ -229,17 +299,12 @@ void update_position_tracker(App& app, const MediaState& observed) {
   }
 
   const bool resumed = !was_playing;
-  const bool new_recording = g_pos.key.empty() || !same_track(g_pos.track, app.active_track);
   if (new_recording || resumed) {
-    g_pos.key = key;
-    g_pos.track = app.active_track;
     g_pos.reported = observed.pos_ms;
     g_pos.last_change = observed.at_ms;
     g_pos.free_anchor = observed.at_ms;
     g_pos.free_running = false;
   } else {
-    g_pos.key = key;
-    g_pos.track = app.active_track;
     if (std::llabs(observed.pos_ms - g_pos.reported) > 150) {
       g_pos.reported = observed.pos_ms;
       g_pos.last_change = observed.at_ms;
@@ -255,6 +320,13 @@ void update_position_tracker(App& app, const MediaState& observed) {
   if (g_pos.free_running) {
     app.active_media.at_ms = g_pos.free_anchor;
     app.active_media.pos_ms = 0;
+  } else if (observed.timeline_stamp == 0) {
+    // No "last updated" time from this player, so the helper cannot
+    // extrapolate for us. Run the clock from when the reported value last
+    // moved; re-anchoring to an unchanged value on every poll froze the
+    // lyrics in place.
+    app.active_media.pos_ms = g_pos.reported;
+    app.active_media.at_ms = g_pos.last_change;
   }
 }
 
@@ -265,6 +337,15 @@ void on_media(App& app) {
     m = app.media;
   }
   if (!m.raw.empty()) app.helper_heard = true;
+  // A different app's *paused* session is not what is being listened to. It is
+  // handled exactly like "no session": the current sheet freezes and then
+  // clears, instead of being replaced by a song from hours ago.
+  if (m.have && !m.playing && !app.active_track.title.empty() &&
+      !app.active_media.app.empty() &&
+      to_lower_ascii(m.app) != to_lower_ascii(app.active_media.app) &&
+      !same_track(app.active_track, m.track)) {
+    m.have = false;
+  }
   app.session_present = m.have && !m.track.title.empty();
   const int64_t now = m.at_ms > 0 ? m.at_ms : app.now_ms();
 
@@ -306,11 +387,31 @@ void on_media(App& app) {
           app.pending_track = m.track;
       }
 
-      const bool confirmed = app.pending_seen >= 2 &&
-                             now - app.pending_since >= 300;
+      bool confirmed = app.pending_seen >= 2 && now - app.pending_since >= 300;
+      const bool replacing = !app.active_track.title.empty();
+      // A session that is merely *paused* never replaces what is on screen
+      // unless it is the same player (pause, then skip). A different app that
+      // happens to be paused in the background is not what the user is
+      // listening to.
+      if (confirmed && replacing && !m.playing && !app.active_media.app.empty() &&
+          to_lower_ascii(m.app) != to_lower_ascii(app.active_media.app)) {
+        confirmed = false;  // unreachable after the filter above; kept as a guard
+      }
+      // The title changes before the duration does. A "new" song that still
+      // has exactly the old song's length is given a moment to settle, so the
+      // lookup is not made (and cached) with the wrong duration.
+      if (confirmed && replacing && m.playing && m.duration_s > 5 &&
+          std::fabs(m.duration_s - app.active_media.duration_s) < 0.35 &&
+          now - app.pending_since < 1500) {
+        confirmed = false;
+      }
       if (confirmed) {
         TrackInfo next = app.pending_track;
         if (next.title.empty()) next = m.track;
+        // The newest poll carries the settled duration and album.
+        if (m.track.duration_s > 0) next.duration_s = m.track.duration_s;
+        if (next.album.empty()) next.album = m.track.album;
+        const int64_t first_seen_at = app.pending_since;
         const bool different = app.active_track.title.empty() ||
                                !same_track(app.active_track, next);
         app.active_track = clean_track(next, false);
@@ -325,12 +426,14 @@ void on_media(App& app) {
           reset_document(app);
           app.lstate = LyricsState::Loading;
           app.lmessage.clear();
+          app.lyrics_retries = 0;
+          app.lyrics_retry_at = 0;
           logf("media: now playing '%s' (%s) dur=%.1f",
                track_label(app.active_track).c_str(), app.current_key.c_str(),
                m.duration_s);
           lyrics_enqueue(app.active_track, ++app.lyrics_req_id, false);
         }
-        update_position_tracker(app, m);
+        update_position_tracker(app, m, different ? first_seen_at : 0);
       }
     }
   } else {
@@ -363,6 +466,7 @@ void on_media(App& app) {
       ++app.lyrics_req_id;  // ignore any lookup that finishes after the session
       app.lstate = LyricsState::Idle;
       app.lmessage.clear();
+      app.lyrics_retry_at = 0;
       reset_document(app);
       g_pos = PosTracker();
     }
@@ -387,6 +491,12 @@ void on_lyrics(App& app) {
   } else {
     app.lyrics = Lyrics();
     logf("lyrics: lookup failed: %s", msg.c_str());
+    const bool transient = msg.find("transport error") != std::string::npos ||
+                           msg.find("unavailable") != std::string::npos;
+    if (transient && app.lyrics_retries < 3) {
+      ++app.lyrics_retries;
+      app.lyrics_retry_at = app.now_ms() + 12000 * app.lyrics_retries;
+    }
   }
   app.rebuild_layout(true);
   app.view.scroll = scroll_target(app, app.view.lay_h > 0
@@ -440,51 +550,182 @@ HWND find_desktop_host() {
 
 void apply_desktop_mode(App& app);
 
-void apply_fullscreen(App& app) {
-  if (!app.hwnd) return;
-  MONITORINFO mi{};
-  mi.cbSize = sizeof(mi);
-  HMONITOR mon = MonitorFromWindow(app.hwnd, MONITOR_DEFAULTTONEAREST);
-  GetMonitorInfoW(mon, &mi);
+void enable_dark_titlebar(HWND hwnd) {
+  BOOL dark = TRUE;
+  DwmSetWindowAttribute(hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark,
+                        sizeof(dark));
+}
 
-  if (!app.windowed) {
-    SetWindowLongPtrW(app.hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
-    if (app.cfg.wallpaper) {
-      // Do not briefly raise a wallpaper window above ordinary applications.
-      SetWindowPos(app.hwnd, nullptr, 0, 0, 0, 0,
-                   SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE |
-                       SWP_NOZORDER | SWP_NOMOVE | SWP_NOSIZE);
+bool is_desktop_styled(HWND hwnd) {
+  const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+  const LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+  return (style & WS_CHILD) != 0 || (ex & (WS_EX_TRANSPARENT | WS_EX_NOACTIVATE)) != 0;
+}
+
+// Remembers where the ordinary window is, so leaving and re-entering window
+// mode (and the next launch) puts it back where the user left it.
+void remember_window_rect(App& app) {
+  if (!app.hwnd || !IsWindowVisible(app.hwnd)) return;
+  const LONG_PTR style = GetWindowLongPtrW(app.hwnd, GWL_STYLE);
+  if ((style & WS_CHILD) != 0 || (style & WS_CAPTION) != WS_CAPTION) return;
+  RECT r{};
+  if (IsZoomed(app.hwnd) || IsIconic(app.hwnd)) {
+    WINDOWPLACEMENT placement{};
+    placement.length = sizeof(placement);
+    if (!GetWindowPlacement(app.hwnd, &placement)) return;
+    r = placement.rcNormalPosition;
+  } else if (!GetWindowRect(app.hwnd, &r)) {
+    return;
+  }
+  if (r.right - r.left < 200 || r.bottom - r.top < 150) return;
+  app.windowed_rect = r;
+  app.cfg.win_x = r.left;
+  app.cfg.win_y = r.top;
+  app.cfg.win_w = r.right - r.left;
+  app.cfg.win_h = r.bottom - r.top;
+}
+
+// A window rectangle that is guaranteed to be reachable: sensible size, and on
+// a monitor that still exists.
+RECT usable_window_rect(const App& app, const MONITORINFO& fallback_monitor) {
+  RECT r = app.windowed_rect;
+  bool ok = r.right - r.left >= 480 && r.bottom - r.top >= 320;
+  if (ok) {
+    HMONITOR monitor = MonitorFromRect(&r, MONITOR_DEFAULTTONULL);
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (!monitor || !GetMonitorInfoW(monitor, &info)) {
+      ok = false;
     } else {
-      SetWindowPos(app.hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
-                   mi.rcMonitor.right - mi.rcMonitor.left,
-                   mi.rcMonitor.bottom - mi.rcMonitor.top,
-                   SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
+      // The title bar must be on screen, or the window cannot be moved back.
+      RECT title{r.left + 40, r.top, r.right - 40, r.top + 30};
+      RECT overlap{};
+      if (!IntersectRect(&overlap, &title, &info.rcWork)) ok = false;
+      // A "window" that fills the monitor is a leftover full-screen rectangle.
+      if (r.right - r.left >= info.rcMonitor.right - info.rcMonitor.left &&
+          r.bottom - r.top >= info.rcMonitor.bottom - info.rcMonitor.top) {
+        ok = false;
+      }
     }
-  } else {
-    SetWindowLongPtrW(app.hwnd, GWL_STYLE,
-                      WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN);
-    RECT r = app.windowed_rect;
-    const int mon_w = mi.rcMonitor.right - mi.rcMonitor.left;
-    const int mon_h = mi.rcMonitor.bottom - mi.rcMonitor.top;
-    if (r.right - r.left < 400 || r.bottom - r.top < 320 ||
-        r.right - r.left >= mon_w * 9 / 10 ||
-        r.bottom - r.top >= mon_h * 9 / 10) {
-      int w = mon_w * 3 / 4;
-      int h = mon_h * 3 / 4;
-      r = {mi.rcMonitor.left + (mon_w - w) / 2,
-           mi.rcMonitor.top + (mon_h - h) / 2,
-           mi.rcMonitor.left + (mon_w - w) / 2 + w,
-           mi.rcMonitor.top + (mon_h - h) / 2 + h};
+  }
+  if (ok) return r;
+  const RECT& work = fallback_monitor.rcWork;
+  const int mon_w = work.right - work.left;
+  const int mon_h = work.bottom - work.top;
+  const int w = std::max(480, mon_w * 3 / 4);
+  const int h = std::max(320, mon_h * 3 / 4);
+  const int x = work.left + (mon_w - w) / 2;
+  const int y = work.top + (mon_h - h) / 2;
+  return RECT{x, y, x + w, y + h};
+}
+
+// Puts the window into the mode the config asks for. This is the only function
+// that restyles, re-parents or repositions the main window.
+//
+// The two foreground modes used to be reached by patching styles on top of
+// whatever the desktop layer had left behind (WS_CHILD of Explorer's WorkerW,
+// click-through, never activated, no taskbar button). Leaving the desktop layer
+// is now explicit and happens first, so "Full screen" really is a focused
+// window in front of everything else.
+void apply_window_mode(App& app, bool activate = true) {
+  if (!app.hwnd) return;
+  const DisplayMode mode = app.cfg.mode();
+  const bool was_desktop = is_desktop_styled(app.hwnd);
+  if (!was_desktop) remember_window_rect(app);
+  app.windowed = mode == DisplayMode::Window;
+  app.hidden_to_tray = false;
+  // A cursor hidden by full-screen idling must not stay hidden elsewhere.
+  app.view.cursor_hidden = false;
+  app.view.last_mouse = app.now_ms();
+
+  if (mode == DisplayMode::Desktop) {
+    if (!was_desktop) {
+      // Hide while the taskbar button and the styles change, so the window is
+      // never seen half-converted in front of other applications.
+      ShowWindow(app.hwnd, SW_HIDE);
+      if (IsZoomed(app.hwnd) || IsIconic(app.hwnd)) {
+        WINDOWPLACEMENT placement{};
+        placement.length = sizeof(placement);
+        if (GetWindowPlacement(app.hwnd, &placement)) {
+          placement.showCmd = SW_HIDE;
+          placement.flags = 0;
+          SetWindowPlacement(app.hwnd, &placement);
+        }
+      }
+      SetWindowLongPtrW(app.hwnd, GWL_STYLE, WS_POPUP | WS_CLIPCHILDREN);
     }
-    SetWindowPos(app.hwnd, HWND_TOP, r.left, r.top, r.right - r.left,
-                 r.bottom - r.top, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+    apply_desktop_mode(app);
+    ShowWindow(app.hwnd, SW_SHOWNOACTIVATE);
+    invalidate_window(app);
+    return;
   }
 
-  app.hidden_to_tray = false;
-  apply_desktop_mode(app);
-  const bool desktop = app.cfg.wallpaper && !app.windowed;
-  ShowWindow(app.hwnd, desktop ? SW_SHOWNOACTIVATE : SW_SHOW);
-  if (!desktop) SetForegroundWindow(app.hwnd);
+  // Where should a foreground window appear? Coming from the desktop layer the
+  // window spans every monitor, so use the one the user is working on.
+  HMONITOR monitor = nullptr;
+  if (was_desktop) {
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTOPRIMARY);
+  } else {
+    monitor = MonitorFromWindow(app.hwnd, MONITOR_DEFAULTTONEAREST);
+  }
+  MONITORINFO mi{};
+  mi.cbSize = sizeof(mi);
+  if (!GetMonitorInfoW(monitor, &mi)) {
+    mi.rcMonitor = RECT{0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
+    mi.rcWork = mi.rcMonitor;
+  }
+
+  if (was_desktop) {
+    ShowWindow(app.hwnd, SW_HIDE);
+    if (GetParent(app.hwnd) != nullptr ||
+        (GetWindowLongPtrW(app.hwnd, GWL_STYLE) & WS_CHILD) != 0) {
+      SetLastError(ERROR_SUCCESS);
+      if (!SetParent(app.hwnd, nullptr) && GetLastError() != ERROR_SUCCESS) {
+        logf("window: could not detach from the desktop layer (error %lu)",
+             static_cast<unsigned long>(GetLastError()));
+      }
+    }
+    app.desktop_parented = false;
+    app.desktop_host = nullptr;
+  } else if (IsZoomed(app.hwnd) || IsIconic(app.hwnd)) {
+    // Styles are about to change; a maximised or minimised state would be
+    // carried into the new mode and leave the window the wrong size.
+    ShowWindow(app.hwnd, SW_RESTORE);
+  }
+
+  LONG_PTR ex = GetWindowLongPtrW(app.hwnd, GWL_EXSTYLE);
+  ex &= ~(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TRANSPARENT);
+  ex |= WS_EX_APPWINDOW;
+  SetWindowLongPtrW(app.hwnd, GWL_EXSTYLE, ex);
+
+  const LONG_PTR visible = GetWindowLongPtrW(app.hwnd, GWL_STYLE) & WS_VISIBLE;
+  const HWND order = app.cfg.topmost ? HWND_TOPMOST : HWND_NOTOPMOST;
+  if (mode == DisplayMode::Fullscreen) {
+    SetWindowLongPtrW(app.hwnd, GWL_STYLE, WS_POPUP | WS_CLIPCHILDREN | visible);
+    SetWindowPos(app.hwnd, order, mi.rcMonitor.left, mi.rcMonitor.top,
+                 mi.rcMonitor.right - mi.rcMonitor.left,
+                 mi.rcMonitor.bottom - mi.rcMonitor.top,
+                 SWP_FRAMECHANGED | SWP_NOACTIVATE);
+  } else {
+    const RECT r = usable_window_rect(app, mi);
+    SetWindowLongPtrW(app.hwnd, GWL_STYLE,
+                      WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | visible);
+    SetWindowPos(app.hwnd, order, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                 SWP_FRAMECHANGED | SWP_NOACTIVATE);
+    enable_dark_titlebar(app.hwnd);
+  }
+
+  ShowWindow(app.hwnd, activate ? SW_SHOW : SW_SHOWNA);
+  if (activate) {
+    // A foreground mode must actually take the keyboard, or F11/Esc and every
+    // other key would go to whichever app was in front before.
+    SetWindowPos(app.hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+    SetForegroundWindow(app.hwnd);
+    SetFocus(app.hwnd);
+  }
+  logf("window: %s", mode == DisplayMode::Fullscreen ? "full screen" : "window");
   invalidate_window(app);
 }
 
@@ -493,9 +734,12 @@ void apply_fullscreen(App& app) {
 // of the top-level z-order; the tray toggle remains available either way.
 void apply_desktop_mode(App& app) {
   if (!app.hwnd) return;
-  const bool want_wallpaper = app.cfg.wallpaper && !app.windowed;
-
-  if (want_wallpaper) {
+  if (app.cfg.mode() != DisplayMode::Desktop) return;
+  if (app.hidden_to_tray) return;  // hidden on purpose; do not re-show it
+  // This runs again on every retry and display change; only a change of
+  // outcome is worth a log line.
+  static int last_logged = -1;
+  {
     // A wallpaper is never topmost. WorkerW is a shell-owned desktop surface
     // below SHELLDLL_DefView (the icon view), not a transparent foreground HWND.
     if (!app.desktop_parented) {
@@ -554,8 +798,11 @@ void apply_desktop_mode(App& app) {
       // dimensions, so Explorer's virtual-desktop surface can cover all displays.
       SetWindowPos(app.hwnd, HWND_BOTTOM, 0, 0, r.right - r.left, r.bottom - r.top,
                    SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
-      logf("window: attached to desktop WorkerW %p (%ldx%ld)", app.desktop_host,
-           r.right - r.left, r.bottom - r.top);
+      if (last_logged != 1) {
+        last_logged = 1;
+        logf("window: attached to desktop WorkerW %p (%ldx%ld)", app.desktop_host,
+             r.right - r.left, r.bottom - r.top);
+      }
     } else {
       // Safe fallback: transparent bottom-z-order layer so desktop icons are NOT obscured.
       LONG_PTR style = GetWindowLongPtrW(app.hwnd, GWL_STYLE);
@@ -571,68 +818,24 @@ void apply_desktop_mode(App& app) {
                    mi.rcMonitor.right - mi.rcMonitor.left,
                    mi.rcMonitor.bottom - mi.rcMonitor.top,
                    SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
-      logf("window: WorkerW unavailable; safe transparent bottom-z-order fallback");
-    }
-  } else {
-    if (app.desktop_parented) {
-      SetLastError(ERROR_SUCCESS);
-      const HWND previous = SetParent(app.hwnd, nullptr);
-      const DWORD error = GetLastError();
-      if (!previous && error != ERROR_SUCCESS) {
-        logf("window: could not detach from WorkerW (error %lu)",
-             static_cast<unsigned long>(error));
-        return;
+      if (last_logged != 0) {
+        last_logged = 0;
+        logf("window: WorkerW unavailable; safe transparent bottom-z-order fallback");
       }
-      app.desktop_parented = false;
-      app.desktop_host = nullptr;
-    }
-
-    LONG_PTR ex = GetWindowLongPtrW(app.hwnd, GWL_EXSTYLE);
-    ex &= ~(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED |
-            WS_EX_TRANSPARENT);
-    ex |= WS_EX_APPWINDOW;
-    SetWindowLongPtrW(app.hwnd, GWL_EXSTYLE, ex);
-
-    if (!app.windowed) {
-      MONITORINFO mi{};
-      mi.cbSize = sizeof(mi);
-      GetMonitorInfoW(MonitorFromWindow(app.hwnd, MONITOR_DEFAULTTONEAREST), &mi);
-      LONG_PTR style = GetWindowLongPtrW(app.hwnd, GWL_STYLE);
-      style &= ~WS_CHILD;
-      style |= WS_POPUP | WS_VISIBLE;
-      SetWindowLongPtrW(app.hwnd, GWL_STYLE, style);
-      SetWindowPos(app.hwnd, app.cfg.topmost ? HWND_TOPMOST : HWND_TOP,
-                   mi.rcMonitor.left, mi.rcMonitor.top,
-                   mi.rcMonitor.right - mi.rcMonitor.left,
-                   mi.rcMonitor.bottom - mi.rcMonitor.top,
-                   SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
-    } else {
-      LONG_PTR style = GetWindowLongPtrW(app.hwnd, GWL_STYLE);
-      style &= ~(WS_CHILD | WS_POPUP);
-      style |= WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN;
-      SetWindowLongPtrW(app.hwnd, GWL_STYLE, style);
-      SetWindowPos(app.hwnd, HWND_TOP, 0, 0, 0, 0,
-                   SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED | SWP_NOACTIVATE);
     }
   }
-  logf("window: desktop mode %s", want_wallpaper ? "on" : "off");
 }
 
 void toggle_wallpaper_mode(App& app) {
-  app.cfg.wallpaper = !app.cfg.wallpaper;
+  // Off returns to whichever foreground mode was last used.
   if (app.cfg.wallpaper) {
-    // Wallpaper mode is a full-screen desktop surface, not a floating window.
-    app.windowed = false;
-    app.cfg.fullscreen = true;
-    app.cfg.topmost = false;
+    app.set_display_mode(app.cfg.fullscreen ? DisplayMode::Fullscreen
+                                            : DisplayMode::Window);
+    app.show_toast("Desktop background off");
+  } else {
+    app.set_display_mode(DisplayMode::Desktop);
+    app.show_toast("Desktop background on \xC2\xB7 Ctrl+Alt+W to switch off");
   }
-  app.cfg.save();
-  apply_fullscreen(app);
-  app.rebuild_layout(true);
-  settings_refresh(app);
-  app.show_toast(app.cfg.wallpaper
-                     ? "Desktop background on · Ctrl+Alt+W to switch off"
-                     : "Desktop background off");
 }
 
 // --------------------------------------------------------------- tray plumbing
@@ -650,6 +853,20 @@ void add_tray_icon(App& app) {
   Shell_NotifyIconW(NIM_ADD, &nid);
   nid.uVersion = NOTIFYICON_VERSION_4;
   Shell_NotifyIconW(NIM_SETVERSION, &nid);
+}
+
+// A balloon from the tray icon. Used for things that must be said while the
+// main window is hidden and therefore cannot show a toast of its own.
+void notify_from_tray(App& app, const wchar_t* title, const wchar_t* text) {
+  NOTIFYICONDATAW nid{};
+  nid.cbSize = sizeof(nid);
+  nid.hWnd = app.hwnd;
+  nid.uID = kTrayId;
+  nid.uFlags = NIF_INFO;
+  nid.dwInfoFlags = NIIF_INFO | NIIF_NOSOUND;
+  wcsncpy_s(nid.szInfoTitle, title, _TRUNCATE);
+  wcsncpy_s(nid.szInfo, text, _TRUNCATE);
+  Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
 
 void remove_tray_icon(App& app) {
@@ -768,12 +985,25 @@ void show_tray_menu(App& app) {
   AppendMenuW(menu, MF_STRING, 1, L"Show lyrics\tCtrl+Alt+L");
   AppendMenuW(menu, MF_STRING, 19, L"Settings…\tCtrl+Alt+S");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-  AppendMenuW(menu, MF_STRING | (app.windowed ? 0 : MF_CHECKED), 2,
-              L"Full screen\tF11");
-  AppendMenuW(menu, MF_STRING | (app.cfg.wallpaper ? MF_CHECKED : 0), 7,
-              L"Desktop background (clicks pass through)\tW");
-  AppendMenuW(menu, MF_STRING | (app.cfg.topmost ? MF_CHECKED : 0), 3,
-              L"Always on top\tA");
+  // The three display modes are one choice, shown as one radio group.
+  const DisplayMode mode = app.cfg.mode();
+  AppendMenuW(menu, MF_STRING, 7,
+              L"On the desktop, behind windows\tCtrl+Alt+W");
+  AppendMenuW(menu, MF_STRING, 2, L"Full screen, in front\tCtrl+Alt+F");
+  AppendMenuW(menu, MF_STRING, 20, L"In a window");
+  CheckMenuRadioItem(menu, 0, 0, 0, MF_BYCOMMAND);
+  const UINT mode_item = mode == DisplayMode::Desktop
+                             ? 7u
+                             : (mode == DisplayMode::Fullscreen ? 2u : 20u);
+  MENUITEMINFOW radio{};
+  radio.cbSize = sizeof(radio);
+  radio.fMask = MIIM_FTYPE | MIIM_STATE;
+  radio.fType = MFT_RADIOCHECK;
+  radio.fState = MFS_CHECKED;
+  SetMenuItemInfoW(menu, mode_item, FALSE, &radio);
+  AppendMenuW(menu, MF_STRING | (app.cfg.topmost ? MF_CHECKED : 0) |
+                        (mode == DisplayMode::Desktop ? MF_GRAYED : 0),
+              3, L"Always on top\tA");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, 13, L"Next cinematic wallpaper\tB");
   AppendMenuW(menu, MF_STRING | (app.cfg.wallpaper_auto_rotate ? MF_CHECKED : 0),
@@ -814,13 +1044,16 @@ void show_tray_menu(App& app) {
       app.show_window();
       break;
     case 2:
-      app.toggle_fullscreen();
+      app.set_display_mode(DisplayMode::Fullscreen);
+      break;
+    case 20:
+      app.set_display_mode(DisplayMode::Window);
       break;
     case 3:
       app.toggle_topmost();
       break;
     case 7:
-      toggle_wallpaper_mode(app);
+      app.set_display_mode(DisplayMode::Desktop);
       break;
     case 13:
       app.next_wallpaper();
@@ -921,10 +1154,27 @@ void on_timer(App& app) {
     return;
   }
 
+  // Explorer creates its WorkerW lazily, so a failed attach is retried: quickly
+  // at first, then rarely. Each attempt blocks this thread for up to a second,
+  // and retrying every two seconds for ever made the whole display stutter on
+  // machines where the desktop layer is simply not available.
   static int64_t last_workerw_retry = 0;
-  if (app.cfg.wallpaper && !app.windowed && !app.desktop_parented && now - last_workerw_retry > 2000) {
+  static int workerw_attempts = 0;
+  if (app.cfg.mode() != DisplayMode::Desktop || app.desktop_parented) {
+    workerw_attempts = 0;
+  } else if (now - last_workerw_retry > (workerw_attempts < 5 ? 2000 : 60000)) {
     last_workerw_retry = now;
+    ++workerw_attempts;
     apply_desktop_mode(app);
+  }
+
+  // Automatic second try after a network or provider failure.
+  if (app.lyrics_retry_at != 0 && now >= app.lyrics_retry_at) {
+    app.lyrics_retry_at = 0;
+    if (app.lstate == LyricsState::NotFound && !app.active_track.title.empty()) {
+      logf("lyrics: retrying after a transient failure");
+      app.request_lyrics(app.active_track, true);
+    }
   }
 
   // Rotation only advances while the desktop layer is actually in use. A timer
@@ -954,6 +1204,11 @@ void on_timer(App& app) {
   const int new_active = (app.lyrics.synced || app.timing_estimated)
                              ? active_index(app.disp, pos)
                              : -1;
+  // A seek or a new sheet moves the active line a long way; gliding there
+  // through dozens of lines looks broken, so jump instead.
+  const bool jumped = new_active != app.active &&
+                      (app.active < 0 || new_active < 0 ||
+                       std::abs(new_active - app.active) > 6);
   if (new_active != app.active) app.active = new_active;
 
   // Smooth line-to-line activity transitions. A wrapped line is several display
@@ -992,23 +1247,34 @@ void on_timer(App& app) {
   }
 
   const double target = scroll_target(app, h);
+  if (jumped && std::fabs(target - app.view.scroll) > h * 0.9) app.view.scroll = target;
   app.view.scroll = ease_towards(app.view.scroll, target, dt, 0.13);
   if (std::fabs(target - app.view.scroll) < 0.4) app.view.scroll = target;
   const bool animating = std::fabs(target - app.view.scroll) > 0.4 || line_animating;
   const bool lyric_progress = app.session_present && app.active_media.playing &&
                               app.lstate == LyricsState::Ready;
+  // The idle "listening" ring breathes, and the start-up hint fades out.
+  const bool idle_pulse = app.cfg.mode() != DisplayMode::Desktop &&
+                          app.lstate == LyricsState::Idle;
   const bool rapid_frame = animating || app.view.toast_until > now || lyric_progress;
 
   // Static wallpaper idles at one cheap timer tick per second; only lyric motion,
   // progress, or a toast requests a repaint. Automatic rotation is independent.
-  SetTimer(app.hwnd, kFrameTimer, rapid_frame ? 16u : 1000u, nullptr);
-  if (rapid_frame) invalidate_window(app);
+  const bool minimized = IsIconic(app.hwnd) != 0;
+  const UINT frame_interval = minimized ? 1000u : (rapid_frame ? 16u : (idle_pulse ? 66u : 500u));
+  SetTimer(app.hwnd, kFrameTimer, frame_interval, nullptr);
+  if (!minimized) invalidate_window(app);
 
-  if (!app.view.cursor_hidden && !app.windowed && !app.cfg.wallpaper &&
+  // Hide the pointer over an idle full-screen display. This is done through
+  // WM_SETCURSOR rather than ShowCursor(), whose counter is per-thread and so
+  // also hid the pointer over the settings window.
+  if (!app.view.cursor_hidden && app.cfg.mode() == DisplayMode::Fullscreen &&
       !app.view.help && now - app.view.last_mouse > 2500 &&
-      app.view.last_mouse > 0) {
-    ShowCursor(FALSE);
+      app.view.last_mouse > 0 && GetForegroundWindow() == app.hwnd) {
     app.view.cursor_hidden = true;
+    POINT pt{};
+    GetCursorPos(&pt);
+    if (WindowFromPoint(pt) == app.hwnd) SetCursor(nullptr);
   }
 }
 
@@ -1031,7 +1297,14 @@ void logf(const char* fmt, ...) {
   std::vfprintf(f, fmt, args);
   va_end(args);
   std::fputc('\n', f);
+  const long size = std::ftell(f);
   std::fclose(f);
+  // Keep the log bounded: one previous file, about a megabyte each.
+  if (size > (1 << 20)) {
+    const std::wstring current = widen(path);
+    const std::wstring previous = widen(path + ".old");
+    MoveFileExW(current.c_str(), previous.c_str(), MOVEFILE_REPLACE_EXISTING);
+  }
 }
 
 std::string exe_dir() {
@@ -1193,6 +1466,14 @@ void Config::load() {
       wallpaper_interval_minutes = static_cast<int>(std::max<int64_t>(5, std::min<int64_t>(240, integer)));
     else if (k == "wallpaper_dim" && parse_config_integer(v, &integer))
       wallpaper_dim = static_cast<int>(std::max<int64_t>(0, std::min<int64_t>(60, integer)));
+    else if (k == "win_x" && parse_config_integer(v, &integer))
+      win_x = static_cast<int>(std::max<int64_t>(-100000, std::min<int64_t>(100000, integer)));
+    else if (k == "win_y" && parse_config_integer(v, &integer))
+      win_y = static_cast<int>(std::max<int64_t>(-100000, std::min<int64_t>(100000, integer)));
+    else if (k == "win_w" && parse_config_integer(v, &integer))
+      win_w = static_cast<int>(std::max<int64_t>(0, std::min<int64_t>(100000, integer)));
+    else if (k == "win_h" && parse_config_integer(v, &integer))
+      win_h = static_cast<int>(std::max<int64_t>(0, std::min<int64_t>(100000, integer)));
   }
   if (!std::isfinite(font_scale) || font_scale < 0.55 || font_scale > 2.2)
     font_scale = 1.0;
@@ -1201,7 +1482,15 @@ void Config::load() {
   if (wallpaper_interval_minutes != 15 && wallpaper_interval_minutes != 30 &&
       wallpaper_interval_minutes != 60) wallpaper_interval_minutes = 30;
   if (wallpaper_dim < 0 || wallpaper_dim > 60) wallpaper_dim = 12;
-  if (wallpaper) fullscreen = true;
+  // Settings files written before 1.6.0 predate the larger default text and
+  // the "wrap instead of shrink" layout. A size someone turned up to fight the
+  // old tiny text would now be enormous, so it is brought back into range once.
+  if (version < 2) {
+    if (font_scale > 1.3) font_scale = 1.3;
+    version = 2;
+  }
+  // `fullscreen` is deliberately left alone while `wallpaper` is on: it is the
+  // foreground mode to return to when the desktop layer is switched off.
 }
 void Config::save() const {
   char buf[512];
@@ -1220,6 +1509,10 @@ void Config::save() const {
   data += std::string("wallpaper_auto_rotate=") + (wallpaper_auto_rotate ? "1" : "0") + "\n";
   data += "wallpaper_interval_minutes=" + std::to_string(wallpaper_interval_minutes) + "\n";
   data += "wallpaper_dim=" + std::to_string(wallpaper_dim) + "\n";
+  data += "win_x=" + std::to_string(win_x) + "\n";
+  data += "win_y=" + std::to_string(win_y) + "\n";
+  data += "win_w=" + std::to_string(win_w) + "\n";
+  data += "win_h=" + std::to_string(win_h) + "\n";
   write_file_atomic(appdata_dir() + "\\config.ini", data);
 }
 
@@ -1300,23 +1593,39 @@ void App::relayout_if_needed() { rebuild_layout(false); }
 
 void App::invalidate() { invalidate_window(*this); }
 
-void App::toggle_fullscreen() {
-  windowed = !windowed;
-  cfg.fullscreen = !windowed;
+void App::set_display_mode(DisplayMode mode) {
+  const DisplayMode before = cfg.mode();
+  cfg.wallpaper = mode == DisplayMode::Desktop;
+  if (mode == DisplayMode::Fullscreen) cfg.fullscreen = true;
+  if (mode == DisplayMode::Window) cfg.fullscreen = false;
+  if (cfg.wallpaper) cfg.topmost = false;
+  apply_window_mode(*this);
   cfg.save();
-  apply_fullscreen(*this);
   rebuild_layout(true);
   settings_refresh(*this);
+  // Settings stays usable on top of a full-screen display it just created.
+  if (settings_window && IsWindow(settings_window) && IsWindowVisible(settings_window)) {
+    SetWindowPos(settings_window, HWND_TOP, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    SetForegroundWindow(settings_window);
+  }
+  if (before != mode) {
+    // Says where the lyrics went, and how to get out again: the desktop layer
+    // has no keyboard, so its way back has to be a global shortcut.
+    view.hint_until = now_ms() + 6000;
+  }
+  invalidate();
 }
 
-void App::apply_display_mode() {
-  windowed = !cfg.fullscreen && !cfg.wallpaper;
-  if (cfg.wallpaper) cfg.topmost = false;
-  cfg.save();
-  apply_fullscreen(*this);
-  rebuild_layout(true);
-  settings_refresh(*this);
+// F11, double-click and Ctrl+Alt+F: full screen from anywhere, and back to a
+// window from full screen. It no longer "toggles" into the desktop layer,
+// which looked exactly like the window vanishing.
+void App::toggle_fullscreen() {
+  set_display_mode(cfg.mode() == DisplayMode::Fullscreen ? DisplayMode::Window
+                                                         : DisplayMode::Fullscreen);
 }
+
+void App::apply_display_mode() { set_display_mode(cfg.mode()); }
 
 void App::open_settings() { settings_show(*this); }
 
@@ -1443,21 +1752,23 @@ void App::toggle_help() {
 void App::show_window() {
   hidden_to_tray = false;
   if (hwnd) SetTimer(hwnd, kFrameTimer, 16, nullptr);
-  apply_desktop_mode(*this);
-  const bool desktop = cfg.wallpaper && !windowed;
-  ShowWindow(hwnd, desktop ? SW_SHOWNOACTIVATE : SW_SHOW);
-  if (!desktop) SetForegroundWindow(hwnd);
-  if (!windowed && !desktop_parented && !cfg.wallpaper) {
-    SetWindowPos(hwnd, cfg.topmost ? HWND_TOPMOST : HWND_TOP, 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-  }
+  apply_window_mode(*this);
   invalidate();
 }
 
 void App::hide_to_tray() {
+  if (cfg.mode() != DisplayMode::Desktop) remember_window_rect(*this);
   hidden_to_tray = true;
   ShowWindow(hwnd, SW_HIDE);
-  show_toast("Hidden — Ctrl+Alt+L brings it back");
+  cfg.save();
+  // The window is gone, so a toast inside it would never be seen. Say it from
+  // the tray instead, once per run: closing the window does not quit the app.
+  if (!tray_hint_shown && !quitting) {
+    tray_hint_shown = true;
+    notify_from_tray(*this, L"Youtube-Lyrics is still running",
+                     L"Click this icon or press Ctrl+Alt+L to bring the lyrics "
+                     L"back. Right-click it for settings or to quit.");
+  }
 }
 
 void App::create_tray_icon() { add_tray_icon(*this); }
@@ -1472,6 +1783,8 @@ void App::destroy_view_resources() {
     view.mem_dc = nullptr;
     view.mem_bmp = nullptr;
   }
+  delete view.bg_cached;
+  view.bg_cached = nullptr;
   delete view.bg;
   view.bg = nullptr;
   delete view.art;
@@ -1529,10 +1842,12 @@ void handle_key(App& app, WPARAM key) {
       app.toggle_fullscreen();
       break;
     case VK_ESCAPE:
-      if (!app.windowed) {
-        app.toggle_fullscreen();
-      } else {
-        app.hide_to_tray();
+      // Esc closes the innermost thing: the help panel, then full screen. It
+      // never hides an ordinary window: that looked like the app had died.
+      if (app.view.help) {
+        app.toggle_help();
+      } else if (app.cfg.mode() == DisplayMode::Fullscreen) {
+        app.set_display_mode(DisplayMode::Window);
       }
       break;
     case 'A':
@@ -1618,11 +1933,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     // WorkerW parenting is gone with it.
     logf("shell: TaskbarCreated, restoring tray icon and desktop layer");
     add_tray_icon(*app);
-    if (app->cfg.wallpaper && !app->windowed) {
+    if (app->cfg.mode() == DisplayMode::Desktop) {
       app->desktop_parented = false;
       app->desktop_host = nullptr;
       apply_desktop_mode(*app);
     }
+    return 0;
+  }
+  if (msg == WM_APP_SHOW_EXISTING) {
+    // A second launch. Handled here rather than in the message loop so it also
+    // arrives while a menu or message box is running its own loop.
+    app->quitting = false;
+    app->show_window();
+    // On the desktop layer there is nothing to bring to the front, and a
+    // launch that appears to do nothing is the worst answer: open Settings.
+    if (app->cfg.mode() == DisplayMode::Desktop) app->open_settings();
     return 0;
   }
 
@@ -1647,9 +1972,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_SIZE:
       if (wParam != SIZE_MINIMIZED) {
         app->on_resize(LOWORD(lParam), HIWORD(lParam));
+        // Keep the active line where it was instead of sliding to it again.
+        app->view.scroll = scroll_target(*app, HIWORD(lParam));
         invalidate_window(*app);
       }
       return 0;
+    case WM_EXITSIZEMOVE:
+      if (app->cfg.mode() == DisplayMode::Window) {
+        remember_window_rect(*app);
+        app->cfg.save();
+      }
+      return 0;
+    case WM_SETCURSOR:
+      if (LOWORD(lParam) == HTCLIENT && app->view.cursor_hidden &&
+          app->cfg.mode() == DisplayMode::Fullscreen) {
+        SetCursor(nullptr);
+        return TRUE;
+      }
+      break;
     case WM_DPICHANGED: {
       const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
       if (suggested && app->windowed) {
@@ -1657,7 +1997,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                      suggested->right - suggested->left,
                      suggested->bottom - suggested->top,
                      SWP_NOZORDER | SWP_NOACTIVATE);
-      } else if (!app->windowed && app->cfg.wallpaper) {
+      } else if (app->cfg.mode() == DisplayMode::Desktop) {
         apply_desktop_mode(*app);
       } else if (!app->windowed) {
         HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
@@ -1676,10 +2016,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       return 0;
     }
     case WM_DISPLAYCHANGE:
-      if (!app->windowed && app->cfg.wallpaper) {
+      if (app->hidden_to_tray) {
+        // Nothing to move while hidden; show_window() re-applies the mode.
+      } else if (app->cfg.mode() == DisplayMode::Desktop) {
         apply_desktop_mode(*app);
-      } else if (!app->windowed) {
-        HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
+      } else if (app->cfg.mode() == DisplayMode::Fullscreen) {
+        // Stay on the monitor the window is on; only snap to its new size.
+        HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         MONITORINFO info{};
         info.cbSize = sizeof(info);
         if (GetMonitorInfoW(monitor, &info)) {
@@ -1687,6 +2030,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                        info.rcMonitor.right - info.rcMonitor.left,
                        info.rcMonitor.bottom - info.rcMonitor.top,
                        SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+      } else if (!IsIconic(hwnd) && !IsZoomed(hwnd)) {
+        // A monitor was unplugged: make sure the window is still reachable.
+        RECT now_rect{};
+        GetWindowRect(hwnd, &now_rect);
+        app->windowed_rect = now_rect;
+        MONITORINFO info{};
+        info.cbSize = sizeof(info);
+        GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &info);
+        const RECT r = usable_window_rect(*app, info);
+        if (!EqualRect(&r, &now_rect)) {
+          SetWindowPos(hwnd, nullptr, r.left, r.top, r.right - r.left,
+                       r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
         }
       }
       app->view.bg_theme = -1;
@@ -1782,6 +2138,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
       } else if (wParam == kHotkeyWallpaper) {
         toggle_wallpaper_mode(*app);
+      } else if (wParam == kHotkeyFullscreen) {
+        // Works from the desktop layer too, where the window has no keyboard.
+        if (app->hidden_to_tray) app->hidden_to_tray = false;
+        app->toggle_fullscreen();
       } else if (wParam == kHotkeySettings) {
         app->open_settings();
       }
@@ -1799,13 +2159,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       }
       return 0;
     }
-    case WM_MOUSEMOVE:
+    case WM_MOUSEMOVE: {
+      // Windows also sends this when a window appears under a still pointer;
+      // only real movement counts as the user being there.
+      const POINT pt{static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam))};
+      if (pt.x == app->view.last_mouse_pt.x && pt.y == app->view.last_mouse_pt.y) return 0;
+      app->view.last_mouse_pt = pt;
       app->view.last_mouse = app->now_ms();
       if (app->view.cursor_hidden) {
-        ShowCursor(TRUE);
         app->view.cursor_hidden = false;
+        SetCursor(LoadCursorW(nullptr, IDC_ARROW));
       }
       return 0;
+    }
     case WM_KEYDOWN:
       handle_key(*app, wParam);
       return 0;
@@ -1816,6 +2182,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       if ((wParam & 0xFFF0) == SC_KEYMENU) return 0;  // no menu beep on Alt
       break;
     case WM_CLOSE:
+      if (app->cfg.mode() == DisplayMode::Window) remember_window_rect(*app);
       if (!app->quitting) {
         app->hide_to_tray();
         return 0;
@@ -1826,6 +2193,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       UnregisterHotKey(hwnd, kHotkeyToggle);
       UnregisterHotKey(hwnd, kHotkeyWallpaper);
       UnregisterHotKey(hwnd, kHotkeySettings);
+      UnregisterHotKey(hwnd, kHotkeyFullscreen);
       close_update_progress(*app);
       update_stop();
       remove_tray_icon(*app);
@@ -1882,12 +2250,6 @@ void set_dpi_awareness() {
   SetProcessDPIAware();
 }
 
-void enable_dark_titlebar(HWND hwnd) {
-  BOOL dark = TRUE;
-  DwmSetWindowAttribute(hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark,
-                        sizeof(dark));
-}
-
 }  // namespace
 
 }  // namespace ytl
@@ -1925,6 +2287,11 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR command_line, int show_cm
   if (app.single_instance && GetLastError() == ERROR_ALREADY_EXISTS) {
     HWND existing = FindWindowW(kClassName, nullptr);
     if (existing) {
+      // Hand our right to take the foreground to the running copy, so it can
+      // actually come to the front instead of flashing in the taskbar.
+      DWORD running_pid = 0;
+      GetWindowThreadProcessId(existing, &running_pid);
+      if (running_pid) AllowSetForegroundWindow(running_pid);
       // The running instance decides whether it may activate; in wallpaper mode
       // a second launch must not pull it above the desktop layer.
       PostMessageW(existing, WM_APP_SHOW_EXISTING, 0, 0);
@@ -1968,21 +2335,21 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR command_line, int show_cm
   mi.cbSize = sizeof(mi);
   GetMonitorInfoW(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY), &mi);
 
-  app.windowed = !app.cfg.fullscreen;
-  DWORD style = app.windowed ? (WS_OVERLAPPEDWINDOW | WS_VISIBLE)
-                             : (WS_POPUP | WS_VISIBLE);
   int win_w = mi.rcMonitor.right - mi.rcMonitor.left;
   int win_h = mi.rcMonitor.bottom - mi.rcMonitor.top;
+  if (win_w < 320 || win_h < 240) {
+    win_w = std::max(320, GetSystemMetrics(SM_CXSCREEN));
+    win_h = std::max(240, GetSystemMetrics(SM_CYSCREEN));
+  }
 
-  // In desktop-background mode the window is a tool window that never activates,
-  // so it can live behind everything without appearing in alt-tab.
-  const DWORD ex_style = app.cfg.wallpaper
-                             ? (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
-                             : WS_EX_APPWINDOW;
+  // Created hidden as a plain pop-up; apply_window_mode() then gives it the
+  // styles, parent, size and focus of whichever mode was saved. Doing that in
+  // one place is what keeps start-up and a later mode switch identical.
+  app.windowed = app.cfg.mode() == DisplayMode::Window;
   app.hwnd = CreateWindowExW(
-      ex_style, kClassName, kAppName, style, mi.rcMonitor.left,
-      mi.rcMonitor.top, app.windowed ? win_w * 3 / 4 : win_w,
-      app.windowed ? win_h * 3 / 4 : win_h, nullptr, nullptr, inst, nullptr);
+      WS_EX_APPWINDOW, kClassName, kAppName, WS_POPUP | WS_CLIPCHILDREN,
+      mi.rcMonitor.left, mi.rcMonitor.top, win_w, win_h, nullptr, nullptr, inst,
+      nullptr);
   if (!app.hwnd) {
     MessageBoxW(nullptr, L"Could not create the lyrics window.", kAppName,
                 MB_ICONERROR);
@@ -1991,18 +2358,13 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR command_line, int show_cm
   }
 
   enable_dark_titlebar(app.hwnd);
-  GetWindowRect(app.hwnd, &app.windowed_rect);
-  if (app.windowed) {
-    int w = win_w * 3 / 4, h = win_h * 3 / 4;
-    SetWindowPos(app.hwnd, nullptr, mi.rcMonitor.left + (win_w - w) / 2,
-                 mi.rcMonitor.top + (win_h - h) / 2, w, h, SWP_NOZORDER);
+  if (app.cfg.win_w >= 480 && app.cfg.win_h >= 320) {
+    app.windowed_rect = RECT{app.cfg.win_x, app.cfg.win_y,
+                             app.cfg.win_x + app.cfg.win_w,
+                             app.cfg.win_y + app.cfg.win_h};
   }
-
-  apply_desktop_mode(app);
-  const bool desktop_start = app.cfg.wallpaper && !app.windowed;
-  ShowWindow(app.hwnd, desktop_start ? SW_SHOWNOACTIVATE : SW_SHOWNORMAL);
+  apply_window_mode(app);
   UpdateWindow(app.hwnd);
-  if (!desktop_start) SetForegroundWindow(app.hwnd);
 
   app.taskbar_created_msg = RegisterWindowMessageW(L"TaskbarCreated");
   app.create_tray_icon();
@@ -2020,11 +2382,18 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR command_line, int show_cm
   if (!RegisterHotKey(app.hwnd, kHotkeySettings, MOD_CONTROL | MOD_ALT, 'S')) {
     logf("hotkey Ctrl+Alt+S could not be registered (another app owns it)");
   }
+  if (!RegisterHotKey(app.hwnd, kHotkeyFullscreen, MOD_CONTROL | MOD_ALT, 'F')) {
+    logf("hotkey Ctrl+Alt+F could not be registered (another app owns it)");
+  }
 
   app.started_at = app.now_ms();
   app.view.last_frame = app.now_ms();
   app.view.last_mouse = 0;
-  app.view.hint_until = app.now_ms() + 9000;
+  // The desktop layer stays clean on an ordinary launch; the hint is shown
+  // there only the first time, and whenever the mode is changed.
+  app.view.hint_until = (app.cfg.mode() != DisplayMode::Desktop || app.first_run)
+                            ? app.now_ms() + 9000
+                            : 0;
 
   media_start(app);
   lyrics_start(app);
@@ -2032,7 +2401,8 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR command_line, int show_cm
   app.rebuild_layout(true);
   SetTimer(app.hwnd, kFrameTimer, 16, nullptr);
 
-  logf("started (windowed=%d, monitor %dx%d)", app.windowed ? 1 : 0, win_w, win_h);
+  logf("started %s (mode=%d, monitor %dx%d)", YTL_VERSION_STRING,
+       static_cast<int>(app.cfg.mode()), win_w, win_h);
 
   MSG msg{};
   for (;;) {
@@ -2042,11 +2412,6 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR command_line, int show_cm
       logf("GetMessageW failed (error %lu)",
            static_cast<unsigned long>(GetLastError()));
       break;
-    }
-    if (msg.message == WM_APP_SHOW_EXISTING) {
-      app.quitting = false;
-      app.show_window();
-      continue;
     }
     // The settings window is not a dialog box, so nothing gives Tab, arrows and
     // Escape to the focused owner-drawn control: without this the window could

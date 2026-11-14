@@ -4,6 +4,9 @@
 #include "version.rcinc"
 
 1 ICON "app.ico"
+// Application manifest (RT_MANIFEST = 24): supported Windows versions,
+// per-monitor DPI awareness and asInvoker.
+1 24 "src/win/app.manifest"
 IDR_WALLPAPER_CITY RCDATA "src/win/wallpapers/city-rain.jpg"
 IDR_WALLPAPER_MOUNTAIN RCDATA "src/win/wallpapers/mountain-night.jpg"
 IDR_WALLPAPER_FOREST RCDATA "src/win/wallpapers/forest-mist.jpg"

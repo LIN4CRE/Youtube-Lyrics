@@ -967,14 +967,18 @@ std::string strip_trailing_noise(const std::string& in) {
       changed = true;
     }
   }
-  // Also strip trailing standalone noise tokens (e.g. "4K", "8K", "HD")
+  // Also strip trailing standalone quality tags ("4K", "8K", "HD"). Only these:
+  // the general noise list contains ordinary words ("Radio", "Clean", "Live",
+  // "Part") that end plenty of real titles, and stripping those turned
+  // "Car Radio" into "Car" and "Come Clean" into "Come".
   bool stripped_word = true;
   while (stripped_word && !s.empty()) {
     stripped_word = false;
     size_t last_space = s.rfind(' ');
     if (last_space != std::string::npos && last_space + 1 < s.size()) {
-      std::string last_word = s.substr(last_space + 1);
-      if (is_noise_block(last_word)) {
+      const std::string last_word = to_lower_ascii(s.substr(last_space + 1));
+      if (last_word == "4k" || last_word == "8k" || last_word == "hd" ||
+          last_word == "hq" || last_word == "mv" || last_word == "m/v") {
         s = trim(s.substr(0, last_space));
         stripped_word = true;
       }
@@ -1191,6 +1195,35 @@ bool is_watchable_app(const std::string& app_id, const TrackInfo& t) {
   return browser || player || t.duration_s >= 45;
 }
 
+namespace {
+// Lower-cased alphanumeric words joined by single spaces: "Don't Stop!" and
+// "dont stop" compare equal, punctuation and spacing never matter.
+std::string join_tokens(const std::string& lowered) {
+  std::string out;
+  bool pending_space = false;
+  for (size_t i = 0; i < lowered.size(); ++i) {
+    const unsigned char c = static_cast<unsigned char>(lowered[i]);
+    // Typographic apostrophes (U+2018/2019) are dropped like ASCII ones.
+    if (c == 0xE2 && i + 2 < lowered.size() &&
+        static_cast<unsigned char>(lowered[i + 1]) == 0x80 &&
+        (static_cast<unsigned char>(lowered[i + 2]) == 0x98 ||
+         static_cast<unsigned char>(lowered[i + 2]) == 0x99)) {
+      i += 2;
+      continue;
+    }
+    if (c == '\'') continue;
+    if (std::isalnum(c) != 0 || c >= 0x80) {
+      if (pending_space && !out.empty()) out.push_back(' ');
+      pending_space = false;
+      out.push_back(static_cast<char>(c));
+    } else {
+      pending_space = true;
+    }
+  }
+  return out;
+}
+}  // namespace
+
 double token_containment(const std::string& a, const std::string& b) {
   std::string x = squish_and_lower(a);
   std::string y = squish_and_lower(b);
@@ -1250,17 +1283,49 @@ double text_similarity(const std::string& a, const std::string& b) {
   }
   double jaccard = static_cast<double>(inter) /
                    static_cast<double>(ta.size() + tb.size() - inter);
+  // One side being a whole-word phrase of the other ("Numb" in "Numb Encore")
+  // is strong evidence; a raw substring is not ("Home" is not "Homecoming").
   double containment = 0.0;
-  if (x.find(y) != std::string::npos || y.find(x) != std::string::npos) {
+  const std::string px = " " + join_tokens(x) + " ";
+  const std::string py = " " + join_tokens(y) + " ";
+  if (px.size() > 2 && py.size() > 2 &&
+      (px.find(py) != std::string::npos || py.find(px) != std::string::npos)) {
     containment = 0.85;
   }
-  return std::max(jaccard, containment * std::min(1.0, 1.0));
+  return std::max(jaccard, containment);
+}
+
+bool same_title_text(const std::string& a, const std::string& b) {
+  const std::string x = join_tokens(squish_and_lower(a));
+  const std::string y = join_tokens(squish_and_lower(b));
+  return !x.empty() && x == y;
+}
+
+bool lyrics_fit_duration(const Lyrics& lyrics, double duration_s) {
+  if (!lyrics.synced || lyrics.lines.empty()) return true;
+  if (!(duration_s > 5.0)) return true;
+  int64_t last = 0;
+  for (const LyricLine& line : lyrics.lines) {
+    if (!line.text.empty()) last = std::max(last, line.t_ms);
+  }
+  // A line that starts after the recording has ended belongs to a longer cut
+  // (an extended mix, a live take, another song entirely).
+  if (static_cast<double>(last) > (duration_s + 6.0) * 1000.0) return false;
+  // And a sheet whose last line lands in the first third of a normal-length
+  // song is a fragment or a much shorter recording.
+  if (duration_s >= 90.0 && lyrics.lines.size() >= 4 &&
+      static_cast<double>(last) < duration_s * 1000.0 * 0.30) {
+    return false;
+  }
+  return true;
 }
 
 const JValue* best_candidate(const JValue& search_results, const TrackInfo& want,
-                             double* score_out) {
+                             double* score_out, bool* timing_trusted_out) {
   const JValue* best = nullptr;
   double best_score = -1.0;
+  bool best_trusted = true;
+  if (timing_trusted_out) *timing_trusted_out = true;
   std::vector<const JValue*> candidates;
   if (search_results.is_array()) {
     candidates.reserve(search_results.arr.size());
@@ -1270,6 +1335,11 @@ const JValue* best_candidate(const JValue& search_results, const TrackInfo& want
   } else {
     return nullptr;
   }
+
+  // Both sides are compared after the same cleaning, so "Song (Official
+  // Video)" from a player and "Song" from the catalogue are the same title.
+  const TrackInfo want_clean = clean_track(want, false);
+  const TrackVariant want_variant = want.variant();
 
   for (const JValue* candidate : candidates) {
     if (!candidate || !candidate->is_object()) continue;
@@ -1283,10 +1353,6 @@ const JValue* best_candidate(const JValue& search_results, const TrackInfo& want
     }
     if (!has_synced && !has_plain) continue;
 
-    // Clean provider titles with the same conservative rules as media titles,
-    // but never infer an artist from a title string. Title similarity is a hard
-    // gate: a query for one track must not be won by another track from the
-    // same artist merely because its duration happens to match.
     const double duration = rec.get_num("duration", 0);
     const std::string candidate_raw_title = rec.get_str("trackName");
     const std::string candidate_album = rec.get_str("albumName");
@@ -1294,14 +1360,26 @@ const JValue* best_candidate(const JValue& search_results, const TrackInfo& want
         TrackInfo{candidate_raw_title, rec.get_str("artistName"), candidate_album,
                   duration, std::string()},
         false);
-    const double title_sim = text_similarity(want.title, candidate_track.title);
-    const double title_cont = token_containment(want.title, candidate_track.title);
+
+    // Title is a hard gate: a query for one track must not be won by another
+    // track from the same artist merely because its duration happens to match.
+    const bool exact_title =
+        same_title_text(want_clean.title, candidate_track.title) ||
+        same_title_text(want.title, candidate_track.title);
+    const double title_sim =
+        exact_title ? 1.0
+                    : std::max(text_similarity(want_clean.title, candidate_track.title),
+                               text_similarity(want.title, candidate_track.title));
+    const double title_cont =
+        exact_title ? 1.0
+                    : std::max(token_containment(want_clean.title, candidate_track.title),
+                               token_containment(want.title, candidate_track.title));
     if (title_sim < 0.70 && title_cont < 0.80) continue;
 
-    const double artist_sim = text_similarity(want.artist, candidate_track.artist);
-    const double artist_cont = token_containment(want.artist, candidate_track.artist);
+    const double artist_sim = text_similarity(want_clean.artist, candidate_track.artist);
+    const double artist_cont = token_containment(want_clean.artist, candidate_track.artist);
     const bool same_artist = artist_sim >= 0.65 || artist_cont >= 0.75;
-    if (!want.artist.empty() && !candidate_track.artist.empty() && !same_artist) {
+    if (!want_clean.artist.empty() && !candidate_track.artist.empty() && !same_artist) {
       continue;
     }
     // Edition gate. A live take, remix, instrumental or karaoke backing track
@@ -1309,50 +1387,106 @@ const JValue* best_candidate(const JValue& search_results, const TrackInfo& want
     // for it is a wrong answer even when the title and artist agree. When a
     // session is the plain studio song we stay permissive, because providers
     // routinely omit edition markers.
-    const TrackVariant want_variant = want.variant();
     if (want_variant != TrackVariant::Studio &&
         !variant_compatible(want_variant, candidate_raw_title, candidate_album)) {
       continue;
     }
-    // With no artist metadata, a title alone requires duration match to avoid same-title covers
-    if (want.artist.empty()) {
-      if (want.duration_s <= 5 || duration <= 5 ||
-          std::fabs(duration - want.duration_s) > 8.0) {
-        continue;
-      }
-    }
+
+    const bool durations_known = want.duration_s > 5 && duration > 5;
+    const double delta = durations_known ? std::fabs(duration - want.duration_s) : 0.0;
+
+    // A title that merely contains ours ("Stay" / "Stay With Me", "Home" /
+    // "Home Again") is usually a different song. It is accepted only when the
+    // recording length proves it is the same one.
+    if (!exact_title && (!durations_known || delta > 3.0)) continue;
+    // With no artist to check, an exact title is still only a name: demand the
+    // same length too.
+    if (want_clean.artist.empty() && (!durations_known || delta > 3.0)) continue;
+    // Same name, same artist, but a recording more than a minute longer or
+    // shorter: an extended cut, a medley, a re-recording. Those were the long,
+    // wrong sheets. Refuse them outright.
+    if (durations_known && delta > 60.0) continue;
+
+    // Between those two limits the words are very likely right but the
+    // timestamps are for another cut (a music video with an intro, a radio
+    // edit). The sheet may be shown, but its timing must not be trusted.
+    const bool trusted = !durations_known || delta <= 12.0;
 
     double score = title_sim * 5.0 + artist_sim * 4.0;
     if (title_cont >= 0.90) score += 1.0;
     if (artist_cont >= 0.90) score += 0.8;
-    if (has_synced) score += 2.5;
+    if (has_synced && trusted) score += 2.5;
+    if (!has_plain && !trusted) continue;  // nothing usable without timing
 
-    if (want.duration_s > 0 && duration > 0) {
-      const double delta = std::fabs(duration - want.duration_s);
+    if (durations_known) {
       if (delta <= 2.0) score += 3.5;
       else if (delta <= 5.0) score += 2.2;
-      else if (delta <= 8.0) score += 0.6;
-      else if (delta > 30.0) score -= 4.0;
-      else score -= 1.5;
+      else if (delta <= 12.0) score += 0.6;
+      else score -= std::min(4.0, 1.5 + (delta - 12.0) / 12.0);
     }
     if (score > best_score) {
       best_score = score;
       best = &rec;
+      best_trusted = trusted;
     }
   }
   if (score_out) *score_out = best_score;
   // Better to show nothing than the wrong words.
   if (best_score < 6.5) return nullptr;
+  if (timing_trusted_out) *timing_trusted_out = best_trusted;
   return best;
 }
 
 bool parse_lyrics_ovh_payload(const std::string& body, Lyrics& out) {
+  return parse_lyrics_ovh_payload(body, TrackInfo(), out);
+}
+
+bool parse_lyrics_ovh_payload(const std::string& body, const TrackInfo& want,
+                              Lyrics& out) {
   JValue root;
   if (!json_parse(body, root) || !root.is_object()) return false;
   std::string text = root.get_str("lyrics");
+  text = replace_all(text, "\r\n", "\n");
+  text = replace_all(text, "\r", "\n");
   if (trim(text).empty()) return false;
   // The service answers "No lyrics found" with HTTP 200 for misses.
   if (to_lower_ascii(trim(text)).find("no lyrics found") == 0) return false;
+
+  // Many answers start with a French credit line naming the song the service
+  // actually matched: "Paroles de la chanson <Title> par <Artist>". It is the
+  // only identity this provider gives us, so use it: if it names a different
+  // song the whole answer is discarded, and either way it is not a lyric.
+  static const char kCredit[] = "paroles de la chanson ";
+  const size_t first_nl = text.find('\n');
+  const std::string first = trim(text.substr(0, first_nl));
+  if (starts_with(to_lower_ascii(first), kCredit)) {
+    std::string named = first.substr(sizeof(kCredit) - 1);
+    const size_t par = to_lower_ascii(named).rfind(" par ");
+    if (par != std::string::npos) named = named.substr(0, par);
+    if (!want.title.empty() && !trim(named).empty()) {
+      const TrackInfo named_track = clean_track(TrackInfo{named}, false);
+      const TrackInfo want_clean = clean_track(want, false);
+      if (!same_title_text(named_track.title, want_clean.title) &&
+          text_similarity(named_track.title, want_clean.title) < 0.70) {
+        return false;
+      }
+    }
+    text = first_nl == std::string::npos ? std::string() : text.substr(first_nl + 1);
+    if (trim(text).empty()) return false;
+  }
+
+  // The service double-spaces its lines; collapse runs of blank lines so the
+  // sheet is not twice as tall as the song.
+  while (text.find("\n\n\n") != std::string::npos)
+    text = replace_all(text, "\n\n\n", "\n\n");
+  while (!text.empty() && text.front() == '\n') text.erase(text.begin());
+
+  // A real song is not thousands of lines long. Anything this size is a
+  // compilation page or a mismatch, and would scroll for ever.
+  size_t rows = 1;
+  for (char c : text) rows += (c == '\n');
+  if (rows > 400 || text.size() > 24000) return false;
+
   out = Lyrics();
   out.synced = false;
   out.plain = text;
@@ -1439,7 +1573,8 @@ bool parse_lrclib_payload(const std::string& body, const TrackInfo& want,
   if (!json_parse(body, root)) return false;
 
   double score = 0;
-  const JValue* rec = best_candidate(root, want, &score);
+  bool timing_trusted = true;
+  const JValue* rec = best_candidate(root, want, &score, &timing_trusted);
   if (!rec) return false;
 
   out = Lyrics();
@@ -1451,15 +1586,25 @@ bool parse_lrclib_payload(const std::string& body, const TrackInfo& want,
   if (matched != TrackVariant::Studio) out.variant = track_variant_name(matched);
 
   std::string synced = rec->get_str("syncedLyrics");
-  if (!trim(synced).empty()) {
+  std::string plain = rec->get_str("plainLyrics");
+  if (timing_trusted && !trim(synced).empty()) {
     std::vector<LyricLine> lines;
     if (lrc_parse(synced, lines)) {
-      out.synced = true;
-      out.lines = std::move(lines);
-      return true;
+      Lyrics timed = out;
+      timed.synced = true;
+      timed.lines = std::move(lines);
+      // Timestamps that run past the end of the recording (or stop a third of
+      // the way in) are for some other cut, whatever the metadata says.
+      if (lyrics_fit_duration(timed, want.duration_s)) {
+        out = std::move(timed);
+        return true;
+      }
+      if (trim(plain).empty()) plain = lyrics_to_plain(timed.lines);
     }
+  } else if (!timing_trusted && trim(plain).empty() && !trim(synced).empty()) {
+    std::vector<LyricLine> lines;
+    if (lrc_parse(synced, lines)) plain = lyrics_to_plain(lines);
   }
-  std::string plain = rec->get_str("plainLyrics");
   if (!trim(plain).empty()) {
     out.synced = false;
     out.plain = plain;
