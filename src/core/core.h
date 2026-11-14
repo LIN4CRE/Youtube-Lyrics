@@ -170,7 +170,9 @@ struct TrackInfo {
 
 // Reads a variant out of a raw (uncleaned) title, e.g. "Numb (Live at Wembley)"
 // or "Song - Sped Up". Studio is the default.
-TrackVariant detect_variant(const std::string& raw_title);
+// `loose` is for album names, where an edition word anywhere counts ("Live at
+// Leeds"); in a title the word must be written as an edition note.
+TrackVariant detect_variant(const std::string& raw_title, bool loose = false);
 const char* track_variant_name(TrackVariant variant);
 
 // True when a lyric record may be used for a session of this variant. Checks
@@ -185,6 +187,8 @@ TrackInfo clean_track(TrackInfo t, bool infer_artist_from_title = true);
 
 // Stable identity for caching / "did the track change" checks.
 std::string track_key(const TrackInfo& t);
+// As track_key(), without the length: what a per-song setting is stored under.
+std::string track_preference_key(const TrackInfo& t);
 
 // True when two observations describe the same recording: the same title and
 // artist, and durations that do not contradict each other. Used to reject a
@@ -306,5 +310,36 @@ std::string format_time(int64_t ms);
 double text_similarity(const std::string& a, const std::string& b);
 // Token containment in [0,1] (measures whether one string's tokens are contained in the other).
 double token_containment(const std::string& a, const std::string& b);
+
+// ---------------------------------------------------- per-song sync offsets
+
+// A small most-recently-used table of "this song runs N ms early/late"
+// corrections. Kept as an ordered list so the oldest entries are the ones
+// dropped when the table is full.
+struct OffsetStore {
+  static constexpr size_t kMaxEntries = 400;
+  static constexpr int kMaxOffsetMs = 60000;
+  std::vector<std::pair<std::string, int>> entries;  // oldest first
+
+  int get(const std::string& key) const;
+  // Stores (or, for 0, forgets) the correction and marks the song most recent.
+  void set(const std::string& key, int offset_ms);
+};
+// Text form: one "<offset-ms>\t<key>" line per song. Unreadable lines are
+// skipped, values are clamped, and at most kMaxEntries are kept.
+OffsetStore parse_offset_store(const std::string& text);
+std::string serialize_offset_store(const OffsetStore& store);
+
+// ------------------------------------------------------------- diagnostics
+
+// Case-insensitive replace of every `needle` in `text`. Used to keep the
+// Windows account name and profile path out of exported diagnostic reports.
+std::string replace_all_ci(const std::string& text, const std::string& needle,
+                           const std::string& replacement);
+// Removes anything that should not leave the machine in a diagnostic report:
+// the profile directory and account name, and the value of any URL query
+// parameter or header that looks like a credential.
+std::string redact_report(const std::string& text, const std::string& profile_dir,
+                          const std::string& user_name);
 
 }  // namespace ytl

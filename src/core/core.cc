@@ -889,6 +889,22 @@ std::string squish_and_lower(const std::string& s) {
 
 namespace {
 
+// Matches a whole word (or phrase) inside `text`, so "live" does not fire on
+// "delivery" and "ost" does not fire on "lost".
+bool has_word(const std::string& text, const char* word) {
+  const size_t n = std::strlen(word);
+  if (n == 0) return false;
+  for (size_t pos = text.find(word); pos != std::string::npos;
+       pos = text.find(word, pos + 1)) {
+    const bool left_ok = pos == 0 ||
+                         !std::isalnum(static_cast<unsigned char>(text[pos - 1]));
+    const bool right_ok = pos + n >= text.size() ||
+                          !std::isalnum(static_cast<unsigned char>(text[pos + n]));
+    if (left_ok && right_ok) return true;
+  }
+  return false;
+}
+
 bool is_noise_block(const std::string& block) {
   static const char* kNoise[] = {
       "official", "video", "audio", "lyric", "lyrics", "visualizer", "visualiser",
@@ -911,7 +927,11 @@ bool is_noise_block(const std::string& block) {
                                                  b[std::strlen(noise)])))) {
       return true;
     }
-    if (std::strstr(b.c_str(), noise) && b.size() <= std::strlen(noise) + 18) {
+    // A short block that contains the noise term as a whole word ("2011
+    // remaster", "official lyric video"). This used to be a plain substring
+    // test, which threw away real subtitles: "(Lost)" for "ost", "(After
+    // Hours)" for "ft", "(Alive)" for "live".
+    if (b.size() <= std::strlen(noise) + 18 && has_word(b, noise)) {
       return true;
     }
   }
@@ -1059,26 +1079,60 @@ bool has_any(const std::string& haystack, std::initializer_list<const char*> nee
   return false;
 }
 
-// Matches a whole word inside `text`, so "live" does not fire on "delivery".
-bool has_word(const std::string& text, const char* word) {
-  const size_t n = std::strlen(word);
-  if (n == 0) return false;
-  for (size_t pos = text.find(word); pos != std::string::npos;
-       pos = text.find(word, pos + 1)) {
-    const bool left_ok = pos == 0 ||
-                         !std::isalnum(static_cast<unsigned char>(text[pos - 1]));
-    const bool right_ok = pos + n >= text.size() ||
-                          !std::isalnum(static_cast<unsigned char>(text[pos + n]));
-    if (left_ok && right_ok) return true;
+}  // namespace
+
+namespace {
+
+// Text inside (), [] and {} - where players and uploaders put edition notes.
+std::vector<std::string> bracket_blocks(const std::string& text) {
+  std::vector<std::string> blocks;
+  for (size_t i = 0; i < text.size(); ++i) {
+    const char c = text[i];
+    if (c != '(' && c != '[' && c != '{') continue;
+    const char closer = c == '(' ? ')' : (c == '[' ? ']' : '}');
+    const size_t close = text.find(closer, i + 1);
+    if (close == std::string::npos) break;
+    blocks.push_back(text.substr(i + 1, close - i - 1));
+    i = close;
   }
-  return false;
+  return blocks;
+}
+
+// The last " - " / " | " / dash-separated segment, or empty when there is none.
+std::string trailing_segment(const std::string& text) {
+  size_t best = std::string::npos;
+  size_t best_len = 0;
+  for (const char* sep : {" - ", " | ", " \xE2\x80\x93 ", " \xE2\x80\x94 "}) {
+    const size_t found = text.rfind(sep);
+    if (found != std::string::npos && (best == std::string::npos || found > best)) {
+      best = found;
+      best_len = std::strlen(sep);
+    }
+  }
+  if (best == std::string::npos) return std::string();
+  return trim(text.substr(best + best_len));
 }
 
 }  // namespace
 
-TrackVariant detect_variant(const std::string& raw_title) {
+TrackVariant detect_variant(const std::string& raw_title, bool loose) {
   const std::string t = squish_and_lower(raw_title);
   if (t.empty()) return TrackVariant::Studio;
+
+  // Words such as "live", "session", "flip" and "reverb" are also ordinary
+  // title words ("Live Forever", "Obsession", "Flip Flop"). In a title they
+  // only mark an edition where an edition note is written: inside brackets, or
+  // as a trailing "- Live". An album name ("Live at Leeds") is checked loosely.
+  const std::vector<std::string> blocks = bracket_blocks(t);
+  const std::string tail = trailing_segment(t);
+  auto noted = [&](const char* word) {
+    if (loose) return has_word(t, word);
+    for (const std::string& block : blocks) {
+      if (has_word(block, word)) return true;
+    }
+    return tail == word;
+  };
+
   // Karaoke is detected first: a karaoke backing track is often also labelled
   // "instrumental version", and it must not be shown as the sung song.
   if (has_word(t, "karaoke") || has_any(t, {"backing track", "sing along version"}))
@@ -1086,12 +1140,18 @@ TrackVariant detect_variant(const std::string& raw_title) {
   if (has_word(t, "instrumental") || has_any(t, {"no vocals", "off vocal",
                                                 "minus one", "\xe3\x82\xab\xe3\x83\xa9\xe3\x82\xaa\xe3\x82\xb1"}))
     return TrackVariant::Instrumental;
-  if (has_any(t, {"remix", "remixed", "bootleg", "flip", "rework", "mashup",
-                  "medley", "nightcore", "sped up", "slowed", "reverb",
-                  "bass boosted", "club mix", "extended mix", "vip mix"}))
+  if (has_word(t, "remix") || has_word(t, "remixed") || has_word(t, "bootleg") ||
+      has_word(t, "mashup") || has_word(t, "nightcore") ||
+      has_any(t, {"sped up", "bass boosted", "club mix", "extended mix", "vip mix",
+                  "slowed + reverb", "slowed and reverb", "slowed & reverb"}) ||
+      noted("flip") || noted("rework") || noted("medley") || noted("slowed") ||
+      noted("reverb"))
     return TrackVariant::Remix;
-  if (has_word(t, "live") || has_any(t, {"in concert", "unplugged", "session",
-                                         "en vivo", "ao vivo", "acoustic version"}))
+  if (has_word(t, "unplugged") ||
+      has_any(t, {"in concert", "en vivo", "ao vivo", "acoustic version", "live at ",
+                  "live from ", "live @", "live version", "live session",
+                  "live performance"}) ||
+      noted("live") || noted("session") || noted("sessions"))
     return TrackVariant::Live;
   return TrackVariant::Studio;
 }
@@ -1104,7 +1164,15 @@ bool variant_compatible(TrackVariant want, const std::string& candidate_title,
   const TrackVariant title_variant = detect_variant(candidate_title);
   if (title_variant == want) return true;
   if (candidate_album.empty()) return false;
-  return detect_variant(candidate_album) == want;
+  return detect_variant(candidate_album, true) == want;
+}
+
+// The identity a per-song preference is stored under: the song and edition,
+// not one particular player's idea of its length.
+std::string track_preference_key(const TrackInfo& t) {
+  TrackInfo without_length = t;
+  without_length.duration_s = 0;
+  return track_key(without_length);
 }
 
 std::string track_key(const TrackInfo& t) {
@@ -1855,6 +1923,145 @@ std::string format_time(int64_t ms) {
   std::snprintf(buf, sizeof(buf), "%lld:%02lld", static_cast<long long>(m),
                 static_cast<long long>(s));
   return buf;
+}
+
+// ---------------------------------------------------- per-song sync offsets
+
+int OffsetStore::get(const std::string& key) const {
+  for (const auto& entry : entries) {
+    if (entry.first == key) return entry.second;
+  }
+  return 0;
+}
+
+void OffsetStore::set(const std::string& key, int offset_ms) {
+  if (key.empty()) return;
+  offset_ms = std::max(-kMaxOffsetMs, std::min(kMaxOffsetMs, offset_ms));
+  for (size_t i = 0; i < entries.size(); ++i) {
+    if (entries[i].first == key) {
+      entries.erase(entries.begin() + static_cast<std::ptrdiff_t>(i));
+      break;
+    }
+  }
+  if (offset_ms == 0) return;
+  entries.emplace_back(key, offset_ms);
+  if (entries.size() > kMaxEntries) {
+    entries.erase(entries.begin(),
+                  entries.begin() + static_cast<std::ptrdiff_t>(entries.size() - kMaxEntries));
+  }
+}
+
+OffsetStore parse_offset_store(const std::string& text) {
+  OffsetStore store;
+  size_t pos = 0;
+  while (pos < text.size()) {
+    size_t end = text.find('\n', pos);
+    if (end == std::string::npos) end = text.size();
+    std::string line = text.substr(pos, end - pos);
+    pos = end + 1;
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+    const size_t tab = line.find('\t');
+    if (tab == std::string::npos || tab == 0 || tab > 8 || tab + 1 >= line.size()) continue;
+    bool numeric = true;
+    for (size_t i = 0; i < tab; ++i) {
+      const char c = line[i];
+      if (!(std::isdigit(static_cast<unsigned char>(c)) || (i == 0 && (c == '-' || c == '+'))))
+        numeric = false;
+    }
+    if (!numeric || (tab == 1 && !std::isdigit(static_cast<unsigned char>(line[0])))) continue;
+    const long value = std::strtol(line.substr(0, tab).c_str(), nullptr, 10);
+    const std::string key = line.substr(tab + 1);
+    if (key.size() > 512) continue;
+    store.set(key, static_cast<int>(std::max(-100000L, std::min(100000L, value))));
+  }
+  return store;
+}
+
+std::string serialize_offset_store(const OffsetStore& store) {
+  std::string out;
+  for (const auto& entry : store.entries) {
+    std::string key = entry.first;
+    for (char& c : key) {
+      if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+    }
+    out += std::to_string(entry.second);
+    out += '\t';
+    out += key;
+    out += '\n';
+  }
+  return out;
+}
+
+// ------------------------------------------------------------- diagnostics
+
+std::string replace_all_ci(const std::string& text, const std::string& needle,
+                           const std::string& replacement) {
+  if (needle.empty() || text.size() < needle.size()) return text;
+  const std::string lower_text = to_lower_ascii(text);
+  const std::string lower_needle = to_lower_ascii(needle);
+  std::string out;
+  out.reserve(text.size());
+  size_t pos = 0;
+  for (;;) {
+    const size_t found = lower_text.find(lower_needle, pos);
+    if (found == std::string::npos) break;
+    out.append(text, pos, found - pos);
+    out += replacement;
+    pos = found + needle.size();
+  }
+  out.append(text, pos, std::string::npos);
+  return out;
+}
+
+std::string redact_report(const std::string& text, const std::string& profile_dir,
+                          const std::string& user_name) {
+  std::string out = text;
+  if (profile_dir.size() >= 4) out = replace_all_ci(out, profile_dir, "%USERPROFILE%");
+  // The account name on its own, where it still appears as a path component.
+  if (user_name.size() >= 2) {
+    out = replace_all_ci(out, "\\Users\\" + user_name, "\\Users\\<user>");
+    out = replace_all_ci(out, "/Users/" + user_name, "/Users/<user>");
+  }
+  // Credential-looking values. Nothing in this program sends any, so this is
+  // a guard for whatever a proxy or a future provider puts in an error text.
+  static const char* kSecretKeys[] = {"token", "access_token", "apikey", "api_key",
+                                      "key", "password", "passwd", "secret",
+                                      "authorization", "auth", "signature", "sig"};
+  const std::string lower = to_lower_ascii(out);
+  std::string result;
+  result.reserve(out.size());
+  size_t i = 0;
+  while (i < out.size()) {
+    bool redacted = false;
+    const bool boundary = i == 0 || !(std::isalnum(static_cast<unsigned char>(out[i - 1])) ||
+                                      out[i - 1] == '_');
+    if (boundary) {
+      for (const char* key : kSecretKeys) {
+        const size_t n = std::strlen(key);
+        if (lower.compare(i, n, key) != 0) continue;
+        size_t j = i + n;
+        if (j >= out.size() || (out[j] != '=' && out[j] != ':')) continue;
+        ++j;
+        while (j < out.size() && out[j] == ' ') ++j;
+        // "Authorization: Bearer abc" - keep the scheme word, drop the value.
+        if (lower.compare(j, 7, "bearer ") == 0) j += 7;
+        else if (lower.compare(j, 6, "basic ") == 0) j += 6;
+        size_t value_end = j;
+        while (value_end < out.size() && out[value_end] != '&' && out[value_end] != ' ' &&
+               out[value_end] != '\n' && out[value_end] != '\r' && out[value_end] != '"' &&
+               out[value_end] != '\'' && out[value_end] != ';')
+          ++value_end;
+        if (value_end == j) continue;
+        result.append(out, i, j - i);
+        result += "<redacted>";
+        i = value_end;
+        redacted = true;
+        break;
+      }
+    }
+    if (!redacted) result.push_back(out[i++]);
+  }
+  return result;
 }
 
 }  // namespace ytl

@@ -87,6 +87,10 @@ Invoke-Checked 'compile or link' {
 }
 Remove-Item -Force -ErrorAction SilentlyContinue .build/core.lib, .build/YoutubeLyrics.pdb
 
+# 3b. Remove the link time and the build GUID derived from it, so the same
+#     source and toolchain always give the same bytes (and the same SHA-256).
+Invoke-Checked 'executable normalization' { & $python scripts/normalize_pe.py $tempExe }
+
 # 4. Verify the actual image, not the build log.
 if ($res.Count -gt 0) {
     Invoke-Checked 'executable verification' {
@@ -120,6 +124,15 @@ try {
 # Re-verify the published copy so "downloadable == verified" is a checked fact.
 Invoke-Checked 'published copy verification' {
     & $python scripts/verify_build.py $downloads
+}
+
+# 6. Release manifest and the facts printed on the site and in the README are
+#    derived from the published bytes, so one build leaves them all consistent.
+if ($res.Count -gt 0) {
+    Invoke-Checked 'release manifest' {
+        & $python scripts/generate_release.py --exe $downloads --output-dir docs/downloads
+    }
+    Invoke-Checked 'release facts' { & $python scripts/release_facts.py }
 }
 
 Write-Host "built dist\YoutubeLyrics.exe ($((Get-Item dist\YoutubeLyrics.exe).Length) bytes)"

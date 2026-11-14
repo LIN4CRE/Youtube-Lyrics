@@ -808,6 +808,111 @@ static void test_wrong_sheet_rejection() {
   CHECK(!parse_lyrics_ovh_payload(huge, want, out));
 }
 
+// 1.7.0: edition words are only edition notes where an edition is written.
+static void test_edition_context() {
+  // Ordinary title words must not turn a studio song into another edition.
+  CHECK_EQ(detect_variant("Live Forever"), TrackVariant::Studio);
+  CHECK_EQ(detect_variant("Oasis - Live Forever (Official Video)"), TrackVariant::Studio);
+  CHECK_EQ(detect_variant("Live and Let Die"), TrackVariant::Studio);
+  CHECK_EQ(detect_variant("Obsession"), TrackVariant::Studio);
+  CHECK_EQ(detect_variant("Flip Flop"), TrackVariant::Studio);
+  CHECK_EQ(detect_variant("Reverberation"), TrackVariant::Studio);
+  CHECK_EQ(detect_variant("Slowed Down Heart"), TrackVariant::Studio);
+  // ...while written edition notes still count.
+  CHECK_EQ(detect_variant("Live Forever (Live at Knebworth)"), TrackVariant::Live);
+  CHECK_EQ(detect_variant("Hello - Live at the Royal Albert Hall"), TrackVariant::Live);
+  CHECK_EQ(detect_variant("Song [Live]"), TrackVariant::Live);
+  CHECK_EQ(detect_variant("Song (BBC Radio 1 Session)"), TrackVariant::Live);
+  CHECK_EQ(detect_variant("Song (Slowed)"), TrackVariant::Remix);
+  CHECK_EQ(detect_variant("Song (DJ Flip)"), TrackVariant::Remix);
+  CHECK_EQ(detect_variant("Song Remix"), TrackVariant::Remix);
+  CHECK_EQ(detect_variant("Song slowed + reverb"), TrackVariant::Remix);
+  // Albums are named after the edition, so any edition word counts there.
+  CHECK_EQ(detect_variant("Live in Paris", true), TrackVariant::Live);
+  CHECK_EQ(detect_variant("Live in Paris"), TrackVariant::Studio);
+  CHECK(variant_compatible(TrackVariant::Live, "Song", "Live in Paris"));
+
+  // A studio song whose name contains an edition word keeps a plain identity.
+  TrackInfo forever = clean_track(TrackInfo{"Live Forever", "Oasis", "", 276});
+  CHECK(forever.variant() == TrackVariant::Studio);
+  CHECK(track_key(forever).find("|live") == std::string::npos);
+
+  // Bracketed subtitles are kept unless they are a whole-word noise note.
+  CHECK_STR(clean_track(TrackInfo{"Song (Lost)", "A", "", 0}).title, "Song (Lost)");
+  CHECK_STR(clean_track(TrackInfo{"Song (After Hours)", "A", "", 0}).title, "Song (After Hours)");
+  CHECK_STR(clean_track(TrackInfo{"Song (Alive)", "A", "", 0}).title, "Song (Alive)");
+  CHECK_STR(clean_track(TrackInfo{"Song (Official Lyric Video)", "A", "", 0}).title, "Song");
+  CHECK_STR(clean_track(TrackInfo{"Song (2011 Remaster)", "A", "", 0}).title, "Song");
+  CHECK_STR(clean_track(TrackInfo{"Song (feat. Someone)", "A", "", 0}).title, "Song");
+  CHECK_STR(clean_track(TrackInfo{"Song [HD]", "A", "", 0}).title, "Song");
+}
+
+static void test_offset_store() {
+  OffsetStore store;
+  CHECK_EQ(store.get("a|b"), 0);
+  store.set("a|b", 250);
+  store.set("c|d", -750);
+  CHECK_EQ(store.get("a|b"), 250);
+  CHECK_EQ(store.get("c|d"), -750);
+  // Round trip.
+  const std::string text = serialize_offset_store(store);
+  OffsetStore loaded = parse_offset_store(text);
+  CHECK_EQ(loaded.entries.size(), static_cast<size_t>(2));
+  CHECK_EQ(loaded.get("a|b"), 250);
+  CHECK_EQ(loaded.get("c|d"), -750);
+  // Zero forgets; values are clamped; the newest entry is last.
+  loaded.set("a|b", 0);
+  CHECK_EQ(loaded.entries.size(), static_cast<size_t>(1));
+  loaded.set("e", 999999);
+  CHECK_EQ(loaded.get("e"), OffsetStore::kMaxOffsetMs);
+  loaded.set("c|d", -500);
+  CHECK_STR(loaded.entries.back().first, "c|d");
+  // The table is bounded and drops the oldest songs first.
+  OffsetStore full;
+  for (int i = 0; i < 450; ++i) full.set("song" + std::to_string(i), 250);
+  CHECK_EQ(full.entries.size(), OffsetStore::kMaxEntries);
+  CHECK_EQ(full.get("song0"), 0);
+  CHECK_EQ(full.get("song449"), 250);
+  // Damaged files are read as far as they make sense, never trusted blindly.
+  OffsetStore damaged = parse_offset_store(
+      "250\tgood|one\n\nnot a line\nabc\tbad\n\t\n-\tbad\n99999999\thuge\n-250\tgood|two\r\n");
+  CHECK_EQ(damaged.get("good|one"), 250);
+  CHECK_EQ(damaged.get("good|two"), -250);
+  CHECK_EQ(damaged.get("bad"), 0);
+  CHECK_EQ(damaged.get("huge"), OffsetStore::kMaxOffsetMs);
+  // Keys cannot break the line format.
+  OffsetStore odd;
+  odd.set("a\tb\nc", 250);
+  CHECK_EQ(parse_offset_store(serialize_offset_store(odd)).entries.size(),
+           static_cast<size_t>(1));
+
+  // The preference key ignores the length a particular player reports.
+  TrackInfo a{"Song", "Artist", "", 200.2, "Song"};
+  TrackInfo b{"Song", "Artist", "", 203.9, "Song"};
+  TrackInfo live{"Song", "Artist", "", 200, "Song (Live)"};
+  CHECK_STR(track_preference_key(a), track_preference_key(b));
+  CHECK(track_preference_key(a) != track_preference_key(live));
+}
+
+static void test_report_redaction() {
+  CHECK_STR(replace_all_ci("C:\\Users\\Jo\\x and c:\\users\\jo\\y", "C:\\Users\\Jo", "~"),
+            "~\\x and ~\\y");
+  CHECK_STR(replace_all_ci("abc", "", "x"), "abc");
+  const std::string report =
+      "log: C:\\Users\\Jo Bloggs\\AppData\\Local\\YouTubeLyrics\\ytlyrics.log\n"
+      "url: https://example.test/a?track=Hello&token=abc123&x=1\n"
+      "hdr: Authorization: Bearer zzz.yyy\n"
+      "title: Key Largo\n";
+  const std::string clean = redact_report(report, "C:\\Users\\Jo Bloggs", "Jo Bloggs");
+  CHECK(clean.find("Jo Bloggs") == std::string::npos);
+  CHECK(clean.find("%USERPROFILE%\\AppData\\Local\\YouTubeLyrics") != std::string::npos);
+  CHECK(clean.find("abc123") == std::string::npos);
+  CHECK(clean.find("zzz.yyy") == std::string::npos);
+  CHECK(clean.find("track=Hello") != std::string::npos);
+  CHECK(clean.find("x=1") != std::string::npos);
+  CHECK(clean.find("Key Largo") != std::string::npos);
+}
+
 int main() {
   test_utf8();
   test_json();
@@ -824,6 +929,9 @@ int main() {
   test_enhanced_matching();
   test_track_variants();
   test_wrong_sheet_rejection();
+  test_edition_context();
+  test_offset_store();
+  test_report_redaction();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }
