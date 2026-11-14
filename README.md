@@ -105,7 +105,7 @@ Optional integrity check (PowerShell):
 Get-FileHash .\YoutubeLyrics.exe -Algorithm SHA256
 ```
 
-Expected SHA-256 for the current 1.6.0 download is listed in [`YoutubeLyrics.exe.sha256`](docs/downloads/YoutubeLyrics.exe.sha256) and beside the download on the [project website](https://youtube-lyrics-seven.vercel.app/). Compare it before running the file. The checksum is served over HTTPS; it is an integrity check, not a code signature.
+Expected SHA-256 for the current 1.7.0 download is listed in [`YoutubeLyrics.exe.sha256`](docs/downloads/YoutubeLyrics.exe.sha256) and beside the download on the [project website](https://youtube-lyrics-seven.vercel.app/). Compare it before running the file. The checksum is served over HTTPS; it is an integrity check, not a code signature.
 
 Windows may show **"Windows protected your PC"** because the file is not
 code-signed. The source is public; continue only if you trust the download. If
@@ -140,12 +140,13 @@ raw media-session state when the window is focused.
 | :--- | :--- | :--- | :--- | :--- |
 | `Ctrl`+`Alt`+`W` | Toggle desktop wallpaper mode | | `F` | Reset text size |
 | `Ctrl`+`Alt`+`L` | Show / hide from any app | | `R` | Look the lyrics up again |
-| `Ctrl`+`Alt`+`S` | Settings window | | `[` | Quieter / brighter background |
+| `Ctrl`+`Alt`+`S` | Settings window | | `[` | Background darkness (cycles) |
 | `F11` · `Ctrl`+`Alt`+`F` | Full screen ⇄ windowed | | `C` | Cover-art background |
 | `Esc` | Close help, then leave full screen | | `K` | Karaoke wipe |
 | `A` | Always on top (normal mode) | | `Q` | Quit |
 | `↑` `↓` `+` `−` | Bigger / smaller text | | `T` | Theme |
-| `←` `→` | Shift lyric timing ±0.25 s | | `F1` `H` | Help overlay |
+| `←` `→` | This song earlier / later by 0.25 s (remembered) | | `F1` `H` | Help overlay |
+| `D` | Save a diagnostic report | | | |
 
 Double-clicking toggles full screen. Pressing `S` in the display (or `Ctrl+Alt+S`
 from anywhere) opens the settings window; `F1` lists every shortcut. The tray
@@ -168,15 +169,27 @@ preferences are stored locally.
 
 ### Stable updates
 
-At startup the app quietly checks the project's latest **stable GitHub Release**.
-If there is a newer version, it asks before downloading; use **Check for updates**
-in the tray menu to check manually. The update must match the repository, stable
-tag/version, x64 architecture, executable name, and declared size. The app compares
-the release manifest with the separate SHA-256 file, verifies the downloaded
-bytes and 64-bit PE header, stages the file, and uses a replacement helper with a
-rollback path. It does not install previews or run a background service. The
-checksum is obtained over HTTPS from GitHub; it is not a substitute for a
-code-signing certificate.
+At startup the app quietly checks for a newer **stable release**: first the
+release published with the project site (`youtube-lyrics-seven.vercel.app`),
+then GitHub Releases. If there is a newer version, it asks before downloading;
+use **Check for updates** in the tray menu or Settings to check manually. The
+update must match the repository, stable tag/version, x64 architecture,
+executable name, and declared size. The app compares the release manifest with
+the separate SHA-256 file, verifies the downloaded bytes and 64-bit PE header,
+stages the file, and uses a replacement helper that keeps a backup and restores
+it if the new copy does not start. A download can be cancelled; files left by an
+interrupted update are removed at the next start. It does not install previews
+or run a background service. The checksum is obtained over HTTPS from the same
+origin as the file; it is not a substitute for a code-signing certificate, and
+the executable is unsigned.
+
+Old copies that predate the site-first updater (anything showing version 1.5
+or lower in its About box) only know about GitHub Releases, which has not
+been kept up to date, so they must be replaced by hand once: download the
+current file from the site and overwrite the old one.
+
+The published file is reproducible: building the tagged source with the pinned
+toolchain (`./scripts/build.sh`) produces the same SHA-256.
 
 <br>
 
@@ -292,11 +305,33 @@ reports.
 <br>
 
 Some players report the playhead imprecisely, and some lyric files are just off
-against a particular recording. Nudge with `←` `→`; the single sync offset is
-saved globally (it is not per-app or per-track) and can be reset from the tray
-menu. If a player publishes no playhead at all, the app runs its own clock from
+against a particular recording. Nudge with `←` `→`: the correction applies to
+the song on screen and is remembered for that song. If *everything* is early or
+late (a player that reports its position with a constant lag), set the
+all-songs value in Settings instead. *Reset sync correction* in the tray menu
+or Settings clears both. If a player publishes no playhead at all, the app runs its own clock from
 the moment the track started, which is usually within a second. Untimed lyric
 scroll is separately labeled as an estimate.
+
+</details>
+
+<details>
+<summary><b>I want to report a problem</b></summary>
+
+<br>
+
+Press `D` in the display, or choose **Save a diagnostic report** in the tray
+menu or Settings. A text file is written to
+`%LOCALAPPDATA%\YouTubeLyrics\diagnostics\`, copied to the clipboard and shown
+in Explorer. It lists the app and Windows versions, monitors, the display mode,
+what the media session reported, each lyric request and why its result was
+accepted or refused, the cache, the updater and the end of the log. It is not
+sent anywhere. Your Windows account name is replaced with a placeholder, but it
+does contain the titles of recently played songs, so read it before posting.
+
+If the app will not start, run `YoutubeLyrics.exe --diagnostics report.txt`
+from a terminal; that writes the report without opening a window and also
+checks whether the lyric providers and update servers can be reached.
 
 </details>
 

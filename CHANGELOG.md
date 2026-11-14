@@ -2,6 +2,36 @@
 
 User-visible changes to Youtube-Lyrics are recorded here. The executable's version is shown in Windows file properties and in the About item in the tray menu.
 
+## 1.7.0 — 2026-11-14
+
+An audit release: fewer wrong or missing lyric matches, sync corrections that
+stay with the song, a diagnostic report, a sturdier updater and a download
+that can be reproduced from source. Like 1.6.0 it was cross-compiled and its
+portable logic is tested, but **it has not been run on a Windows machine**;
+`AUDIT.md` lists exactly what was and was not verified.
+
+### New
+
+- **Sync correction per song.** `←` / `→` now correct the song on screen, and the correction is remembered for the next time that song plays (up to 400 songs, in `offsets.txt`). Previously the arrows moved one global offset, so fixing one badly timed sheet put every other song out. The value in Settings is still the all-songs baseline; an offset saved by an older version carries over as that baseline. *Reset sync correction* clears both.
+- **Diagnostic report.** `D` in the display, *Save a diagnostic report* in the tray menu, or the button in Settings writes one text file with the app and Windows versions, monitors and DPI, the display mode, what the media session reports, the track on screen, every provider request of recent lookups and why each result was accepted or refused, the cache size, the updater's last activity and the end of the log. It is saved under `%LOCALAPPDATA%\YouTubeLyrics\diagnostics\`, copied to the clipboard and shown in Explorer. Nothing is uploaded; the Windows account name and anything that looks like a credential are replaced before the file is written.
+- **`YoutubeLyrics.exe --diagnostics [file]`** writes the same report without opening a window and additionally checks that LRCLIB, lyrics.ovh, the project site and GitHub can be reached.
+
+### Fixed
+
+- **Ordinary titles treated as live or remix versions.** Words such as *live*, *session*, *flip* and *reverb* anywhere in a title marked the track as a special edition, so "Live Forever", "Obsession" or "Flip Flop" were matched against the wrong set of results or refused. They now count only inside brackets or as a trailing "- Live" style segment.
+- **Bracketed subtitles removed from titles.** A short bracket was dropped when it merely contained a tag word as part of another word ("(Alive)", "(After Hours)", "(Lost)"), which changed the title being searched. Whole words only.
+- **Untimed lyrics stuck for ever.** Once a song had been cached with untimed words it was never looked up again, even after timed lyrics became available. Untimed cache entries are re-checked after seven days; if nothing better is found the cached words are kept.
+- **"Not found" shown for a network failure.** When one provider failed and the other simply had no entry, the screen reported the song as missing and did not retry. The failure is now what is reported, and the automatic retry applies.
+- **The fallback provider could be skipped.** A long chain of LRCLIB searches could use up every request before lyrics.ovh was asked. One request is always kept for it, and an identical request is never sent twice.
+- **Interrupted updates left files behind.** A partial download, an unused staged copy or the replacement helper's working files stayed on disk indefinitely. They are removed at the next start.
+- **The update helper could wait for ever.** If the running copy never exited, a hidden PowerShell process waited indefinitely. It gives up after a minute without touching the installed file.
+- Automatic update-check failures are written to the log instead of vanishing.
+
+### Changed
+
+- **The download is reproducible.** The link timestamp and the build identifier derived from it are normalised after linking (`scripts/normalize_pe.py`), so building the same commit with the pinned toolchain gives the same SHA-256 as the published file. Both build scripts also regenerate the release manifest and the figures on the site from the bytes they publish.
+- The shortcut list names `[` correctly (it cycles the background darkness) and lists `D`.
+
 ## 1.6.0 — 2026-11-14
 
 A reliability release. It fixes full screen, the wrong-song lyric sheets, the

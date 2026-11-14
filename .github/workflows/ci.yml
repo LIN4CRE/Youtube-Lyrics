@@ -45,6 +45,14 @@ jobs:
         run: |
           sha256sum dist/YoutubeLyrics.exe docs/downloads/YoutubeLyrics.exe
           cmp dist/YoutubeLyrics.exe docs/downloads/YoutubeLyrics.exe
+      # The build is reproducible, so rebuilding this commit must give back
+      # exactly the download that is committed and served by the site.
+      - name: Confirm the committed download is the build of this commit
+        run: |
+          if ! git diff --exit-code --stat -- docs/downloads dist/YoutubeLyrics.exe; then
+            echo "::error::The committed download differs from a fresh build of this commit. Run ./scripts/build.sh with the pinned toolchain and commit the result."
+            exit 1
+          fi
       - name: Prepare release metadata
         run: python3 scripts/generate_release.py --output-dir .build/release
 
@@ -104,3 +112,27 @@ jobs:
           }
           [void][PeLoad]::FreeLibrary($module)
           Write-Host 'the executable loaded as a valid Windows image'
+      # The first step that actually executes the program on Windows. It runs
+      # without a window, reads the configuration, enumerates monitors, contacts
+      # each lyric provider and update source, and writes a report.
+      - name: Run the executable on Windows (diagnostic report)
+        shell: pwsh
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP 'ytl-diagnostics.txt'
+          $process = Start-Process -FilePath (Resolve-Path dist/YoutubeLyrics.exe).Path `
+            -ArgumentList '--diagnostics', "`"$report`"" -PassThru
+          if (-not $process.WaitForExit(120000)) {
+            $process.Kill()
+            throw 'the executable did not finish writing a diagnostic report within 120 s'
+          }
+          if ($process.ExitCode -ne 0) { throw "the executable exited with code $($process.ExitCode)" }
+          if (-not (Test-Path $report)) { throw 'no diagnostic report was written' }
+          Get-Content $report -Encoding UTF8
+          $text = Get-Content $report -Raw -Encoding UTF8
+          $version = (Get-Content VERSION -Raw).Trim()
+          if ($text -notmatch [regex]::Escape("Version:") -or $text -notmatch [regex]::Escape($version)) {
+            throw "the report does not state version $version"
+          }
+          if ($text -match [regex]::Escape($env:USERNAME)) {
+            throw 'the report contains the Windows account name; redaction failed'
+          }

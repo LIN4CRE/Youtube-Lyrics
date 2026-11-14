@@ -2,44 +2,213 @@
 
 **Reviewed:** 14 November 2026
 
-**Version under review:** 1.6.0
+**Version under review:** 1.7.0
 
 **Repository:** `LIN4CRE/Youtube-Lyrics`
 
-**Branch:** `arena/75852981-youtube-lyrics`, from `e0048124e4b965d7fcca48d7edcbb1b8f9fbf02f`
+**Baseline reviewed:** `main` at `4f70a0c6afbdec03a0698ce8197c253eca18ea6e` (the published 1.6.0)
+
+**Changes made on:** branch `arena/3ccd64c0-youtube-lyrics`, branched from that commit; the Git history of that branch is the record of each change.
 
 > **Scope of this audit.** Everything below was measured in a Linux sandbox with
 > the Zig/MinGW-w64 cross toolchain. There was no Windows machine, no VM and no
-> Wine in that environment, so **no Windows runtime claim is made anywhere in this
-> document**. Where a statement depends on runtime behaviour it is marked as
-> unverified rather than asserted.
+> Wine in that environment, and its network could reach only GitHub and the
+> package registries. **No Windows runtime claim and no live-provider claim is
+> made anywhere in this document.** The status table below separates what was
+> tested from what was only compiled.
 
 ## Summary
 
-Youtube-Lyrics is still a portable native C++17/Win32 application with no
-framework, no web view, no installer, no account, no telemetry and no audio
-capture. The portable core handles LRC parsing, source timing, metadata
-validation, matching and layout; the Windows layer provides the tray, the GDI+
-renderer, the Windows media-session listener and HTTPS networking.
+Youtube-Lyrics is a portable native C++17/Win32 application with no framework,
+no web view, no installer, no account, no telemetry and no audio capture. The
+portable core (`src/core`) handles LRC parsing, timing, metadata clean-up,
+matching and layout and is unit-tested under sanitizers on Linux; the Windows
+layer (`src/win`) provides the tray, the GDI+ renderer, the media-session
+listener, HTTPS, the updater and the settings window.
 
-1.5.0 is a usability and integrity release rather than a rewrite:
+1.7.0 is the result of a forensic pass over the 1.6.0 source. It keeps the
+architecture and every feature, fixes the defects listed below, adds a
+diagnostic report and per-song sync correction, and makes the published
+executable reproducible from source.
 
-- a native settings window now exposes everything that used to be reachable only
-  through the tray menu or a hotkey, and it reads and writes the same `Config` the
-  rest of the app uses;
-- a fourth, procedural background was added that costs no bytes;
-- the build pipeline became a gate on both platforms: a build that cannot embed
-  its icon and version resource now fails instead of quietly shipping an iconless
-  executable, and nothing is published to `docs/downloads` before verification;
-- the version, size and checksum printed on the website are generated from the
-  binary instead of being maintained by hand.
+## Findings and plan (1.7.0)
 
-Two defects found during this review were *cosmetic on Linux but real on
-Windows*, which is worth stating plainly: the settings dialog's layout had
-overlapping and clipped controls, and the dialog could not be driven from the
-keyboard at all. Both are fixed, and a test now re-runs the layout geometry.
+Ordered by priority. "Done" means implemented in this release; the evidence
+column says how far each was verified.
 
-## What changed since the 1.4.0 review
+| # | Priority | Finding | Outcome | Evidence |
+| --- | --- | --- | --- | --- |
+| 1 | Critical (process) | Both GitHub Actions workflows fail before running any step. Cause: every job is refused with *"The job was not started because your account is locked due to a billing issue."* It is an account-level lock, not a source or workflow fault. | Cannot be fixed from the repository. Documented with a local route (below). CI was extended so that it proves more once it can run. | GitHub check-run annotations on `main`; jobs show 0 steps |
+| 2 | High | The published executable could not be reproduced: every link embedded a new timestamp and build GUID, so no rebuild ever matched the published SHA-256. | Done: `scripts/normalize_pe.py`, called by both build scripts. | Two builds, one with an emptied compiler cache, byte-identical; 4 tests |
+| 3 | High | Titles containing *live*, *session*, *flip*, *rework*, *medley*, *slowed* or *reverb* as ordinary words were classed as special editions and mismatched or refused. | Done: these count only in brackets or a trailing segment. | Portable tests |
+| 4 | High | Short bracketed subtitles were deleted when a tag word occurred inside another word. | Done: whole-word matching. | Portable tests |
+| 5 | High | One global sync offset: correcting one song mistimed all others. | Done: per-song corrections, stored atomically, capped at 400 songs. | Store logic tested; UI wiring compiled only |
+| 6 | High | No way to see why a lookup failed or what the app detected, short of reading the log. | Done: diagnostic report with a per-request lookup trail; redaction of the account name and credential-like values. | Redaction tested; report generation compiled only |
+| 7 | Medium | An untimed cache entry was permanent, so timed lyrics added later were never found. | Done: re-checked after 7 days, cached words kept if nothing better. | Compiled only |
+| 8 | Medium | A provider outage followed by an ordinary miss was reported as "not found" and not retried. | Done. | Compiled only |
+| 9 | Medium | LRCLIB searches could use all 12 requests before lyrics.ovh was asked; identical URLs could be requested twice. | Done. | Compiled only |
+| 10 | Medium | Interrupted updates left `.part`, staged and helper files behind; the replacement helper waited without limit for the old process. | Done: clean-up at start, 60 s bound. | Compiled only |
+| 11 | Medium | Build scripts did not regenerate `release.json` and the site figures, so a build could leave them stale. | Done. | `tests/build_test.py`, `release_facts.py --check` |
+| 12 | Low | Help listed `[` as "quieter / brighter"; it cycles darkness. Automatic update-check failures were not logged. | Done. | Compiled only |
+| 13 | Low | In desktop mode a failed lookup shows only the scene, with no message. | Kept deliberately (an error banner across the desktop was judged worse); the reason is now in the diagnostic report. | — |
+| 14 | Low | A title with no artist is split as "Title - Artist"; the other order is tried by the lookup chain, and every candidate still has to pass title, length and edition checks. | Left as is: no wrong lyrics result, only extra requests. | Read-through |
+| 15 | Low | The updater validates size, SHA-256 and x64 PE headers, but the file is not code-signed. | Not addressable without a certificate; stated in the README. | — |
+
+### GitHub Actions: the exact limitation and the local route
+
+Workflow runs on this repository are created and then fail in about a second
+with no steps and no runner. The annotation on each job reads: *"The job was
+not started because your account is locked due to a billing issue."* Only the
+account owner can clear this (GitHub → Settings → Billing and plans). No change
+to the workflows or the source can make a job start, and the workflows
+themselves were not the cause. Consequences:
+
+- no Linux or Windows CI result exists for 1.6.0 or 1.7.0;
+- the `windows-native` job, the only automated step that would execute the
+  program on Windows, has never run;
+- the *Stable release* workflow cannot publish, so the newest GitHub Release is
+  still 1.4.0; the site (deployed by Vercel from `docs/`) is the release channel
+  that works, and the updater reads it first.
+
+Everything the Linux CI job does can be run locally, with the same pinned tools:
+
+```sh
+python3 -m venv .venv && . .venv/bin/activate
+pip install ziglang==0.17.1 Pillow==13.0.0
+export ZIG="$(python -c 'import pathlib, ziglang; print(pathlib.Path(ziglang.__file__).with_name("zig"))')"
+./scripts/build.sh          # gated build; normalises and publishes to docs/downloads
+./scripts/test.sh           # sanitizer core tests, tooling tests, docs and release facts
+python scripts/verify_build.py dist/YoutubeLyrics.exe --ico docs/brand/YoutubeLyrics.ico
+git diff --exit-code -- docs/downloads dist/YoutubeLyrics.exe   # the committed download is this build
+```
+
+When Actions is available again the CI workflow additionally (a) fails if a
+fresh build differs from the committed download and (b) runs
+`YoutubeLyrics.exe --diagnostics` on a Windows runner, which executes the
+program for real and checks the report's version and redaction. Those two
+steps were written but, for the reason above, have never been executed.
+
+## Verification status
+
+**Tested** = executed here and passed. **Partly tested** = the decision logic
+is covered by portable tests, the Windows code that calls it was only compiled.
+**Unverified** = compiled and linked, never executed.
+
+| Area | Status | What that rests on |
+| --- | --- | --- |
+| LRC / Enhanced LRC parsing, timestamps, active-line and word interpolation | Tested | portable tests, ASan/UBSan |
+| Title and artist clean-up, edition detection, candidate scoring, duration rules, wrong-song rejection | Tested | portable tests, including the 1.7.0 regressions |
+| lyrics.ovh payload validation, untimed pacing, local-file parsing | Tested | portable tests |
+| Release-metadata parsing and version comparison used by the updater | Tested | portable tests, `tests/release_test.py` |
+| Per-song offset store (parse, serialise, limits, eviction) | Tested | portable tests |
+| Report redaction | Tested | portable tests |
+| Build gate, PE/icon/version-resource verification, reproducibility, release facts, site links | Tested | `tests/build_test.py`, `verify_build.py`, `check_docs.py`, two identical builds |
+| Settings window geometry | Tested (static) | `tests/settings_layout_test.py` re-runs the layout from the source table |
+| Lookup chain, cache read/write/invalidation, retries, cancellation on track change | Partly tested | rules tested; WinHTTP and file code compiled only |
+| Updater: detection, download, checksum, staging, replacement, rollback, clean-up | Partly tested | manifest/version logic tested; download, helper script and rollback never executed |
+| Per-song sync keys, toast, status line; diagnostic report contents and export | Unverified | compiled only |
+| Seek / pause / resume tracking, track transitions, media-session changes | Unverified | compiled only; needs real players |
+| Desktop layer (WorkerW), Explorer restart, click-through, no-focus | Unverified | compiled only |
+| Full screen / window switching, multi-monitor, mixed DPI, monitor removal | Unverified | compiled only |
+| Tray icon and menu, global hotkeys, settings window appearance and keyboard use | Unverified | compiled only |
+| Sleep/resume, shutdown during a network request | Unverified | compiled only |
+| Windows 10 and Windows 11 compatibility | Unverified | manifest declares both; never launched |
+| LRCLIB and lyrics.ovh live behaviour | Unverified | the sandbox network cannot reach either; no request was made |
+| Rendering quality, contrast and typography on a real display | Unverified | no screenshot of the running app exists |
+
+## Verification performed
+
+Run on 14 November 2026 in this sandbox, on the 1.7.0 source:
+
+- `./scripts/test.sh`, exit status 0:
+  - **3,483 portable-core checks, 0 failures**, compiled with
+    `-fsanitize=address,undefined` and `-Wall -Wextra`;
+  - 4 release-metadata tests, 15 build-tooling tests (including 5 new ones for
+    reproducibility and build-script consistency), 5 settings-layout tests;
+  - `scripts/check_docs.py` and `scripts/release_facts.py --check`.
+- `./scripts/build.sh`, Zig 0.17.1 / MinGW-w64 x86-64 Windows GUI cross-build,
+  gated: icon → icon verification → resources → compile to a temporary path →
+  normalise → `verify_build.py` → publish → re-verify → regenerate release
+  manifest and site figures.
+  - **Distributed build: 1,074,688 bytes (1050 KiB)**, SHA-256
+    `23f775f63bc518d0f5c0303adcd9ba76841ece68dc7c8a87ee841aa270b3d4e3`.
+  - `verify_build.py`: `0x8664 windows-gui`, version `1.7.0`, icon frames
+    `[16, 20, 24, 32, 40, 48, 64, 96, 128, 256]`, wallpapers
+    `city-rain.jpg, forest-mist.jpg, mountain-night.jpg`.
+- **Reproducibility:** the build directory and the compiler cache were deleted
+  and the build repeated; the result was byte-identical to the first.
+- `dist/YoutubeLyrics.exe`, `docs/downloads/YoutubeLyrics.exe`, the `.sha256`
+  sidecar and `release.json` agree.
+
+One expectation written during this work was wrong and was corrected rather
+than forced: a test assumed "Song (Stereo Hearts)" keeps its bracket. "Stereo"
+is a genuine audio tag ("(Stereo)", "(Stereo Mix)"), a short bracket containing
+it is still removed, and that case is now recorded as a known limitation below.
+
+## Not verified / residual risks
+
+- **No Windows runtime.** The executable has never been launched. Every row
+  marked *Unverified* above is in that state, including all of the 1.6.0
+  display-mode work and the 1.7.0 interface additions.
+- **No CI.** See the Actions section; nothing has been checked by a second
+  machine.
+- **Providers untested live.** Availability, rate limits and result quality of
+  LRCLIB and lyrics.ovh were not exercised.
+- **No GitHub Release for 1.5.0–1.7.0.** An attempt to publish 1.6.0 by hand
+  failed during the asset upload and left nothing behind; the release workflow
+  is blocked by the Actions lock. Copies older than 1.6.0 therefore do not see
+  an update and need one manual download.
+- **Unsigned executable.** Windows SmartScreen will warn on first run. The
+  checksum proves the download matches the site, not who built it.
+- **Known matching limitation.** A short bracketed subtitle that contains a
+  real tag word as a whole word (for example "(Stereo Hearts)", "(Radio
+  Silence)") is still removed from the search title. The result is still
+  validated against artist and length, so the risk is a missed match, not a
+  wrong one.
+- **No genuine screenshot.** `docs/img/display.png` is artwork generated by
+  `scripts/brand.py` from the renderer's constants and `docs/preview.html` is a
+  simulation; both are labelled as illustrative. 
+- **No performance measurement.** No CPU, memory or start-up figures are quoted
+  because none were measured.
+- **No assistive-technology audit** of the site or the settings window.
+
+## Deliberate design decisions
+
+- **Owner-drawn settings controls.** The alternative — native `BUTTON`/`STATIC`
+  controls with `WM_CTLCOLOR*` theming — renders unreadable text against a painted
+  dark background. Owner drawing costs ~900 lines and keeps every theme exact.
+- **Settings height derived from content.** A fixed 500 px client height could
+  never fit eleven LYRICS rows at a comfortable row height; deriving the height
+  from the row table keeps the two in step, and the geometry test enforces it.
+- **The fourth background is procedural.** Adding a fourth JPEG would have grown
+  the download for no new idea. The procedural scene reuses the existing cached
+  background path and scales to any resolution.
+- **Generated release facts.** Version, size and checksum are data about a
+  specific binary; making the site cite them by hand guarantees drift.
+
+## Recommended Windows checks
+
+The quickest first step on any Windows machine is
+`YoutubeLyrics.exe --diagnostics report.txt`: it proves the program starts,
+shows the detected Windows version and monitors, and tests each provider.
+
+1. Windows 10 (1809+) and Windows 11: start, play music in YouTube Music and
+   one other player, pause, seek, skip, close the player, sleep and resume, and
+   quit during a slow lookup.
+2. Desktop mode: lyrics behind the icons, clicks pass through, focus is never
+   taken; restart Explorer and confirm the display and tray icon return.
+3. `Ctrl+Alt+F`, `F11`, double-click and `Esc` across desktop / full screen /
+   window; repeat with a second monitor at a different scale, then unplug it.
+4. Sync: nudge a song with the arrows, skip away and back, restart the app, and
+   confirm the correction returns for that song only.
+5. Settings (`Ctrl+Alt+S`): every theme, Tab/Shift+Tab reach every control with
+   a visible focus ring, Escape closes; save a diagnostic report and read it.
+6. Updater: with an older build beside a newer published release, accept the
+   update, cancel one mid-download, and disconnect the network during another.
+7. Capture genuine screenshots only from the running application and keep the
+   simulated preview labelled.
+
+## History: the 1.5.0 review (changes since 1.4.0)
 
 ### Defects found and fixed
 
@@ -81,7 +250,7 @@ keyboard at all. Both are fixed, and a test now re-runs the layout geometry.
   version resource and loads the executable with `LoadLibraryEx`.
 - **`Config::version`** written to `config.ini` for future migrations.
 
-## 1.6.0 addendum
+## History: 1.6.0
 
 1.6.0 rewrites display-mode handling (desktop / full screen / window), the
 playback-position tracker, the lyric-candidate acceptance rules and the text
@@ -100,91 +269,3 @@ sizing; `CHANGELOG.md` lists each change. What was and was not verified:
   blocked), so CI results are the local runs listed below, and the site is
   deployed from `docs/` by Vercel.
 
-## Verification performed
-
-Run on 14 November 2026 in this sandbox:
-
-- `./scripts/test.sh` — **3,428 portable-core checks, 0 failures**, compiled with
-  `-fsanitize=address,undefined` and `-Wall -Wextra`. Plus:
-  - 4 release-metadata tests,
-  - 10 build-verification/documentation tests,
-  - 5 settings-layout geometry tests,
-  - `scripts/check_docs.py` and `scripts/release_facts.py --check` (links,
-    fragments, `alt` text, simulated-preview labelling, version/size/checksum).
-- `./scripts/build.sh` — Zig/MinGW x86-64 Windows GUI cross-build. The build is
-  gated: icon generation → icon verification → resource compilation → compile to a
-  temporary path → `verify_build.py` → publish → re-verify the published copy.
-  - **Distributed build: 1,021,952 bytes (998 KiB)**, SHA-256
-    `4ce5d0d1e18e3791a2d2f344aafbe4291e5f5c88e543e90f650ccc45606a1bbf`.
-  - `verify_build.py`: `0x8664 windows-gui`, version `1.6.0`, icon frames
-    `[16, 20, 24, 32, 40, 48, 64, 96, 128, 256]`, wallpapers
-    `city-rain.jpg, forest-mist.jpg, mountain-night.jpg`.
-- `dist/YoutubeLyrics.exe` and `docs/downloads/YoutubeLyrics.exe` are
-  byte-identical; the sidecar and `release.json` are regenerated from the same
-  bytes by `scripts/generate_release.py`.
-- `scripts/make_icon.py --verify` — 10 frames, 16–256 px, every size present.
-- Import-table inspection of the built PE: `gdiplus`, `gdi32`, `user32`, `ole32`,
-  `shell32`, `dwmapi`, `winhttp`, `bcrypt`, `comctl32` and `kernel32`. `dwmapi` is
-  linked for the dark title bar; the call is best-effort and its failure is
-  ignored on Windows 10 builds that predate attribute 20.
-- Wallpaper regression check: the maximum row-to-row luma step in each scene is
-  **0.90 / 0.46 / 0.54** (previously 9.77 in *Stillwood*), and no row is flagged
-  as a hard edge.
-
-## Not verified / residual risks
-
-- **No Windows runtime.** The executable has never been launched on Windows in
-  this environment. Startup, shutdown, SMTC behaviour, WorkerW parenting,
-  click-through, tray recovery after an Explorer restart, global hotkeys, the
-  settings window, DPI changes and the updater's replacement/rollback path all
-  remain unverified at runtime. The new `windows-native` CI job is the first
-  automated step that actually loads the image on Windows; it does not replace
-  interactive testing.
-- **No genuine screenshot.** `docs/img/display.png` is artwork generated by
-  `scripts/brand.py` from the renderer's real constants, and `docs/preview.html` is
-  an interactive simulation. Both are labelled as such in the repository. No
-  screenshot from a running Windows build exists, and none is claimed.
-- **No performance measurement.** No CPU, memory, GDI-handle or startup-time
-  numbers are quoted, because none were measured. The only performance statements
-  in the README are design facts (background cache capped at ~2 MP, one composited
-  back buffer, 16 ms frame timer used only while the display is animating).
-- **Providers are untested live.** LRCLIB and lyrics.ovh availability, rate limits
-  and result quality were not exercised; no network call was made from the app.
-- **No browser accessibility audit.** The site's contrast, focus states, skip
-  link and reduced-motion handling were reviewed by reading the CSS, not with an
-  assistive-technology browser.
-- **Publication is a separate step.** A tag push runs the stable-release workflow
-  and Pages deploys from `main`. Neither was executed here; a local build is not
-  evidence that a release exists.
-
-## Deliberate design decisions
-
-- **Owner-drawn settings controls.** The alternative — native `BUTTON`/`STATIC`
-  controls with `WM_CTLCOLOR*` theming — renders unreadable text against a painted
-  dark background. Owner drawing costs ~900 lines and keeps every theme exact.
-- **Settings height derived from content.** A fixed 500 px client height could
-  never fit eleven LYRICS rows at a comfortable row height; deriving the height
-  from the row table keeps the two in step, and the geometry test enforces it.
-- **The fourth background is procedural.** Adding a fourth JPEG would have grown
-  the download for no new idea. The procedural scene reuses the existing cached
-  background path and scales to any resolution.
-- **Generated release facts.** Version, size and checksum are data about a
-  specific binary; making the site cite them by hand guarantees drift.
-
-## Recommended Windows checks
-
-1. Run the executable on Windows 10 (1809+) and Windows 11. Exercise YouTube
-   Music, another media player, paused-current and playing sessions,
-   stopped/missing sessions, track changes, sleep/resume, and exiting during a
-   slow lookup.
-2. Open settings with `Ctrl+Alt+S`, `S` and the tray item on each theme; check the
-   dark title bar, that Tab/Shift+Tab reach every control with a visible focus
-   ring, that Escape closes, and that changing a value from the tray while the
-   dialog is open updates it.
-3. Test wallpaper on/off, WorkerW recovery after an Explorer restart, mixed-DPI
-   monitors, monitor removal and the safe fallback. Confirm no focus theft and no
-   click interception.
-4. Confirm the redistributed copy still verifies:
-   `python scripts/verify_build.py docs/downloads/YoutubeLyrics.exe`.
-5. Capture genuine screenshots only from the running Windows application and keep
-   the simulated preview labelled.

@@ -80,6 +80,7 @@ rm -f "$TEMP_EXE"
   src/win/media.cc \
   src/win/lyrics.cc \
   src/win/update.cc \
+  src/win/diag.cc \
   src/win/settings.cc \
   $RES_ARG \
   -lgdiplus -lgdi32 -luser32 -lole32 -luuid -lshell32 -lshlwapi -ldwmapi \
@@ -88,6 +89,11 @@ rm -f "$TEMP_EXE"
 
 # Some Zig/MinGW versions leave an unused import archive beside the executable.
 rm -f "$BUILD_DIR/core.lib" "$BUILD_DIR/YoutubeLyrics.pdb"
+
+# 3b. Remove the link time and the build GUID derived from it, so the same
+#     source and toolchain always give the same bytes (and the same SHA-256).
+"$PYTHON" scripts/normalize_pe.py "$TEMP_EXE" \
+  || fail "could not normalize the linked executable"
 
 # 4. Verify the actual image, not the build log.
 if [ -n "$RES_ARG" ]; then
@@ -147,6 +153,15 @@ if [ -n "$RES_ARG" ]; then
 else
   "$PYTHON" scripts/verify_build.py "$DOWNLOADS" --allow-missing-resources >/dev/null \
     || fail "the published copy does not match the verified build"
+fi
+
+# 6. Release manifest and the facts printed on the site and in the README are
+#    derived from the published bytes, so one build leaves them all consistent.
+if [ -n "$RES_ARG" ]; then
+  "$PYTHON" scripts/generate_release.py --exe "$DOWNLOADS" --output-dir docs/downloads >/dev/null \
+    || fail "could not write docs/downloads/release.json"
+  "$PYTHON" scripts/release_facts.py >/dev/null \
+    || fail "could not refresh the release facts in docs/index.html and README.md"
 fi
 
 echo "built $PUBLISH_DIR ($(wc -c < "$PUBLISH_DIR") bytes)"

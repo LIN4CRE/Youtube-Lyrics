@@ -8,7 +8,9 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <mutex>
+#include <set>
 
 namespace ytl {
 
@@ -249,6 +251,44 @@ struct Result {
 };
 Result g_result;
 
+// Recent lookup activity, kept in memory for the diagnostic report.
+std::mutex g_trace_mu;
+std::deque<std::string> g_trace;
+
+void trace(const std::string& text) {
+  SYSTEMTIME st;
+  GetLocalTime(&st);
+  char stamp[16];
+  std::snprintf(stamp, sizeof(stamp), "%02d:%02d:%02d ", st.wHour, st.wMinute, st.wSecond);
+  std::lock_guard<std::mutex> lock(g_trace_mu);
+  g_trace.push_back(stamp + text);
+  while (g_trace.size() > 80) g_trace.pop_front();
+}
+
+// What a provider URL asks for, without the query (for the lookup trace).
+const char* request_kind(const std::string& url) {
+  if (url.find("lyrics.ovh") != std::string::npos) return "lyrics.ovh exact";
+  if (url.find("/api/get") != std::string::npos) return "LRCLIB exact";
+  if (url.find("track_name=") != std::string::npos) return "LRCLIB title+artist search";
+  return "LRCLIB text search";
+}
+
+// Days since a file was last written, or -1 when that cannot be read.
+int file_age_days(const std::string& path) {
+  WIN32_FILE_ATTRIBUTE_DATA data{};
+  if (!GetFileAttributesExW(utf8_to_wide(path).c_str(), GetFileExInfoStandard, &data))
+    return -1;
+  FILETIME now{};
+  GetSystemTimeAsFileTime(&now);
+  ULARGE_INTEGER a, b;
+  a.LowPart = data.ftLastWriteTime.dwLowDateTime;
+  a.HighPart = data.ftLastWriteTime.dwHighDateTime;
+  b.LowPart = now.dwLowDateTime;
+  b.HighPart = now.dwHighDateTime;
+  if (b.QuadPart <= a.QuadPart) return 0;
+  return static_cast<int>((b.QuadPart - a.QuadPart) / 10000000ULL / 86400ULL);
+}
+
 bool ensure_cache_dir() {
   static std::once_flag once;
   static bool ok = false;
@@ -482,12 +522,19 @@ bool sheet_fits(const Lyrics& sheet, const TrackInfo& want) {
 LyricsState do_lookup(const TrackInfo& track, bool force, int job_id, Lyrics& out,
                       std::string& msg, bool& cacheable) {
   cacheable = true;
+  trace("lookup: " + track_label(track) +
+        (track.duration_s > 0 ? " (" + format_time(static_cast<int64_t>(
+                                           track.duration_s * 1000.0)) + ")"
+                              : std::string(" (length unknown)")) +
+        ", edition " + track_variant_name(track.variant()) +
+        (force ? ", forced" : ""));
   // A lyric sheet the user dropped in by hand always wins, including over a
   // previously cached automatic result.
   {
     std::string manual = read_file(manual_path(track));
     Lyrics l;
     if (!manual.empty() && parse_local_lyrics(manual, l)) {
+      trace(std::string("  local file -> used (") + (l.synced ? "timed" : "untimed") + ")");
       logf("lyrics: using local override for %s", track_key(track).c_str());
       l.title = track.title;
       l.artist = track.artist;
@@ -496,6 +543,8 @@ LyricsState do_lookup(const TrackInfo& track, bool force, int job_id, Lyrics& ou
     }
   }
 
+  Lyrics stale_untimed;        // an old untimed cache entry, kept as a fallback
+  bool have_stale_untimed = false;
   if (!force && ensure_cache_dir()) {
     std::string cached;
     {
@@ -506,17 +555,35 @@ LyricsState do_lookup(const TrackInfo& track, bool force, int job_id, Lyrics& ou
     if (!cached.empty() && parse_cache(cached, l)) {
       // A cached sheet is re-checked against the track it is about to be shown
       // for; a stale or mismatched entry is dropped rather than trusted.
-      if (sheet_fits(l, track)) {
+      // An untimed sheet is the fallback answer. Catalogues gain timed lyrics
+      // all the time, so an old untimed entry is looked up again instead of
+      // pinning the song to the fallback for ever.
+      constexpr int kUntimedCacheDays = 7;
+      const int age = l.synced ? 0 : file_age_days(cache_path(track));
+      if (!sheet_fits(l, track)) {
+        trace("  cache -> entry no longer fits this recording; looking again");
+        logf("lyrics: cached sheet no longer fits %s; refetching",
+             track_key(track).c_str());
+      } else if (!l.synced && age >= kUntimedCacheDays) {
+        trace("  cache -> untimed entry is " + std::to_string(age) +
+              " days old; looking for timed lyrics again");
+        stale_untimed = l;
+        have_stale_untimed = true;
+      } else {
+        trace(std::string("  cache -> hit (") + (l.synced ? "timed" : "untimed") +
+              ", from " + (l.source.empty() ? "unknown source" : l.source) + ")");
         logf("lyrics: cache hit for %s", track_key(track).c_str());
         out = l;
         return LyricsState::Ready;
       }
-      logf("lyrics: cached sheet no longer fits %s; refetching",
-           track_key(track).c_str());
     }
   }
 
   std::string why;
+  // A network or provider failure is the reason worth reporting (and the one
+  // the display retries on); a later "not in the database" must not hide it.
+  std::string transient_why;
+  std::set<std::string> asked;  // the same URL is never requested twice
   std::string plain_fallback;   // kept in case nothing timed turns up
   Lyrics plain_lyrics;
   int tried = 0;
@@ -535,16 +602,22 @@ LyricsState do_lookup(const TrackInfo& track, bool force, int job_id, Lyrics& ou
     if (GetTickCount64() - started > kLookupBudgetMs) return false;
     const bool lrclib = url.find("lrclib.net") != std::string::npos;
     if (lrclib && lrclib_blocked) return false;
-    if (tried >= kMaxProviderAttempts) return false;
+    // The last attempt is kept for the independent fallback provider, so a
+    // long chain of LRCLIB searches cannot crowd it out.
+    if (tried >= (lrclib ? kMaxProviderAttempts - 1 : kMaxProviderAttempts)) return false;
+    if (!asked.insert(url).second) return false;
     ++tried;
     Lyrics l;
     std::string detail;
     if (!try_fetch(t, url, l, detail)) {
       if (!detail.empty()) why = detail;
-      if (lrclib &&
-          (detail.find("transport error") != std::string::npos ||
-           detail.find("rate-limited or unavailable") != std::string::npos))
-        lrclib_blocked = true;
+      const bool transient =
+          detail.find("transport error") != std::string::npos ||
+          detail.find("rate-limited or unavailable") != std::string::npos;
+      if (transient && transient_why.empty()) transient_why = detail;
+      if (lrclib && transient) lrclib_blocked = true;
+      trace(std::string("  ") + request_kind(url) + " -> " +
+            (detail.empty() ? "no result" : detail));
       return false;
     }
     // Timed lyrics for the wrong edition are a worse answer than no lyrics:
@@ -555,13 +628,19 @@ LyricsState do_lookup(const TrackInfo& track, bool force, int job_id, Lyrics& ou
            track_label(TrackInfo{l.title, l.artist, l.album, 0, std::string()}).c_str(),
            name);
       why = "No lyrics found for this recording.";
+      trace(std::string("  ") + request_kind(url) +
+            " -> rejected: wrong edition, title or length");
       return false;
     }
     if (l.synced && !l.empty()) {
       l.providers_tried = tried;
       out = l;
+      trace(std::string("  ") + request_kind(url) + " -> accepted, timed (" +
+            std::to_string(l.lines.size()) + " lines)");
       return true;
     }
+    trace(std::string("  ") + request_kind(url) +
+          " -> untimed words only; still looking for timed lyrics");
     // Untimed lyrics are still useful, but only once every timed source has
     // been tried - a scrolling sheet beats no sheet, and beats a static one.
     if (plain_fallback.empty() && !l.empty()) {
@@ -650,16 +729,24 @@ LyricsState do_lookup(const TrackInfo& track, bool force, int job_id, Lyrics& ou
   // again instead of being stuck with the fallback for ever.
   if (lrclib_blocked || GetTickCount64() - started > kLookupBudgetMs)
     cacheable = false;
+  if (plain_fallback.empty() && have_stale_untimed) {
+    // Nothing better turned up: the words already on disk are still the answer.
+    plain_fallback = stale_untimed.source.empty() ? "the cache" : stale_untimed.source;
+    plain_lyrics = stale_untimed;
+  }
   if (!plain_fallback.empty()) {
     plain_lyrics.providers_tried = tried;
     if (plain_lyrics.title.empty()) plain_lyrics.title = track.title;
     if (plain_lyrics.artist.empty()) plain_lyrics.artist = track.artist;
     logf("lyrics: falling back to untimed lyrics from %s", plain_fallback.c_str());
+    trace("  result: untimed lyrics from " + plain_fallback +
+          (cacheable ? "" : " (not cached: a provider was unreachable)"));
     out = plain_lyrics;
     return LyricsState::Ready;
   }
 
-  msg = why.empty() ? "No lyrics found." : why;
+  msg = !transient_why.empty() ? transient_why : (why.empty() ? "No lyrics found." : why);
+  trace("  result: none after " + std::to_string(tried) + " request(s): " + msg);
   return LyricsState::NotFound;
 }
 
@@ -783,6 +870,31 @@ void lyrics_stop() {
     g_has_job = false;
   }
 }
+std::vector<std::string> lyrics_recent_lookups() {
+  std::lock_guard<std::mutex> lock(g_trace_mu);
+  return std::vector<std::string>(g_trace.begin(), g_trace.end());
+}
+
+bool lyrics_cache_stats(int* files, uint64_t* bytes) {
+  *files = 0;
+  *bytes = 0;
+  const std::string directory = appdata_dir() + "\\cache";
+  std::lock_guard<std::mutex> lock(g_cache_mu);
+  WIN32_FIND_DATAW entry{};
+  HANDLE search = FindFirstFileW(utf8_to_wide(directory + "\\*").c_str(), &entry);
+  if (search == INVALID_HANDLE_VALUE) {
+    const DWORD error = GetLastError();
+    return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+  }
+  do {
+    if (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+    ++*files;
+    *bytes += (static_cast<uint64_t>(entry.nFileSizeHigh) << 32) | entry.nFileSizeLow;
+  } while (FindNextFileW(search, &entry));
+  FindClose(search);
+  return true;
+}
+
 int lyrics_clear_cache() {
   if (!ensure_cache_dir()) return -1;
   std::lock_guard<std::mutex> lock(g_cache_mu);

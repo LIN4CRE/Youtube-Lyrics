@@ -188,6 +188,12 @@ struct App {
   int64_t lyrics_retry_at = 0;
   int lyrics_retries = 0;
 
+  // Sync corrections remembered per song (offsets.txt), and the one that
+  // applies to the track on screen. cfg.offset_ms is the all-songs baseline.
+  OffsetStore song_offsets;
+  std::string song_offset_key;
+  int song_offset_ms = 0;
+
   // laid out display lines
   std::vector<DispLine> disp;
   std::vector<LyricLine> pending_plain_lines;  // estimated rows for untimed text
@@ -255,7 +261,12 @@ struct App {
   void cycle_wallpaper_interval();
   void cycle_wallpaper_dim();
   void toggle_random_wallpaper_start();
-  void nudge_offset(int delta_ms);
+  void nudge_offset(int delta_ms);        // all songs (Settings)
+  void nudge_song_offset(int delta_ms);   // the song on screen (arrow keys)
+  void reset_offsets();                   // this song and the baseline
+  void load_song_offset();                // after the track on screen changes
+  int total_offset_ms() const;            // baseline + this song, clamped
+  void export_diagnostics();
   void set_font_scale(double scale);
   void show_toast(const std::string& text, int ms = 1800);
   void toggle_help();
@@ -297,8 +308,23 @@ void lyrics_stop();
 void lyrics_enqueue(const TrackInfo& track, int req_id, bool force);
 bool lyrics_take_result(int req_id, LyricsState* state, Lyrics* lyrics, std::string* msg);
 int lyrics_clear_cache();  // returns deleted file count, or -1 on failure
+// For the diagnostic report: the last lookups and what each provider answered,
+// and the size of the automatic cache.
+std::vector<std::string> lyrics_recent_lookups();
+bool lyrics_cache_stats(int* files, uint64_t* bytes);
+
+// Implemented in diag.cc
+// Plain-text description of what the app is seeing. `with_connectivity` also
+// contacts each provider and the update sources (slow; command line only).
+std::string build_diagnostic_report(App& app, bool with_connectivity);
+bool write_diagnostic_report(const std::string& report, const std::string& path);
+// Writes a report into the data folder, copies it to the clipboard and shows
+// it in Explorer.
+bool export_diagnostic_report(App& app, std::string* saved_path);
 
 // Implemented in app.cc, used by the other modules
+// True when Explorer's WorkerW desktop layer can be found right now.
+bool desktop_host_available();
 void logf(const char* fmt, ...);
 // Deliberately fails in release mode instead of shipping a silently missing
 // asset: used for the initial window and tray icon paths.
