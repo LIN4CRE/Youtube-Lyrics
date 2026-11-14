@@ -2,7 +2,7 @@
 
 **Reviewed:** 14 November 2026
 
-**Version under review:** 1.7.1
+**Version under review:** 1.8.0 (unreleased; the 1.7.1 review is kept below)
 
 **Repository:** `LIN4CRE/Youtube-Lyrics`
 
@@ -16,6 +16,94 @@
 > package registries. **No Windows runtime claim and no live-provider claim is
 > made anywhere in this document.** The status table below separates what was
 > tested from what was only compiled.
+
+## 1.8.0: desktop wallpaper mode rebuilt
+
+Baseline: `main` at `8eda93e` (1.7.1). Work on branch
+`arena/c9ccf35d-youtube-lyrics`.
+
+> **Nothing in this section has been run on Windows.** The code compiles and
+> links for x64, and the portable tests pass. Whether the layer really attaches
+> beneath the icons on any given Windows build is **unverified**. This version
+> must not be tagged or published until the checks below have been run on a PC.
+
+### Forensic review: why desktop mode could behave like a window
+
+Both suspected causes were checked against the 1.7.1 source.
+
+| Suspect | Finding | Evidence |
+| --- | --- | --- |
+| A saved `wallpaper=0` overriding the default | **Real, but always user-initiated.** The default has been `true` since the setting was introduced and a missing key means desktop mode. The value is written in exactly one place, `App::set_display_mode`. Every route that clears it is a user action (`Ctrl+Alt+W`, `F11` / double-click / `Ctrl+Alt+F`, `Esc`, tray, Settings); nothing clears it automatically. Once cleared it persists across restarts, and nothing in the UI said how to return. | `Config::load`, `set_display_mode`, `toggle_fullscreen`, `toggle_wallpaper_mode`; `git log -S'bool wallpaper ='` |
+| WorkerW discovery / parenting failing into the fallback | **Real, and silent.** `find_desktop_host()` only recognised a top-level `WorkerW` following the window that holds `SHELLDLL_DefView`. When none was found, or `SetParent` did not stick, `apply_desktop_mode()` created a top-level colour-keyed `WS_POPUP` at `HWND_BOTTOM` on one monitor and carried on as "desktop mode", with one log line. That window is above the icons. On Windows 11 24H2 and later the icon view and the wallpaper worker are both children of `Progman`, which that lookup does not match. *This last point is from public descriptions of the newer layout, not from a machine observed here.* | `find_desktop_host`, `apply_desktop_mode` in 1.7.1 |
+| (found during review) Opaque rendering | Even when attached, every frame painted the app's own scene over the entire host, so the user's wallpaper was replaced permanently, including with no music. "Looking for lyrics…", the progress bar, source line, hint and toasts were drawn on the desktop. | `render_frame`, `App::paint` (`BitBlt`) |
+| (found during review) Lifetime | The main window itself was re-parented into Explorer. A child window is destroyed with its parent, so an Explorer exit could destroy the main window and end the program before `TaskbarCreated` arrived. | `apply_desktop_mode`, `WM_DESTROY` |
+
+Which of the first two a particular user hit cannot be determined from source;
+the diagnostic report now records both the saved mode and the real attachment.
+
+### What changed
+
+- `src/win/desktop.cc` (new): shell discovery for three layouts, a separate
+  `WS_CHILD | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE` layer
+  created under the host window's DPI awareness context, drawn with
+  `UpdateLayeredWindow` from a premultiplied 32-bit buffer. After creation it
+  verifies the real parent, the layered style and its z-order relative to the
+  icon view rather than trusting return values.
+- Attachment state machine: inactive / attached / retrying / failed / restored
+  after loss. Five quick retries, then a slow retry and one tray notice.
+  There is no top-level fallback.
+- The main window stays a hidden top-level window in desktop mode and owns the
+  tray icon, hotkeys and timers.
+- Presence: fade in when lyrics for the playing song are ready; optional dim on
+  pause; fade out on stop, closed session, or a two-minute pause.
+- Rendering on the layer: transparent clear, greyscale anti-aliasing, dark
+  halo; no status, hint, help, toast, progress bar or "looking" text.
+- Settings: three modes, status line, restore/retry button, three new options
+  (`desktop_scene`, `show_track`, `dim_paused` in `config.ini`).
+- `--desktop-test` and the *DESKTOP INTEGRATION* report section.
+
+### Known design limits
+
+- The layer covers the **primary monitor** only.
+- The layer is a layered child window, which needs Windows 8 or later; the
+  manifest already declares Windows 8–11. If per-pixel drawing is refused, the
+  layer falls back to an opaque child showing a scene and says so in its status.
+- Layer redraw is capped at about 30 frames a second while lyrics are visible
+  and does not run at all while idle.
+- Song changes fade the old lyrics out and the new ones in; there is no
+  cross-fade.
+
+### Verification performed
+
+| Check | Result |
+| --- | --- |
+| Cross-build of the x64 executable (`scripts/build.sh`) | Passed, no warnings |
+| `scripts/test.sh` (core, release, build-tooling, settings-layout tests, docs checks) | Passed |
+| PE / icon / version-resource verification | Passed |
+| Starting the executable | **Not done: no Windows available** |
+| Any of the 14 desktop checks below | **Not done** |
+
+### Windows checks required before release (all outstanding)
+
+Run `YoutubeLyrics.exe --desktop-test result.txt` first; it covers D1–D5
+mechanically and saves a screenshot. The rest need a person and real playback.
+
+| # | Check | Pass when |
+| --- | --- | --- |
+| D1 | Fresh launch (no `config.ini`) | Desktop mode; no window appears; tray notice only |
+| D2 | Behind icons | Lyrics are drawn under the desktop icons |
+| D3 | Desktop usable | Icons can be clicked, dragged, right-clicked through the lyrics |
+| D4 | Focus | Starting, song changes and fades never move keyboard focus |
+| D5 | Stacking | Every normal window is above the lyrics |
+| D6 | Music starts | Lyrics fade in without any action |
+| D7 | Song change | Lyrics change to the new song; never the previous song's words |
+| D8 | Pause / resume | Position holds while paused and is in sync after resume |
+| D9 | Stop / close player | Lyrics fade out; desktop is clean |
+| D10 | Explorer restart | Lyrics and tray icon return; status reads "restored" |
+| D11 | Sleep / resume | Layer still attached and in sync |
+| D12 | Two monitors, mixed scaling | Layer fills the primary monitor exactly; text sharp |
+| D13 | Mode switching | Desktop ↔ full screen ↔ window from tray, Settings and hotkeys |
+| D14 | Reboot | The selected mode is used on next start |
 
 ## 1.7.1: second independent review
 
@@ -251,7 +339,7 @@ is covered by portable tests, the Windows code that calls it was only compiled.
 | Updater: detection, download, checksum, staging, replacement, rollback, clean-up | Partly tested | manifest/version logic tested; download, helper script and rollback never executed |
 | Per-song sync keys, toast, status line; diagnostic report contents and export | Unverified | compiled only |
 | Seek / pause / resume tracking, track transitions, media-session changes | Unverified | compiled only; needs real players |
-| Desktop layer (WorkerW), Explorer restart, click-through, no-focus | Unverified | compiled only |
+| Desktop layer (rebuilt in 1.8.0), Explorer restart, click-through, no-focus, fades | Unverified | compiled only; `--desktop-test` written, never executed |
 | Full screen / window switching, multi-monitor, mixed DPI, monitor removal | Unverified | compiled only |
 | Tray icon and menu, global hotkeys, settings window appearance and keyboard use | Unverified | compiled only |
 | Sleep/resume, shutdown during a network request | Unverified | compiled only |

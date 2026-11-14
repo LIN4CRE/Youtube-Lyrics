@@ -203,7 +203,13 @@ HICON make_app_icon(int size) {
 // ------------------------------------------------------------------ app bits
 
 void invalidate_window(App& app) {
-  if (app.hwnd) InvalidateRect(app.hwnd, nullptr, FALSE);
+  if (!app.hwnd) return;
+  if (app.cfg.mode() == DisplayMode::Desktop) {
+    // The main window is hidden; the layer is redrawn by the frame timer.
+    SetTimer(app.hwnd, UINT_PTR{1} /* kFrameTimer */, 16, nullptr);
+    return;
+  }
+  InvalidateRect(app.hwnd, nullptr, FALSE);
 }
 
 void reset_document(App& app) {
@@ -512,68 +518,10 @@ void on_lyrics(App& app) {
 
 // ---------------------------------------------------------------- fullscreen
 
-BOOL CALLBACK find_workerw_after_desktop(HWND top, LPARAM param) {
-  HWND def_view = FindWindowExW(top, nullptr, L"SHELLDLL_DefView", nullptr);
-  if (!def_view) return TRUE;
-  HWND worker = FindWindowExW(nullptr, top, L"WorkerW", nullptr);
-  if (worker) {
-    *reinterpret_cast<HWND*>(param) = worker;
-    return FALSE;
-  }
-  return TRUE;
-}
-
-HWND find_desktop_host() {
-  HWND progman = FindWindowW(L"Progman", nullptr);
-  if (!progman) return nullptr;
-
-  DWORD_PTR ignored = 0;
-  // Send 0x052C with 0, 0 to spawn the WorkerW behind desktop icons.
-  // Note: Do not send 0x0000000D because 0x0000000D destroys WorkerW.
-  SendMessageTimeoutW(progman, 0x052C, 0, 0, SMTO_NORMAL, 1000, &ignored);
-
-  // Modern Windows 11 check (Build 22000+, 24H2 / 26xxx):
-  // Progman contains SHELLDLL_DefView and WorkerW as direct children!
-  HWND def_view = FindWindowExW(progman, nullptr, L"SHELLDLL_DefView", nullptr);
-  if (def_view) {
-    HWND worker = FindWindowExW(progman, def_view, L"WorkerW", nullptr);
-    if (!worker) worker = FindWindowExW(progman, nullptr, L"WorkerW", nullptr);
-    if (worker && IsWindow(worker)) return worker;
-  }
-
-  // Windows 10 check:
-  // SHELLDLL_DefView is inside a top-level window (WorkerW or Progman),
-  // and the target WorkerW is the top-level sibling directly behind it.
-  HWND host = nullptr;
-  for (int attempt = 0; attempt < 6; ++attempt) {
-    EnumWindows(find_workerw_after_desktop, reinterpret_cast<LPARAM>(&host));
-    if (host && IsWindow(host)) return host;
-    Sleep(50);
-  }
-  return host;
-}
-
-void apply_desktop_mode(App& app);
-
-}  // namespace
-
-bool desktop_host_available() {
-  const HWND host = find_desktop_host();
-  return host != nullptr && IsWindow(host);
-}
-
-namespace {
-
 void enable_dark_titlebar(HWND hwnd) {
   BOOL dark = TRUE;
   DwmSetWindowAttribute(hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark,
                         sizeof(dark));
-}
-
-bool is_desktop_styled(HWND hwnd) {
-  const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-  const LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-  return (style & WS_CHILD) != 0 || (ex & (WS_EX_TRANSPARENT | WS_EX_NOACTIVATE)) != 0;
 }
 
 // Remembers where the ordinary window is, so leaving and re-entering window
@@ -633,18 +581,19 @@ RECT usable_window_rect(const App& app, const MONITORINFO& fallback_monitor) {
   return RECT{x, y, x + w, y + h};
 }
 
-// Puts the window into the mode the config asks for. This is the only function
-// that restyles, re-parents or repositions the main window.
+// Puts the display into the mode the config asks for. This is the only function
+// that shows, hides, restyles or repositions the main window.
 //
-// The two foreground modes used to be reached by patching styles on top of
-// whatever the desktop layer had left behind (WS_CHILD of Explorer's WorkerW,
-// click-through, never activated, no taskbar button). Leaving the desktop layer
-// is now explicit and happens first, so "Full screen" really is a focused
-// window in front of everything else.
+// Desktop mode does not touch the main window beyond hiding it: the lyrics are
+// drawn by a separate layer window inside Explorer's desktop (desktop.cc). The
+// main window used to be re-parented into Explorer itself, which meant it was
+// destroyed, and the program quit, whenever Explorer exited. When the layer
+// cannot be attached nothing is shown at all; a top-level window pretending to
+// be wallpaper sits in front of the desktop icons, and that is not this mode.
 void apply_window_mode(App& app, bool activate = true) {
   if (!app.hwnd) return;
   const DisplayMode mode = app.cfg.mode();
-  const bool was_desktop = is_desktop_styled(app.hwnd);
+  const bool was_desktop = app.desktop.state != DesktopAttach::Inactive;
   if (!was_desktop) remember_window_rect(app);
   app.windowed = mode == DisplayMode::Window;
   app.hidden_to_tray = false;
@@ -653,31 +602,25 @@ void apply_window_mode(App& app, bool activate = true) {
   app.view.last_mouse = app.now_ms();
 
   if (mode == DisplayMode::Desktop) {
+    app.cfg.topmost = false;
+    ShowWindow(app.hwnd, SW_HIDE);
     if (!was_desktop) {
-      // Hide while the taskbar button and the styles change, so the window is
-      // never seen half-converted in front of other applications.
-      ShowWindow(app.hwnd, SW_HIDE);
-      if (IsZoomed(app.hwnd) || IsIconic(app.hwnd)) {
-        WINDOWPLACEMENT placement{};
-        placement.length = sizeof(placement);
-        if (GetWindowPlacement(app.hwnd, &placement)) {
-          placement.showCmd = SW_HIDE;
-          placement.flags = 0;
-          SetWindowPlacement(app.hwnd, &placement);
-        }
-      }
-      SetWindowLongPtrW(app.hwnd, GWL_STYLE, WS_POPUP | WS_CLIPCHILDREN);
+      app.presence = 0.0;
+      app.desktop.state = DesktopAttach::Retrying;
+      app.desktop.attempts = 0;
+      app.desktop.next_retry_at = 0;
+      app.desktop.failure_notified = false;
     }
-    apply_desktop_mode(app);
-    ShowWindow(app.hwnd, SW_SHOWNOACTIVATE);
-    invalidate_window(app);
+    desktop_layer_tick(app, true);
     return;
   }
 
-  // Where should a foreground window appear? Coming from the desktop layer the
-  // window spans every monitor, so use the one the user is working on.
+  desktop_layer_detach(app);
+
+  // Where should a foreground window appear? Coming from the desktop layer
+  // there is no window position to go by, so use the monitor the user is on.
   HMONITOR monitor = nullptr;
-  if (was_desktop) {
+  if (was_desktop || !IsWindowVisible(app.hwnd)) {
     POINT cursor{};
     GetCursorPos(&cursor);
     monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTOPRIMARY);
@@ -691,19 +634,7 @@ void apply_window_mode(App& app, bool activate = true) {
     mi.rcWork = mi.rcMonitor;
   }
 
-  if (was_desktop) {
-    ShowWindow(app.hwnd, SW_HIDE);
-    if (GetParent(app.hwnd) != nullptr ||
-        (GetWindowLongPtrW(app.hwnd, GWL_STYLE) & WS_CHILD) != 0) {
-      SetLastError(ERROR_SUCCESS);
-      if (!SetParent(app.hwnd, nullptr) && GetLastError() != ERROR_SUCCESS) {
-        logf("window: could not detach from the desktop layer (error %lu)",
-             static_cast<unsigned long>(GetLastError()));
-      }
-    }
-    app.desktop_parented = false;
-    app.desktop_host = nullptr;
-  } else if (IsZoomed(app.hwnd) || IsIconic(app.hwnd)) {
+  if (IsZoomed(app.hwnd) || IsIconic(app.hwnd)) {
     // Styles are about to change; a maximised or minimised state would be
     // carried into the new mode and leave the window the wrong size.
     ShowWindow(app.hwnd, SW_RESTORE);
@@ -743,112 +674,13 @@ void apply_window_mode(App& app, bool activate = true) {
   invalidate_window(app);
 }
 
-// Places the display in the actual WorkerW desktop layer, behind desktop icons
-// but above the wallpaper. When WorkerW is unavailable, fall back to the bottom
-// of the top-level z-order; the tray toggle remains available either way.
-void apply_desktop_mode(App& app) {
-  if (!app.hwnd) return;
-  if (app.cfg.mode() != DisplayMode::Desktop) return;
-  if (app.hidden_to_tray) return;  // hidden on purpose; do not re-show it
-  // This runs again on every retry and display change; only a change of
-  // outcome is worth a log line.
-  static int last_logged = -1;
-  {
-    // A wallpaper is never topmost. WorkerW is a shell-owned desktop surface
-    // below SHELLDLL_DefView (the icon view), not a transparent foreground HWND.
-    if (!app.desktop_parented) {
-      SetWindowPos(app.hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
-                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
-    }
-    app.cfg.topmost = false;
-
-    if (app.desktop_parented &&
-        (!IsWindow(app.desktop_host) || GetParent(app.hwnd) != app.desktop_host)) {
-      SetLastError(ERROR_SUCCESS);
-      SetParent(app.hwnd, nullptr);
-      app.desktop_parented = false;
-      app.desktop_host = nullptr;
-    }
-    if (!app.desktop_parented) {
-      const HWND host = find_desktop_host();
-      if (host && IsWindow(host)) {
-        // A child window must have WS_CHILD style before SetParent across processes.
-        LONG_PTR child_style = GetWindowLongPtrW(app.hwnd, GWL_STYLE);
-        child_style &= ~WS_POPUP;
-        child_style |= WS_CHILD | WS_VISIBLE;
-        SetWindowLongPtrW(app.hwnd, GWL_STYLE, child_style);
-
-        SetLastError(ERROR_SUCCESS);
-        const HWND previous = SetParent(app.hwnd, host);
-        const DWORD error = GetLastError();
-        if (previous || error == ERROR_SUCCESS || GetParent(app.hwnd) == host) {
-          app.desktop_host = host;
-          app.desktop_parented = true;
-        } else {
-          logf("window: SetParent to WorkerW failed (error %lu)",
-               static_cast<unsigned long>(error));
-        }
-      }
-    }
-
-    LONG_PTR ex = GetWindowLongPtrW(app.hwnd, GWL_EXSTYLE);
-    ex |= WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TRANSPARENT;
-    ex &= ~WS_EX_APPWINDOW;
-    SetWindowLongPtrW(app.hwnd, GWL_EXSTYLE, ex);
-
-    if (app.desktop_parented && IsWindow(app.desktop_host)) {
-      SetLayeredWindowAttributes(app.hwnd, 0, 255, LWA_ALPHA);
-      LONG_PTR style = GetWindowLongPtrW(app.hwnd, GWL_STYLE);
-      style &= ~WS_POPUP;
-      style |= WS_CHILD | WS_VISIBLE;
-      SetWindowLongPtrW(app.hwnd, GWL_STYLE, style);
-      RECT r{};
-      if (!GetClientRect(app.desktop_host, &r) || r.right - r.left < 8 ||
-          r.bottom - r.top < 8) {
-        logf("window: WorkerW has no usable client area");
-        return;
-      }
-      // The WorkerW client rectangle is used instead of the primary monitor's
-      // dimensions, so Explorer's virtual-desktop surface can cover all displays.
-      SetWindowPos(app.hwnd, HWND_BOTTOM, 0, 0, r.right - r.left, r.bottom - r.top,
-                   SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
-      if (last_logged != 1) {
-        last_logged = 1;
-        logf("window: attached to desktop WorkerW %p (%ldx%ld)", app.desktop_host,
-             r.right - r.left, r.bottom - r.top);
-      }
-    } else {
-      // Safe fallback: transparent bottom-z-order layer so desktop icons are NOT obscured.
-      LONG_PTR style = GetWindowLongPtrW(app.hwnd, GWL_STYLE);
-      style &= ~WS_CHILD;
-      style |= WS_POPUP | WS_VISIBLE;
-      SetWindowLongPtrW(app.hwnd, GWL_STYLE, style);
-      SetLayeredWindowAttributes(app.hwnd, RGB(16, 16, 24), 255, LWA_COLORKEY);
-
-      MONITORINFO mi{};
-      mi.cbSize = sizeof(mi);
-      GetMonitorInfoW(MonitorFromWindow(app.hwnd, MONITOR_DEFAULTTONEAREST), &mi);
-      SetWindowPos(app.hwnd, HWND_BOTTOM, mi.rcMonitor.left, mi.rcMonitor.top,
-                   mi.rcMonitor.right - mi.rcMonitor.left,
-                   mi.rcMonitor.bottom - mi.rcMonitor.top,
-                   SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
-      if (last_logged != 0) {
-        last_logged = 0;
-        logf("window: WorkerW unavailable; safe transparent bottom-z-order fallback");
-      }
-    }
-  }
-}
-
 void toggle_wallpaper_mode(App& app) {
   // Off returns to whichever foreground mode was last used.
   if (app.cfg.wallpaper) {
     app.set_display_mode(app.cfg.fullscreen ? DisplayMode::Fullscreen
                                             : DisplayMode::Window);
-    app.show_toast("Desktop background off");
   } else {
     app.set_display_mode(DisplayMode::Desktop);
-    app.show_toast("Desktop background on \xC2\xB7 Ctrl+Alt+W to switch off");
   }
 }
 
@@ -871,7 +703,7 @@ void add_tray_icon(App& app) {
 
 // A balloon from the tray icon. Used for things that must be said while the
 // main window is hidden and therefore cannot show a toast of its own.
-void notify_from_tray(App& app, const wchar_t* title, const wchar_t* text) {
+void tray_balloon(App& app, const wchar_t* title, const wchar_t* text) {
   NOTIFYICONDATAW nid{};
   nid.cbSize = sizeof(nid);
   nid.hWnd = app.hwnd;
@@ -1002,9 +834,17 @@ void show_tray_menu(App& app) {
   // The three display modes are one choice, shown as one radio group.
   const DisplayMode mode = app.cfg.mode();
   AppendMenuW(menu, MF_STRING, 7,
-              L"On the desktop, behind windows\tCtrl+Alt+W");
+              L"Desktop wallpaper, behind the icons\tCtrl+Alt+W");
   AppendMenuW(menu, MF_STRING, 2, L"Full screen, in front\tCtrl+Alt+F");
-  AppendMenuW(menu, MF_STRING, 20, L"In a window");
+  AppendMenuW(menu, MF_STRING, 20, L"Ordinary window");
+  if (mode == DisplayMode::Desktop) {
+    // What is actually true right now, not what the setting hopes for.
+    AppendMenuW(menu, MF_STRING | MF_GRAYED, 0,
+                (L"   " + utf8_to_wide(desktop_layer_status(app))).c_str());
+    if (app.desktop.state == DesktopAttach::Retrying ||
+        app.desktop.state == DesktopAttach::Failed)
+      AppendMenuW(menu, MF_STRING, 22, L"   Try attaching to the desktop again");
+  }
   CheckMenuRadioItem(menu, 0, 0, 0, MF_BYCOMMAND);
   const UINT mode_item = mode == DisplayMode::Desktop
                              ? 7u
@@ -1019,6 +859,8 @@ void show_tray_menu(App& app) {
                         (mode == DisplayMode::Desktop ? MF_GRAYED : 0),
               3, L"Always on top\tA");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(menu, MF_STRING | (app.cfg.desktop_scene ? MF_CHECKED : 0), 23,
+              L"Cinematic scene instead of my wallpaper");
   AppendMenuW(menu, MF_STRING, 13, L"Next cinematic wallpaper\tB");
   AppendMenuW(menu, MF_STRING | (app.cfg.wallpaper_auto_rotate ? MF_CHECKED : 0),
               14, L"Automatic wallpaper rotation");
@@ -1069,6 +911,20 @@ void show_tray_menu(App& app) {
       break;
     case 7:
       app.set_display_mode(DisplayMode::Desktop);
+      break;
+    case 22:
+      app.desktop.attempts = 0;
+      app.desktop.failure_notified = false;
+      app.desktop.state = DesktopAttach::Retrying;
+      desktop_layer_tick(app, true);
+      settings_refresh(app);
+      break;
+    case 23:
+      app.cfg.desktop_scene = !app.cfg.desktop_scene;
+      app.view.bg_theme = -1;
+      app.cfg.save();
+      settings_refresh(app);
+      invalidate_window(app);
       break;
     case 13:
       app.next_wallpaper();
@@ -1169,18 +1025,11 @@ void on_timer(App& app) {
     return;
   }
 
-  // Explorer creates its WorkerW lazily, so a failed attach is retried: quickly
-  // at first, then rarely. Each attempt blocks this thread for up to a second,
-  // and retrying every two seconds for ever made the whole display stutter on
-  // machines where the desktop layer is simply not available.
-  static int64_t last_workerw_retry = 0;
-  static int workerw_attempts = 0;
-  if (app.cfg.mode() != DisplayMode::Desktop || app.desktop_parented) {
-    workerw_attempts = 0;
-  } else if (now - last_workerw_retry > (workerw_attempts < 5 ? 2000 : 60000)) {
-    last_workerw_retry = now;
-    ++workerw_attempts;
-    apply_desktop_mode(app);
+  // Desktop layer: health check, repositioning, and retries while detached.
+  {
+    const DesktopAttach before = app.desktop.state;
+    desktop_layer_tick(app, false);
+    if (before != app.desktop.state) settings_refresh(app);
   }
 
   // Automatic second try after a network or provider failure.
@@ -1198,7 +1047,7 @@ void on_timer(App& app) {
   const int64_t interval =
       static_cast<int64_t>(std::max(5, app.cfg.wallpaper_interval_minutes)) * 60 * 1000;
   if (app.view.wallpaper_changed_at == 0) app.view.wallpaper_changed_at = now;
-  if (app.cfg.wallpaper && app.cfg.wallpaper_auto_rotate &&
+  if (app.cfg.wallpaper && app.cfg.desktop_scene && app.cfg.wallpaper_auto_rotate &&
       now - app.view.wallpaper_changed_at >= interval) {
     app.cfg.wallpaper_index = (app.cfg.wallpaper_index + 1) % kWallpaperCount;
     app.view.wallpaper_changed_at = now;
@@ -1212,9 +1061,7 @@ void on_timer(App& app) {
   app.view.last_frame = now;
   if (dt > 0.25) dt = 0.25;
 
-  RECT rc{};
-  GetClientRect(app.hwnd, &rc);
-  const int h = rc.bottom - rc.top;
+  const int h = app.surface_size().cy;
   const int64_t pos = app.current_pos_ms();
   const int new_active = (app.lyrics.synced || app.timing_estimated)
                              ? active_index(app.disp, pos)
@@ -1273,6 +1120,55 @@ void on_timer(App& app) {
                           app.lstate == LyricsState::Idle;
   const bool rapid_frame = animating || app.view.toast_until > now || lyric_progress;
 
+  if (app.cfg.mode() == DisplayMode::Desktop) {
+    // The desktop layer is present only while there is something to sing
+    // along to. It fades in when lyrics for the playing song are ready, dims a
+    // little while paused, and fades out, leaving the bare desktop, when the
+    // music stops, the session closes, or a pause has lasted two minutes
+    // (browsers report the end of a song as a pause, not a stop).
+    const bool playing = app.session_present && app.active_media.playing;
+    if (playing) {
+      app.paused_since = 0;
+    } else if (app.paused_since == 0) {
+      app.paused_since = now;
+    }
+    const bool has_lyrics = app.session_present && !app.active_track.title.empty() &&
+                            app.lstate == LyricsState::Ready && !app.disp.empty();
+    // Only a real pause holds the words on screen. "stopped", "closed" and a
+    // vanished session all mean the music is over.
+    const bool recently_paused =
+        app.active_media.status == "paused" && now - app.paused_since < 120000;
+    double wanted = 0.0;
+    if (has_lyrics && playing) {
+      wanted = 1.0;
+    } else if (has_lyrics && recently_paused) {
+      wanted = app.cfg.dim_paused ? 0.55 : 1.0;
+    }
+    // Players drop their session for a moment between songs; do not blink.
+    if (!app.session_present && has_lyrics == false && !app.disp.empty() &&
+        app.lstate == LyricsState::Ready && now - app.paused_since < 1500)
+      wanted = app.presence;
+    if (app.hidden_to_tray) wanted = 0.0;
+    // Linear fades: about 0.6 s in, 0.9 s out.
+    const double step = dt / (wanted > app.presence ? 0.6 : 0.9);
+    if (app.presence < wanted) app.presence = std::min(wanted, app.presence + step);
+    else if (app.presence > wanted) app.presence = std::max(wanted, app.presence - step);
+    const bool fading = std::fabs(app.presence - wanted) > 0.0005;
+
+    const bool attached = app.desktop.state == DesktopAttach::Attached ||
+                          app.desktop.state == DesktopAttach::Restored;
+    if (attached && app.presence > 0.0) {
+      desktop_layer_present(app, static_cast<int>(std::lround(app.presence * 255.0)));
+    } else {
+      desktop_layer_hide(app);
+    }
+    // 30 frames a second is ample for a wallpaper and halves the cost of
+    // pushing a full-monitor surface; nothing is drawn at all while idle.
+    const bool moving = fading || (app.presence > 0.0 && (rapid_frame || animating));
+    SetTimer(app.hwnd, kFrameTimer, moving ? 33u : 500u, nullptr);
+    return;
+  }
+
   // Static wallpaper idles at one cheap timer tick per second; only lyric motion,
   // progress, or a toast requests a repaint. Automatic rotation is independent.
   const bool minimized = IsIconic(app.hwnd) != 0;
@@ -1294,6 +1190,10 @@ void on_timer(App& app) {
 }
 
 }  // namespace
+
+void notify_from_tray(App& app, const wchar_t* title, const wchar_t* text) {
+  tray_balloon(app, title, text);
+}
 
 // ---------------------------------------------------------------- log / files
 
@@ -1481,6 +1381,9 @@ void Config::load() {
       wallpaper_interval_minutes = static_cast<int>(std::max<int64_t>(5, std::min<int64_t>(240, integer)));
     else if (k == "wallpaper_dim" && parse_config_integer(v, &integer))
       wallpaper_dim = static_cast<int>(std::max<int64_t>(0, std::min<int64_t>(60, integer)));
+    else if (k == "desktop_scene") desktop_scene = (v == "1");
+    else if (k == "show_track") show_track = (v == "1");
+    else if (k == "dim_paused") dim_paused = (v == "1");
     else if (k == "win_x" && parse_config_integer(v, &integer))
       win_x = static_cast<int>(std::max<int64_t>(-100000, std::min<int64_t>(100000, integer)));
     else if (k == "win_y" && parse_config_integer(v, &integer))
@@ -1524,6 +1427,9 @@ void Config::save() const {
   data += std::string("wallpaper_auto_rotate=") + (wallpaper_auto_rotate ? "1" : "0") + "\n";
   data += "wallpaper_interval_minutes=" + std::to_string(wallpaper_interval_minutes) + "\n";
   data += "wallpaper_dim=" + std::to_string(wallpaper_dim) + "\n";
+  data += std::string("desktop_scene=") + (desktop_scene ? "1" : "0") + "\n";
+  data += std::string("show_track=") + (show_track ? "1" : "0") + "\n";
+  data += std::string("dim_paused=") + (dim_paused ? "1" : "0") + "\n";
   data += "win_x=" + std::to_string(win_x) + "\n";
   data += "win_y=" + std::to_string(win_y) + "\n";
   data += "win_w=" + std::to_string(win_w) + "\n";
@@ -1577,10 +1483,21 @@ void App::request_lyrics(const TrackInfo& track, bool force) {
   invalidate_window(*this);
 }
 
-void App::rebuild_layout(bool force) {
+SIZE App::surface_size() const {
+  if (cfg.mode() == DisplayMode::Desktop) {
+    if (desktop.w > 0 && desktop.h > 0) return SIZE{desktop.w, desktop.h};
+    // Not attached yet: lay out for the primary monitor, which is where the
+    // layer will be.
+    return SIZE{GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
+  }
   RECT rc{};
   if (hwnd) GetClientRect(hwnd, &rc);
-  int w = rc.right - rc.left, h = rc.bottom - rc.top;
+  return SIZE{rc.right - rc.left, rc.bottom - rc.top};
+}
+
+void App::rebuild_layout(bool force) {
+  const SIZE surface = surface_size();
+  int w = surface.cx, h = surface.cy;
   if (w < 10 || h < 10) {
     w = 1280;
     h = 800;
@@ -1633,9 +1550,20 @@ void App::set_display_mode(DisplayMode mode) {
     SetForegroundWindow(settings_window);
   }
   if (before != mode) {
-    // Says where the lyrics went, and how to get out again: the desktop layer
-    // has no keyboard, so its way back has to be a global shortcut.
-    view.hint_until = now_ms() + 6000;
+    if (mode == DisplayMode::Desktop) {
+      // Nothing is drawn on an idle desktop, so say where the lyrics went.
+      view.hint_until = 0;
+      const bool ok = desktop.state == DesktopAttach::Attached ||
+                      desktop.state == DesktopAttach::Restored;
+      tray_balloon(*this, L"Lyrics are now part of the desktop",
+                   ok ? L"They appear behind your icons when music with lyrics plays, and "
+                        L"vanish when it stops. Ctrl+Alt+S opens Settings; Ctrl+Alt+W "
+                        L"switches back to a window."
+                      : L"Still attaching to the desktop. Settings (Ctrl+Alt+S) shows "
+                        L"the status.");
+    } else {
+      view.hint_until = now_ms() + 6000;
+    }
   }
   invalidate();
 }
@@ -1860,12 +1788,14 @@ void App::hide_to_tray() {
   if (cfg.mode() != DisplayMode::Desktop) remember_window_rect(*this);
   hidden_to_tray = true;
   ShowWindow(hwnd, SW_HIDE);
+  desktop_layer_hide(*this);
+  presence = 0.0;
   cfg.save();
   // The window is gone, so a toast inside it would never be seen. Say it from
   // the tray instead, once per run: closing the window does not quit the app.
   if (!tray_hint_shown && !quitting) {
     tray_hint_shown = true;
-    notify_from_tray(*this, L"Youtube-Lyrics is still running",
+    tray_balloon(*this, L"Youtube-Lyrics is still running",
                      L"Click this icon or press Ctrl+Alt+L to bring the lyrics "
                      L"back. Right-click it for settings or to quit.");
   }
@@ -2036,11 +1966,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     // WorkerW parenting is gone with it.
     logf("shell: TaskbarCreated, restoring tray icon and desktop layer");
     add_tray_icon(*app);
-    if (app->cfg.mode() == DisplayMode::Desktop) {
-      app->desktop_parented = false;
-      app->desktop_host = nullptr;
-      apply_desktop_mode(*app);
-    }
+    desktop_layer_shell_restarted(*app);
+    settings_refresh(*app);
     return 0;
   }
   if (msg == WM_APP_QUIT_EXISTING) {
@@ -2107,7 +2034,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                      suggested->bottom - suggested->top,
                      SWP_NOZORDER | SWP_NOACTIVATE);
       } else if (app->cfg.mode() == DisplayMode::Desktop) {
-        apply_desktop_mode(*app);
+        desktop_layer_tick(*app, true);
       } else if (!app->windowed) {
         HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         MONITORINFO info{};
@@ -2128,7 +2055,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       if (app->hidden_to_tray) {
         // Nothing to move while hidden; show_window() re-applies the mode.
       } else if (app->cfg.mode() == DisplayMode::Desktop) {
-        apply_desktop_mode(*app);
+        desktop_layer_tick(*app, true);
       } else if (app->cfg.mode() == DisplayMode::Fullscreen) {
         // Stay on the monitor the window is on; only snap to its new size.
         HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
@@ -2240,7 +2167,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       return 0;
     case WM_HOTKEY:
       if (wParam == kHotkeyToggle) {
-        if (app->hidden_to_tray || !IsWindowVisible(hwnd)) {
+        const bool shown = app->cfg.mode() == DisplayMode::Desktop
+                               ? !app->hidden_to_tray
+                               : (!app->hidden_to_tray && IsWindowVisible(hwnd));
+        if (!shown) {
           app->show_window();
         } else {
           app->hide_to_tray();
@@ -2303,6 +2233,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       UnregisterHotKey(hwnd, kHotkeyWallpaper);
       UnregisterHotKey(hwnd, kHotkeySettings);
       UnregisterHotKey(hwnd, kHotkeyFullscreen);
+      desktop_layer_detach(*app);
       close_update_progress(*app);
       update_stop();
       remove_tray_icon(*app);
@@ -2331,6 +2262,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           media.playing = false;
         }
         app->view.last_frame = now;
+        // Displays are often re-enumerated on wake; check the desktop layer
+        // is still where it should be instead of waiting for the next poll.
+        desktop_layer_tick(*app, true);
         invalidate_window(*app);
       }
       return TRUE;
@@ -2412,6 +2346,31 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR command_line, int show_cm
     std::string path = wide_to_utf8(target);
     if (path.empty()) path = appdata_dir() + "\\self-test.txt";
     return run_self_test(headless, path) ? 0 : 1;
+  }
+
+  // "--desktop-test [file]": attach a test card to the real desktop for a few
+  // seconds, check where it ended up, save a screenshot and a report. Exit 0
+  // only if every check passed. The only way to know the desktop layer works
+  // on a given machine is to run it there.
+  if (launch_flag.rfind(L"--desktop-test", 0) == 0) {
+    std::wstring target = launch_flag.substr(14);
+    while (!target.empty() && (target.front() == L' ' || target.front() == L'\t'))
+      target.erase(target.begin());
+    if (target.size() >= 2 && target.front() == L'"' && target.back() == L'"')
+      target = target.substr(1, target.size() - 2);
+    GdiplusStartupInput test_gdi_input;
+    ULONG_PTR test_gdi_token = 0;
+    GdiplusStartup(&test_gdi_token, &test_gdi_input, nullptr);
+    int result = 1;
+    {
+      App headless;
+      headless.inst = inst;
+      std::string path = wide_to_utf8(target);
+      if (path.empty()) path = appdata_dir() + "\\desktop-test.txt";
+      result = run_desktop_test(headless, path) ? 0 : 1;
+    }
+    GdiplusShutdown(test_gdi_token);
+    return result;
   }
 
   // "--quit": close the copy that is already running (for scripts, and so an
@@ -2547,9 +2506,14 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR command_line, int show_cm
   app.view.last_mouse = 0;
   // The desktop layer stays clean on an ordinary launch; the hint is shown
   // there only the first time, and whenever the mode is changed.
-  app.view.hint_until = (app.cfg.mode() != DisplayMode::Desktop || app.first_run)
-                            ? app.now_ms() + 9000
-                            : 0;
+  // Nothing is ever written across an idle desktop. A first launch says where
+  // the program went from the tray instead.
+  app.view.hint_until = app.cfg.mode() != DisplayMode::Desktop ? app.now_ms() + 9000 : 0;
+  if (app.first_run && app.cfg.mode() == DisplayMode::Desktop) {
+    tray_balloon(app, L"Youtube-Lyrics is running",
+                 L"Play some music: lyrics appear on your desktop, behind the icons, and "
+                 L"vanish when it stops. Right-click this icon for settings.");
+  }
 
   media_start(app);
   lyrics_start(app);

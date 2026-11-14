@@ -377,6 +377,11 @@ constexpr int kIdRandomStart = 2017;
 constexpr int kIdDim = 2018;
 constexpr int kIdCover = 2019;
 constexpr int kIdResetDisplay = 2020;
+constexpr int kIdModeWindow = 2021;
+constexpr int kIdDesktopRestore = 2022;
+constexpr int kIdShowTrack = 2023;
+constexpr int kIdDimPaused = 2024;
+constexpr int kIdDesktopScene = 2025;
 constexpr int kIdClose = 2100;
 
 // One table drives the controls, their labels and their vertical rhythm. They
@@ -412,6 +417,8 @@ const RowSpec kRows[] = {
     {0, 0, kLabelOnly, L"Text size", false},
     {kIdFont, 0, kValue, nullptr, true},
     {kIdWipe, 0, kCheck, nullptr, false},
+    {kIdShowTrack, 0, kCheck, nullptr, false},
+    {kIdDimPaused, 0, kCheck, nullptr, false},
     {0, 0, kSubHead, L"LOCAL LYRICS AND UPDATES", false},
     {kIdOpenLyrics, 0, kButton, nullptr, false},
     {kIdClearCache, 0, kButton, nullptr, false},
@@ -420,8 +427,12 @@ const RowSpec kRows[] = {
     {kIdResetOffset, 0, kButton, nullptr, false},
 
     {kIdModeWallpaper, 1, kCheck, nullptr, false},
+    {0, 1, kLabelOnly, nullptr, false},
+    {kIdDesktopRestore, 1, kButton, nullptr, false},
     {kIdFullscreen, 1, kCheck, nullptr, false},
+    {kIdModeWindow, 1, kCheck, nullptr, false},
     {kIdTopmost, 1, kCheck, nullptr, false},
+    {kIdDesktopScene, 1, kCheck, nullptr, false},
     {kIdCover, 1, kCheck, nullptr, false},
     {0, 1, kLabelOnly, L"Theme", false},
     {kIdTheme, 1, kValue, nullptr, true},
@@ -509,8 +520,22 @@ void refresh_values(SettingsWindow& s) {
   std::swprintf(buf, 96, L"%.0f%%", (cfg.font_scale - 1.0) * 100.0 + 100.0);
   set_label(kIdFont, buf);
   set_checked(kIdWipe, cfg.wipe);
-  set_checked(kIdModeWallpaper, cfg.wallpaper);
+  // Three modes, exactly one ticked.
+  set_checked(kIdModeWallpaper, cfg.mode() == DisplayMode::Desktop);
   set_checked(kIdFullscreen, cfg.mode() == DisplayMode::Fullscreen);
+  set_checked(kIdModeWindow, cfg.mode() == DisplayMode::Window);
+  set_checked(kIdShowTrack, cfg.show_track);
+  set_checked(kIdDimPaused, cfg.dim_paused);
+  set_checked(kIdDesktopScene, cfg.desktop_scene);
+  {
+    const DesktopAttach state = s.app->desktop.state;
+    set_label(kIdDesktopRestore,
+              cfg.mode() != DisplayMode::Desktop
+                  ? L"Restore desktop mode"
+                  : ((state == DesktopAttach::Attached || state == DesktopAttach::Restored)
+                         ? L"Check attachment again"
+                         : L"Try attaching again"));
+  }
   set_checked(kIdTopmost, cfg.topmost && cfg.mode() != DisplayMode::Desktop);
   set_checked(kIdCover, cfg.cover);
   // The renderer owns the theme table; a second list here was in a different
@@ -655,6 +680,23 @@ void paint(SettingsWindow& s, HWND hwnd) {
       SelectObject(mem, s.body);
       continue;
     }
+    if (spec.kind == kLabelOnly && !spec.text) {
+      // The desktop attachment line: what is true now, not what was asked for.
+      const std::wstring status =
+          s.app->cfg.mode() == DisplayMode::Desktop
+              ? utf8_to_wide(desktop_layer_status(*s.app))
+              : std::wstring(L"Desktop mode is off: lyrics are in a window");
+      const DesktopAttach state = s.app->desktop.state;
+      const bool trouble = s.app->cfg.mode() == DisplayMode::Desktop &&
+                           (state == DesktopAttach::Retrying || state == DesktopAttach::Failed);
+      SelectObject(mem, s.small);
+      SetTextColor(mem, trouble ? RGB(240, 170, 90) : p.muted);
+      RECT r{x + 28, y, x + column_w_paint, y + kRowH};
+      DrawTextW(mem, status.c_str(), -1, &r,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+      SelectObject(mem, s.body);
+      continue;
+    }
     if (spec.kind == kLabelOnly) {
       label(spec.text, x, y, kControlX - 12);
       continue;
@@ -764,27 +806,47 @@ void handle_command(SettingsWindow& s, int id) {
       app.show_toast("Checking for updates…", 2200);
       update_request_check(app, true);
       return;
-    case kIdModeWallpaper: {
-      const bool want = find_control(kIdModeWallpaper)->checked;
-      if (want == app.cfg.wallpaper) return;
-      // Off returns to the foreground mode that was last used.
-      app.set_display_mode(want ? DisplayMode::Desktop
-                                : (app.cfg.fullscreen ? DisplayMode::Fullscreen
-                                                      : DisplayMode::Window));
+    case kIdModeWallpaper:
+    case kIdFullscreen:
+    case kIdModeWindow: {
+      // One choice of three. Picking the mode that is already active changes
+      // nothing (refresh_values puts its tick back).
+      const DisplayMode want = id == kIdModeWallpaper
+                                   ? DisplayMode::Desktop
+                                   : (id == kIdFullscreen ? DisplayMode::Fullscreen
+                                                          : DisplayMode::Window);
+      if (want != app.cfg.mode()) app.set_display_mode(want);
       refresh_values(s);
       repaint_all(s);
       return;
     }
-    case kIdFullscreen: {
-      // Always does what it says: ticking it brings the lyrics to the front in
-      // full screen (leaving the desktop layer if necessary); clearing it gives
-      // an ordinary window. It used to be ignored while the desktop layer was on.
-      const bool want = find_control(kIdFullscreen)->checked;
-      app.set_display_mode(want ? DisplayMode::Fullscreen : DisplayMode::Window);
+    case kIdDesktopRestore: {
+      // The one-click way back to the wallpaper, and the manual retry when
+      // Explorer would not take the layer.
+      if (app.cfg.mode() != DisplayMode::Desktop) {
+        app.set_display_mode(DisplayMode::Desktop);
+      } else {
+        app.desktop.attempts = 0;
+        app.desktop.failure_notified = false;
+        if (app.desktop.state == DesktopAttach::Failed)
+          app.desktop.state = DesktopAttach::Retrying;
+        app.desktop.next_retry_at = 0;
+        desktop_layer_tick(app, true);
+      }
       refresh_values(s);
       repaint_all(s);
       return;
     }
+    case kIdShowTrack:
+      app.cfg.show_track = find_control(kIdShowTrack)->checked;
+      break;
+    case kIdDimPaused:
+      app.cfg.dim_paused = find_control(kIdDimPaused)->checked;
+      break;
+    case kIdDesktopScene:
+      app.cfg.desktop_scene = find_control(kIdDesktopScene)->checked;
+      app.view.bg_theme = -1;
+      break;
     case kIdTopmost: {
       const bool want = find_control(kIdTopmost)->checked;
       if (want != app.cfg.topmost) app.toggle_topmost();
@@ -837,6 +899,9 @@ void handle_command(SettingsWindow& s, int id) {
       app.view.bg_theme = -1;
       app.cfg.wallpaper_index = defaults.wallpaper_index;
       app.cfg.fullscreen = defaults.fullscreen;
+      app.cfg.desktop_scene = defaults.desktop_scene;
+      app.cfg.show_track = defaults.show_track;
+      app.cfg.dim_paused = defaults.dim_paused;
       app.view.bg_wallpaper = -1;
       app.view.wallpaper_changed_at = app.now_ms();
       app.set_display_mode(DisplayMode::Desktop);
@@ -880,8 +945,15 @@ LRESULT CALLBACK settings_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
       add_control(s, kIdClearCache, ControlKind::Button, L"Clear lyrics cache");
       add_control(s, kIdCheckUpdates, ControlKind::Button, L"Check for updates");
       add_control(s, kIdDiagnostics, ControlKind::Button, L"Save diagnostic report");
-      add_control(s, kIdModeWallpaper, ControlKind::Check, L"On the desktop (behind windows)");
+      add_control(s, kIdModeWallpaper, ControlKind::Check,
+                  L"Desktop wallpaper (behind the icons)");
+      add_control(s, kIdDesktopRestore, ControlKind::Button, L"Restore desktop mode");
       add_control(s, kIdFullscreen, ControlKind::Check, L"Full screen (in front)");
+      add_control(s, kIdModeWindow, ControlKind::Check, L"Ordinary window");
+      add_control(s, kIdShowTrack, ControlKind::Check, L"Show artist and title");
+      add_control(s, kIdDimPaused, ControlKind::Check, L"Dim the lyrics while paused");
+      add_control(s, kIdDesktopScene, ControlKind::Check,
+                  L"Cinematic scene instead of my wallpaper");
       add_control(s, kIdTopmost, ControlKind::Check, L"Above other windows");
       add_control(s, kIdCover, ControlKind::Check, L"Album-art tint");
       add_control(s, kIdTheme, ControlKind::Button, L"Midnight");

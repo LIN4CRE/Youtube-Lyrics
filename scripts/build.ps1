@@ -80,7 +80,7 @@ Invoke-Checked 'compile or link' {
         -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type `
         -I.build -o $tempExe `
         src/core/core.cc src/win/app.cc src/win/render.cc src/win/media.cc `
-        src/win/lyrics.cc src/win/update.cc src/win/diag.cc src/win/settings.cc `
+        src/win/lyrics.cc src/win/update.cc src/win/diag.cc src/win/desktop.cc src/win/settings.cc `
         @res `
         -lgdiplus -lgdi32 -luser32 -lole32 -luuid -lshell32 -lshlwapi -ldwmapi `
         -lwinhttp -lcomdlg32 -ladvapi32 -lbcrypt -lcomctl32

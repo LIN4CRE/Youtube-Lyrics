@@ -251,17 +251,8 @@ std::string build_diagnostic_report(App& app, bool with_connectivity) {
               fmt("0x%08lX / 0x%08lX",
                   static_cast<unsigned long>(GetWindowLongPtrW(app.hwnd, GWL_STYLE)),
                   static_cast<unsigned long>(GetWindowLongPtrW(app.hwnd, GWL_EXSTYLE))));
-    if (app.cfg.mode() == DisplayMode::Desktop) {
-      r += line("Desktop layer",
-                app.desktop_parented
-                    ? "attached to Explorer's WorkerW (behind the desktop icons)"
-                    : "WorkerW not available; using the bottom-of-z-order fallback");
-    }
   } else {
     r += line("Window", "none (report made from the command line)");
-    r += line("Desktop layer host",
-              desktop_host_available() ? "Explorer's WorkerW was found"
-                                       : "Explorer's WorkerW was not found");
   }
   r += line("Theme / text size", fmt("%d / %.0f%%", app.cfg.theme, app.cfg.font_scale * 100.0));
   r += line("Always on top", yes_no(app.cfg.topmost));
@@ -269,6 +260,18 @@ std::string build_diagnostic_report(App& app, bool with_connectivity) {
                               app.cfg.wallpaper_index, app.cfg.wallpaper_dim,
                               app.cfg.wallpaper_auto_rotate ? "on" : "off",
                               app.cfg.wallpaper_interval_minutes));
+
+  r += line("Desktop background",
+            app.cfg.desktop_scene ? "a bundled scene, while lyrics are shown"
+                                  : "the Windows wallpaper (lyrics drawn over it)");
+  r += line("Track line / dim when paused",
+            std::string(yes_no(app.cfg.show_track)) + " / " + yes_no(app.cfg.dim_paused));
+
+  // The real state of the desktop layer: what it is a child of, its styles and
+  // size, and what Explorer's desktop looks like. "Mode: desktop" above is only
+  // what was asked for.
+  r += "\r\nDESKTOP INTEGRATION\r\n";
+  r += desktop_layer_report(app);
 
   r += "\r\nMEDIA SESSION\r\n";
   MediaState latest;

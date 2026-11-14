@@ -84,6 +84,11 @@ struct Config {
   bool wallpaper_auto_rotate = true;
   int wallpaper_interval_minutes = 30;
   int wallpaper_dim = 12;  // percent, subtle by default
+  // Desktop mode draws the lyrics over the user's own Windows wallpaper. A
+  // bundled scene is painted behind them only when this is switched on.
+  bool desktop_scene = false;
+  bool show_track = true;   // discreet artist / title / progress line
+  bool dim_paused = true;   // lyrics are a little fainter while paused
   // Last size and position of the ordinary window (0 x 0 = never saved).
   int win_x = 0, win_y = 0, win_w = 0, win_h = 0;
 
@@ -159,6 +164,58 @@ struct View {
   int64_t last_mouse = 0;
   POINT last_mouse_pt{-1, -1};
   int64_t last_pulse_paint = 0;
+
+  // True only while render_frame() is drawing the desktop layer with per-pixel
+  // transparency: nothing opaque is painted behind the text, ClearType is off
+  // (it needs an opaque background) and text gets a soft dark halo.
+  bool layer_transparent = false;
+};
+
+// ------------------------------------------------------------- desktop layer
+// The window that really sits in Explorer's desktop surface. It is separate
+// from the main window on purpose: a child of an Explorer window is destroyed
+// when Explorer exits, and the main window owns the tray icon, hotkeys and
+// timers, which must survive that.
+
+enum class DesktopAttach {
+  Inactive,   // another display mode is selected
+  Attached,   // child of the shell's desktop surface, verified
+  Restored,   // as Attached, after Explorer restarted
+  Retrying,   // not attached; another attempt is scheduled
+  Failed,     // several attempts failed; still retried, slowly
+};
+
+struct DesktopLayer {
+  HWND hwnd = nullptr;       // the layer window (null when not attached)
+  HWND host = nullptr;       // Explorer window it is a child of
+  HWND icons = nullptr;      // SHELLDLL_DefView, the icon layer
+  DesktopAttach state = DesktopAttach::Inactive;
+  std::string strategy;      // which shell layout was found
+  std::string detail;        // why the last attempt failed, in plain words
+  DWORD last_error = 0;
+  int attempts = 0;          // since the mode was entered or last success
+  int restores = 0;          // successful re-attachments after a loss
+  int64_t attached_at = 0;
+  int64_t next_retry_at = 0;
+  int64_t last_check_at = 0;
+  bool lost = false;         // the surface went away underneath us
+  bool below_icons = false;  // z-order relative to the icon layer confirmed
+  bool opaque = false;       // per-pixel transparency was refused; scene drawn
+  bool visible = false;
+  bool failure_notified = false;
+  bool closing = false;      // we are destroying it ourselves
+  RECT monitor{};            // target monitor, screen coordinates
+  int w = 0, h = 0;
+  // 32-bit premultiplied back buffer
+  HDC dc = nullptr;
+  HBITMAP bmp = nullptr;
+  HGDIOBJ old_bmp = nullptr;
+  void* bits = nullptr;
+  int buf_w = 0, buf_h = 0;
+  int presents = 0;
+  int present_failures = 0;
+  DWORD present_error = 0;
+  int last_alpha = -1;
 };
 
 // --------------------------------------------------------------------- the app
@@ -216,9 +273,12 @@ struct App {
   int64_t pending_since = 0;
   int64_t missing_since = 0;
 
-  // Parent HWND for true WorkerW wallpaper mode (behind desktop icons).
-  HWND desktop_host = nullptr;
-  bool desktop_parented = false;
+  // Desktop wallpaper mode.
+  DesktopLayer desktop;
+  // 0..1 opacity of the desktop layer: fades in when music with lyrics is
+  // playing and out when it stops, so an idle desktop shows nothing at all.
+  double presence = 0.0;
+  int64_t paused_since = 0;
   HWND update_progress_hwnd = nullptr;
   HWND update_progress_bar = nullptr;
   HWND update_progress_label = nullptr;
@@ -276,6 +336,9 @@ struct App {
   void apply_display_mode();
   void show_window();
   void hide_to_tray();
+  // Client size of whatever the lyrics are drawn on: the desktop layer in
+  // desktop mode, the main window otherwise.
+  SIZE surface_size() const;
 
   // painting / icons
   void paint(HDC dc);
@@ -343,8 +406,28 @@ ReportExport export_diagnostic_report(App& app, std::string* saved_path);
 bool run_self_test(App& app, const std::string& path);
 
 // Implemented in app.cc, used by the other modules
-// True when Explorer's WorkerW desktop layer can be found right now.
-bool desktop_host_available();
+void notify_from_tray(App& app, const wchar_t* title, const wchar_t* text);
+
+// Implemented in desktop.cc
+// Creates the layer window inside Explorer's desktop surface and verifies it.
+// Updates app.desktop (state, detail, strategy) either way.
+bool desktop_layer_attach(App& app);
+void desktop_layer_detach(App& app);   // back to DesktopAttach::Inactive
+// Health check and repositioning; cheap, called from the frame timer and on
+// display, power and Explorer events. Schedules and performs retries.
+void desktop_layer_tick(App& app, bool force);
+// Explorer announced a new taskbar: whatever we were attached to is gone.
+void desktop_layer_shell_restarted(App& app);
+// Draws one frame and shows it at `alpha` (0..255). False if drawing failed.
+bool desktop_layer_present(App& app, int alpha);
+void desktop_layer_hide(App& app);
+// One line for Settings and the tray; several lines for the report.
+std::string desktop_layer_status(const App& app);
+std::string desktop_layer_report(const App& app);
+// "--desktop-test": attaches a test card to the desktop for a few seconds on
+// this machine, checks parent, z-order, focus and click-through, saves a
+// screenshot next to `path`, and writes what it found. True if all passed.
+bool run_desktop_test(App& app, const std::string& path);
 void logf(const char* fmt, ...);
 // Deliberately fails in release mode instead of shipping a silently missing
 // asset: used for the initial window and tray icon paths.

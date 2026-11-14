@@ -17,14 +17,19 @@
 **YouTube Music gives you a thin strip of small text at the side of the screen.**
 **This gives you the whole screen, one lit line at a time.**
 
-A single Windows executable that follows Windows' current music session,
-prioritizing what is playing while retaining its current paused track. In desktop
-wallpaper mode it sits behind the icons, does not take focus, and passes clicks
-through. Four original cinematic backgrounds ship inside the executable — three drawn
-stills and one procedural scene painted at runtime — with rotation and
-readability preferences. Everything you can change is in one native settings
-window (`Ctrl+Alt+S`), not buried in the tray menu. LRCLIB results are matched before display; lyrics.ovh is
-an untimed fallback without response-side track metadata.
+A single Windows executable that runs in the background and follows Windows'
+current music session. When a song with lyrics plays, the words fade in on the
+desktop itself — behind your icons, over your own wallpaper — with the line
+being sung highlighted; when the music stops they fade out and the desktop is
+clean again. No window, no button, nothing to load. Full-screen and ordinary
+window views remain as options, and everything you can change is in one native
+settings window (`Ctrl+Alt+S`). LRCLIB results are matched before display;
+lyrics.ovh is an untimed fallback without response-side track metadata.
+
+> **Status of desktop mode in this version: rebuilt, not yet verified.** The
+> desktop layer was redesigned for this version and compiles cleanly, but it
+> has **not been run on a Windows machine**. See
+> [Checking desktop mode on your PC](#checking-desktop-mode-on-your-pc).
 
 [![Windows 10 / 11](docs/brand/badge-platform.png)](#requirements)
 [![MIT](docs/brand/badge-licence.png)](LICENSE)
@@ -45,10 +50,10 @@ an untimed fallback without response-side track metadata.
 Youtube-Lyrics is a free, open-source Windows desktop app that follows the
 active media session and puts readable, timed lyrics on the desktop. It is a
 native C++/Win32 executable—not a browser wrapper, YouTube Music modification,
-video wallpaper, or background web page. It uses Explorer's WorkerW desktop layer
-when available, passes clicks through, and can switch to an ordinary
-window/full-screen view. WorkerW integration has not yet been runtime-tested on
-Windows in this build environment.
+video wallpaper, or background web page. In desktop mode it creates a
+click-through layer inside Explorer's desktop, beneath the icons; the display
+can also be an ordinary window or a full-screen view. The desktop layer has not
+yet been runtime-tested on Windows.
 
 It reads the track metadata Windows already publishes for media controls; it
 does not capture or record audio, and it sends no telemetry. Lyrics are looked
@@ -82,7 +87,7 @@ Windows executable embeds that same multi-size icon.
 | **Smooth, not twitchy** | Lines scroll on a spring, so a fast chorus glides instead of jolting. Gaps of 3 s or more get extra breathing room, so verses and choruses separate themselves. |
 | **Four themes, one of them honest** | Midnight (ink and amber, the default), Aurora, Ember, Mono. `T` cycles; the choice is remembered. |
 | **Cover art, if you want it** | The album cover, aspect-filled and heavily darkened behind the text. `C` toggles. |
-| **A real desktop layer** | Uses Explorer's WorkerW desktop surface when available; it does not take focus or intercept clicks. `Ctrl+Alt+W` switches wallpaper mode; `Ctrl+Alt+L` hides or restores it. A bottom-of-z-order fallback is used if WorkerW cannot be found. |
+| **Part of the desktop** | A transparent, click-through layer inside Explorer's desktop surface, beneath the icons, drawn over your own wallpaper. Lyrics fade in when a song with lyrics plays, dim slightly while paused and fade out when it stops; an idle desktop shows nothing of ours. It never takes focus. If Explorer will not accept the layer, nothing is drawn and the tray and Settings say so — it never falls back to a window pretending to be wallpaper. |
 | **The right media session** | A playing session takes priority; Windows' current known music session remains visible while paused, with its position frozen. Stopped sessions are ignored, track changes are confirmed across polls, and lyrics are checked against title, artist and duration. |
 | **One native settings window** | `Ctrl+Alt+S` (or **Settings…** in the tray) opens a compact Win32 window: display mode, theme, text size, sync offset, karaoke wipe, album-art tint, wallpaper choice, rotation, random launch and background darkness. No web view, no framework. |
 | **Bundled scenes** | Three original cinematic stills plus a fourth procedural scene (*Drift*, drawn with GDI+ and costing no bytes) ship inside the executable. Cycle them with `B`, choose random launch, set rotation, and adjust darkness. |
@@ -105,7 +110,7 @@ Optional integrity check (PowerShell):
 Get-FileHash .\YoutubeLyrics.exe -Algorithm SHA256
 ```
 
-Expected SHA-256 for the current 1.7.1 download is listed in [`YoutubeLyrics.exe.sha256`](docs/downloads/YoutubeLyrics.exe.sha256) and beside the download on the [project website](https://youtube-lyrics-seven.vercel.app/). Compare it before running the file. The checksum is served over HTTPS; it is an integrity check, not a code signature.
+Expected SHA-256 for the current 1.8.0 download is listed in [`YoutubeLyrics.exe.sha256`](docs/downloads/YoutubeLyrics.exe.sha256) and beside the download on the [project website](https://youtube-lyrics-seven.vercel.app/). Compare it before running the file. The checksum is served over HTTPS; it is an integrity check, not a code signature.
 
 Windows may show **"Windows protected your PC"** because the file is not
 code-signed. The source is public; continue only if you trust the download. If
@@ -122,15 +127,32 @@ ships with Windows.
 
 ## Using it
 
-The default is desktop-wallpaper mode: the display attempts to sit on Explorer's
-WorkerW desktop layer behind desktop icons, never takes focus, and passes clicks
-through. If WorkerW is unavailable, it falls back to the bottom of the normal
-window z-order. `Ctrl+Alt+W` switches between that and the foreground display;
-`Ctrl+Alt+L` hides or restores it from any app, and `Ctrl+Alt+F` goes straight
-to full screen from anywhere (including from the desktop layer). The wallpaper
-behavior still needs runtime verification on Windows. `F11` or a double-click
-toggles full screen/windowed, and `Esc` leaves full screen for a window; it
-never hides the display. The window's size and position are remembered. `F1`
+There are three display modes, chosen in Settings or the tray menu:
+
+| Mode | What it is |
+| --- | --- |
+| **Desktop wallpaper** (default) | Lyrics are part of the desktop, behind the icons and behind every window. Nothing is shown unless a song with lyrics is playing. |
+| **Full screen** | A foreground lyric view covering one monitor. |
+| **Ordinary window** | A normal resizable window. |
+
+In desktop mode there is no window to click, so it is controlled from the tray
+icon and global shortcuts: `Ctrl+Alt+S` opens Settings, `Ctrl+Alt+W` switches
+between the desktop and a window, `Ctrl+Alt+F` goes to full screen, and
+`Ctrl+Alt+L` hides or restores the lyrics. The chosen mode is saved and used on
+the next start. A settings file that already says "window" is respected; a
+settings file with no mode in it means desktop mode.
+
+Settings shows the **actual** state of the desktop layer under the mode choice —
+attached, attaching (retrying), restored after an Explorer restart, or failed
+with the reason — and a button that restores desktop mode or retries the
+attachment. By default the lyrics are drawn over your existing Windows
+wallpaper; *Cinematic scene instead of my wallpaper* shows one of the bundled
+scenes behind the lyrics while they are visible. *Show artist and title* and
+*Dim the lyrics while paused* are switches in the same window.
+
+In the foreground modes `F11` or a double-click toggles full screen/windowed,
+and `Esc` leaves full screen for a window. The window's size and position are
+remembered. `F1`
 shows shortcuts and the
 raw media-session state when the window is focused.
 
@@ -341,6 +363,9 @@ If the app will not start, run `YoutubeLyrics.exe --diagnostics report.txt`
 from a terminal; that writes the report without opening a window and also
 checks whether the lyric providers and update servers can be reached.
 
+`YoutubeLyrics.exe --desktop-test result.txt` checks desktop mode itself; see
+[Checking desktop mode on your PC](#checking-desktop-mode-on-your-pc).
+
 Two more switches exist for scripts and testing. `YoutubeLyrics.exe --self-test
 result.txt` runs the checks that need no window (data folder, settings, media
 listener start and stop, leaving during a lyric request, report redaction),
@@ -393,6 +418,26 @@ will not work. The display itself still runs.
 </details>
 
 <br>
+
+## Checking desktop mode on your PC
+
+Desktop mode depends on how Explorer builds the desktop, which differs between
+Windows versions and cannot be checked without running on Windows. Two tools
+report what really happened on your machine:
+
+1. Close Youtube-Lyrics, then run `YoutubeLyrics.exe --desktop-test result.txt`
+   from a terminal. For a few seconds it places a test card on the real desktop,
+   then checks and records: whether the layer attached and to which Explorer
+   window, whether it is beneath the icon layer, whether it could be drawn,
+   whether a click at its centre reaches the desktop rather than the layer,
+   that focus did not move, and its window styles. It saves a screenshot next
+   to the report and exits 0 only if every check passed.
+2. While the app is running, **Save a diagnostic report** (tray menu) includes
+   a *DESKTOP INTEGRATION* section: attachment state, parent window, styles,
+   size, monitor, DPI, drawing mode, frames shown, and the Explorer desktop
+   windows found.
+
+If the result is not a pass, please open an issue with `result.txt`.
 
 ## Help out
 

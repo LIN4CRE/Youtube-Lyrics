@@ -113,21 +113,26 @@ void draw_text(Graphics& g, const std::wstring& s, Font* font, const RectF& box,
 }
 
 // Lyric text with a contact shadow, so it stays readable over a bright part of
-// a photograph. `outline` is for the colour-keyed fallback layer, where the
-// text sits directly on the user's own wallpaper with no dimming at all and a
-// soft shadow cannot exist (the window has no per-pixel alpha): it gets a
-// solid dark edge on all four diagonals instead.
+// a photograph. `halo` is for the transparent desktop layer, where the text
+// sits directly on the user's own wallpaper, which may be any colour at all:
+// a soft dark edge is built up on every side (the layer has per-pixel alpha,
+// so the overlapping faint copies blend into a blur) and a drop shadow is
+// added beneath it.
 void draw_text_backing(Graphics& g, const std::wstring& s, Font* font,
-                       const RectF& box, int alpha, bool outline) {
+                       const RectF& box, int alpha, bool halo) {
   if (s.empty() || alpha <= 0) return;
   const REAL d = std::max(1.0f, font->GetSize() * 0.045f);
-  if (outline) {
-    const ARGB edge = 0xFF000000u;
-    const REAL offsets[4][2] = {{-d, -d}, {d, -d}, {-d, d}, {d, d}};
+  if (halo) {
+    const int edge_alpha = std::min(96, alpha * 3 / 8);
+    const ARGB edge = static_cast<ARGB>(edge_alpha) << 24;
+    const REAL r = d * 1.25f;
+    const REAL offsets[4][2] = {{-r, -r}, {r, -r}, {-r, r}, {r, r}};
     for (const auto& o : offsets) {
       RectF moved(box.X + o[0], box.Y + o[1], box.Width, box.Height);
       draw_text(g, s, font, moved, edge);
     }
+    RectF drop(box.X, box.Y + d * 1.6f, box.Width, box.Height);
+    draw_text(g, s, font, drop, static_cast<ARGB>(std::min(170, alpha * 2 / 3)) << 24);
     return;
   }
   const int shadow_alpha = std::min(190, alpha * 3 / 4);
@@ -696,7 +701,7 @@ void paint_lyrics(App& app, Graphics& g, int w, int h) {
   // here made the wipe visibly lag behind the vocal on fast lines. The feathered
   // gradient in draw_feathered_wipe supplies the visual softening instead.
   const double progress = (a >= 0) ? line_progress(app.disp, a, pos) : 0.0;
-  const bool keyed = app.cfg.mode() == DisplayMode::Desktop && !app.desktop_parented;
+  const bool keyed = app.view.layer_transparent;  // halo instead of a plain shadow
 
   int first = 0;
   if (a >= 0) first = std::max(0, a - 16);
@@ -830,8 +835,7 @@ void paint_plain(App& app, Graphics& g, int w, int h) {
     const RectF row(static_cast<REAL>(col_x), static_cast<REAL>(y),
                     static_cast<REAL>(v.col_w), static_cast<REAL>(v.line_h[i]));
     const std::wstring row_text = wide(app.disp[i].text);
-    draw_text_backing(g, row_text, font, row, alpha,
-                      app.cfg.mode() == DisplayMode::Desktop && !app.desktop_parented);
+    draw_text_backing(g, row_text, font, row, alpha, app.view.layer_transparent);
     draw_text(g, row_text, font, row, c);
   }
 }
@@ -875,22 +879,33 @@ void paint_chrome(App& app, Graphics& g, int w, int h) {
   const TrackInfo track = app.current_track();
   const double duration_s = app.current_duration_s();
 
+  const bool on_desktop = app.cfg.mode() == DisplayMode::Desktop;
+  const bool halo = app.view.layer_transparent;
+
   // Header: the committed track, never the last unconfirmed SMTC candidate.
-  if (!track.title.empty()) {
+  // Optional, and deliberately small: on the desktop it is a caption, not a
+  // title bar.
+  if (!track.title.empty() && app.cfg.show_track) {
     double px = std::min(std::max(h * 0.0175, 12.0), 26.0);
+    if (on_desktop) px *= 0.9;
     if (!track.artist.empty()) {
-      draw_text(g, wide(track.artist),
-                get_font(app, static_cast<int>(px * 0.86), 400),
-                RectF(0, static_cast<REAL>(h * 0.028), static_cast<REAL>(w),
-                      static_cast<REAL>(px * 2)),
+      Font* artist_font = get_font(app, static_cast<int>(px * 0.86), 400);
+      const RectF artist_box(0, static_cast<REAL>(h * 0.028), static_cast<REAL>(w),
+                             static_cast<REAL>(px * 2));
+      if (halo) draw_text_backing(g, wide(track.artist), artist_font, artist_box, 0x99, true);
+      draw_text(g, wide(track.artist), artist_font, artist_box,
                 (th.text & 0x00FFFFFF) | (0x99 << 24));
     }
-    draw_text(g, wide(track.title),
-              get_font(app, static_cast<int>(px * 1.15), 600),
-              RectF(0, static_cast<REAL>(h * 0.028 + px * 1.5),
-                    static_cast<REAL>(w), static_cast<REAL>(px * 2)),
-              (th.text & 0x00FFFFFF) | (0xE0 << 24));
+    Font* title_font = get_font(app, static_cast<int>(px * 1.15), 600);
+    const RectF title_box(0, static_cast<REAL>(h * 0.028 + px * 1.5),
+                          static_cast<REAL>(w), static_cast<REAL>(px * 2));
+    if (halo) draw_text_backing(g, wide(track.title), title_font, title_box, 0xE0, true);
+    draw_text(g, wide(track.title), title_font, title_box,
+              (th.text & 0x00FFFFFF) | (on_desktop ? (0xC4 << 24) : (0xE0 << 24)));
   }
+  // The progress bar, clock and source line are application chrome. They
+  // belong to a window, not to a wallpaper.
+  if (on_desktop) return;
 
   // Progress bar.
   if (duration_s > 0) {
@@ -981,6 +996,8 @@ void paint_chrome(App& app, Graphics& g, int w, int h) {
 void paint_toast(App& app, Graphics& g, int w, int h) {
   View& v = app.view;
   if (v.toast.empty()) return;
+  // Status messages are for a window. Nothing but lyrics goes on the desktop.
+  if (app.cfg.mode() == DisplayMode::Desktop) return;
   int64_t now = app.now_ms();
   if (now > v.toast_until) {
     v.toast.clear();
@@ -1006,6 +1023,8 @@ void paint_toast(App& app, Graphics& g, int w, int h) {
 void paint_hint(App& app, Graphics& g, int w, int h) {
   View& v = app.view;
   if (v.hint_until == 0) return;
+  // Never on the desktop: an idle desktop carries no text of ours.
+  if (app.cfg.mode() == DisplayMode::Desktop) return;
   int64_t now = app.now_ms();
   if (now > v.hint_until) return;
   int64_t left = v.hint_until - now;
@@ -1027,7 +1046,7 @@ void paint_hint(App& app, Graphics& g, int w, int h) {
   const RectF box(0, static_cast<REAL>(h - px * 4.5), static_cast<REAL>(w),
                   static_cast<REAL>(px * 2.2));
   draw_text_backing(g, text, font, box, static_cast<int>(170 * fade),
-                    mode == DisplayMode::Desktop && !app.desktop_parented);
+                    app.view.layer_transparent);
   draw_text(g, text, font, box, c);
 }
 
@@ -1266,17 +1285,21 @@ void render_frame(App& app, Graphics& g, int w, int h) {
 
   trim_font_cache(app);
   const bool desktop_wallpaper = app.cfg.mode() == DisplayMode::Desktop;
-  const bool fallback_top = desktop_wallpaper && !app.desktop_parented;
+  // Desktop mode keeps the user's own wallpaper unless a scene was asked for
+  // (or the layer could not be given per-pixel transparency).
+  const bool see_through = app.view.layer_transparent && !app.cfg.desktop_scene;
 
-  if (fallback_top) {
-    // ClearType's coloured sub-pixels would be composited against the key
-    // colour and show as fringes over the real wallpaper.
+  if (see_through) {
+    // ClearType's coloured sub-pixels are only correct against an opaque
+    // background; over transparency they show as colour fringes.
     g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
-    // In fallback mode where WorkerW could not be parented, clear with the
-    // color-key color RGB(16, 16, 24) so that the user's desktop wallpaper
-    // and desktop icons remain 100% visible and unobstructed.
-    SolidBrush colorkey(Color(255, 16, 16, 24));
-    g.FillRectangle(&colorkey, RectF(0, 0, static_cast<REAL>(w), static_cast<REAL>(h)));
+    // Start from nothing. "Background darkness" becomes an even veil over the
+    // real wallpaper (the icons are in front of this layer and are untouched),
+    // and fades in and out with the lyrics.
+    const int dim = std::max(0, std::min(60, app.cfg.wallpaper_dim));
+    g.Clear(Color(static_cast<BYTE>(dim * 255 / 100), 0, 0, 0));
+    // (At the default 12% this is barely visible; 0% leaves the wallpaper
+    // exactly as it is.)
   } else {
     ensure_background(app, w, h);
     if (app.view.bg) {
@@ -1320,8 +1343,11 @@ void render_frame(App& app, Graphics& g, int w, int h) {
         }
         break;
       case LyricsState::Loading:
-        paint_centred_message(app, g, w, h, "Looking for lyrics…",
-                              track_label(app.current_track()), "", "", "");
+        // Not on the desktop: until the words are ready there is nothing to
+        // add to the wallpaper.
+        if (!desktop_wallpaper)
+          paint_centred_message(app, g, w, h, "Looking for lyrics…",
+                                track_label(app.current_track()), "", "", "");
         break;
       case LyricsState::NotFound:
         // In wallpaper mode a failed lookup leaves the still image alone rather
@@ -1353,10 +1379,12 @@ void render_frame(App& app, Graphics& g, int w, int h) {
     }
   }
 
-  if (!desktop_wallpaper || has_current_session) paint_chrome(app, g, w, h);
+  if (!desktop_wallpaper ||
+      (has_current_session && app.lstate == LyricsState::Ready))
+    paint_chrome(app, g, w, h);
   paint_hint(app, g, w, h);
   paint_toast(app, g, w, h);
-  paint_help(app, g, w, h);
+  if (!desktop_wallpaper) paint_help(app, g, w, h);
 }
 
 }  // namespace ytl
