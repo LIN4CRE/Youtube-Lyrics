@@ -38,6 +38,9 @@ HWND g_app_window = nullptr;
 std::mutex g_job_mutex;
 std::mutex g_request_mutex;
 Job g_job;
+// Set when update_stop() gave up waiting for the worker.
+std::atomic<bool> g_worker_stuck{false};
+
 // Last thing the updater did, for the diagnostic report.
 std::mutex g_status_mutex;
 std::string g_status = "no update check has run in this session";
@@ -700,36 +703,15 @@ bool valid_x64_pe(const std::wstring& path) {
                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (file == INVALID_HANDLE_VALUE) return false;
   LARGE_INTEGER size{};
-  bool ok = GetFileSizeEx(file, &size) && size.QuadPart >= (128 << 10) &&
-            size.QuadPart <= static_cast<LONGLONG>(kMaxExecutableBytes);
-  BYTE dos[64]{};
+  // The headers of every real image sit inside the first few kilobytes.
+  std::string head(4096, '\0');
   DWORD got = 0;
-  if (!ok || !ReadFile(file, dos, sizeof(dos), &got, nullptr) || got != sizeof(dos) ||
-      dos[0] != 'M' || dos[1] != 'Z') {
-    CloseHandle(file);
-    return false;
-  }
-  const DWORD pe_offset = static_cast<DWORD>(dos[0x3C]) |
-                          (static_cast<DWORD>(dos[0x3D]) << 8) |
-                          (static_cast<DWORD>(dos[0x3E]) << 16) |
-                          (static_cast<DWORD>(dos[0x3F]) << 24);
-  if (pe_offset > static_cast<DWORD>(size.QuadPart) - 6 || pe_offset > (1u << 20)) {
-    CloseHandle(file);
-    return false;
-  }
-  LARGE_INTEGER seek{};
-  seek.QuadPart = pe_offset;
-  if (!SetFilePointerEx(file, seek, nullptr, FILE_BEGIN)) {
-    CloseHandle(file);
-    return false;
-  }
-  BYTE header[6]{};
-  got = 0;
-  ok = ReadFile(file, header, sizeof(header), &got, nullptr) && got == sizeof(header) &&
-       header[0] == 'P' && header[1] == 'E' && header[2] == 0 && header[3] == 0 &&
-       header[4] == 0x64 && header[5] == 0x86;
+  const bool read = GetFileSizeEx(file, &size) && size.QuadPart > 0 &&
+                    ReadFile(file, &head[0], static_cast<DWORD>(head.size()), &got, nullptr);
   CloseHandle(file);
-  return ok;
+  if (!read) return false;
+  head.resize(got);
+  return pe_is_x64_gui_application(head, static_cast<uint64_t>(size.QuadPart));
 }
 
 bool download_release(const UpdateRelease& release, UpdateStage& stage,
@@ -905,6 +887,8 @@ try {
 )YTLYUPDATE";
 
 }  // namespace
+
+bool update_worker_stuck() { return g_worker_stuck.load(); }
 
 std::string update_status_text() {
   std::lock_guard<std::mutex> lock(g_status_mutex);
@@ -1086,7 +1070,15 @@ void update_stop() {
   if (g_cancel_event) SetEvent(g_cancel_event);
   cancel_current_request();
   SetEvent(g_wake_event);
-  WaitForSingleObject(g_thread, INFINITE);
+  // Bounded: the request in flight has been cancelled, so the worker normally
+  // leaves at once. If it is stuck in a system call it must not keep the
+  // process (and the single-instance lock) alive invisibly for ever; its
+  // events stay open and process exit reclaims them.
+  if (WaitForSingleObject(g_thread, 10000) != WAIT_OBJECT_0) {
+    logf("update: worker did not stop within ten seconds");
+    g_worker_stuck.store(true);
+    return;
+  }
   CloseHandle(g_thread);
   CloseHandle(g_stop_event);
   CloseHandle(g_wake_event);

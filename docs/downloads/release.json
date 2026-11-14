@@ -4,8 +4,8 @@
   "channel": "stable",
   "repository": "LIN4CRE/Youtube-Lyrics",
   "schema_version": 1,
-  "sha256": "23f775f63bc518d0f5c0303adcd9ba76841ece68dc7c8a87ee841aa270b3d4e3",
-  "size_bytes": 1074688,
-  "tag": "v1.7.0",
-  "version": "1.7.0"
+  "sha256": "fcba7110414ac6f40cc8e033310d8af06f052cf711cc6fde9292acd5c715cf3b",
+  "size_bytes": 1099264,
+  "tag": "v1.7.1",
+  "version": "1.7.1"
 }

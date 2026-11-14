@@ -2013,55 +2013,397 @@ std::string replace_all_ci(const std::string& text, const std::string& needle,
   return out;
 }
 
+namespace {
+
+bool ident_char(char c) {
+  return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-' || c == '.';
+}
+
+bool ends_with_word(const std::string& text, const char* word) {
+  const size_t n = std::strlen(word);
+  return text.size() >= n && text.compare(text.size() - n, n, word) == 0;
+}
+
+// Is `ident` (a query parameter, header or JSON member name) the name of a
+// credential? Compound names count ("access_token", "X-Api-Key",
+// "clientSecret"); ordinary words that merely end in the same letters
+// ("monkey", "turkey") do not.
+bool credential_name(const std::string& ident) {
+  std::string flat;
+  for (char c : ident) {
+    if (c != '_' && c != '-' && c != '.')
+      flat.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+  }
+  if (flat.empty()) return false;
+  static const char* kSuffixes[] = {"token", "secret", "password", "passwd", "passphrase",
+                                    "apikey", "authorization", "signature", "cookie",
+                                    "sessionid", "credential", "credentials"};
+  for (const char* suffix : kSuffixes) {
+    if (ends_with_word(flat, suffix)) return true;
+  }
+  static const char* kWhole[] = {"key", "auth", "sig", "pwd", "jwt", "bearer", "pass"};
+  for (const char* whole : kWhole) {
+    if (flat == whole) return true;
+  }
+  // "...key" / "...auth" / "...pwd" as the last word of a compound name: after
+  // a separator ("api-key", "private_key") or a capital ("accessKey").
+  static const char* kLastWords[] = {"key", "auth", "pwd", "sig"};
+  for (const char* word : kLastWords) {
+    const size_t n = std::strlen(word);
+    if (ident.size() <= n) continue;
+    const size_t at = ident.size() - n;
+    std::string tail = ident.substr(at);
+    for (char& c : tail) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (tail != word) continue;
+    const char before = ident[at - 1];
+    if (before == '_' || before == '-' || before == '.') return true;
+    if (std::isupper(static_cast<unsigned char>(ident[at])) &&
+        std::islower(static_cast<unsigned char>(before)))
+      return true;
+  }
+  return false;
+}
+
+bool starts_with_ci(const std::string& text, size_t at, const char* word) {
+  const size_t n = std::strlen(word);
+  if (at > text.size() || text.size() - at < n) return false;
+  for (size_t i = 0; i < n; ++i) {
+    if (std::tolower(static_cast<unsigned char>(text[at + i])) !=
+        std::tolower(static_cast<unsigned char>(word[i])))
+      return false;
+  }
+  return true;
+}
+
+// "\Users\<name>\..." with any separator style: the name of whoever owns a
+// profile is personal whether or not it is the current account (8.3 short
+// names, another user's folder, a path quoted from JSON).
+std::string redact_profile_components(const std::string& text) {
+  static const char* kRoots[] = {"\\\\Users\\\\", "\\Users\\", "/Users/",
+                                 "\\Documents and Settings\\"};
+  static const char* kShared[] = {"Public", "Default", "Default User", "All Users",
+                                  "<user>"};
+  std::string out;
+  out.reserve(text.size());
+  size_t i = 0;
+  while (i < text.size()) {
+    const char* matched = nullptr;
+    if (text[i] == '\\' || text[i] == '/') {
+      for (const char* root : kRoots) {
+        if (starts_with_ci(text, i, root)) {
+          matched = root;
+          break;
+        }
+      }
+    }
+    if (!matched) {
+      out.push_back(text[i++]);
+      continue;
+    }
+    const size_t name_at = i + std::strlen(matched);
+    size_t end = name_at;
+    while (end < text.size() && end - name_at < 96) {
+      const char c = text[end];
+      if (c == '\\' || c == '/' || c == '"' || c == '\'' || c == '\n' || c == '\r' ||
+          c == '\t' || c == ':' || c == '*' || c == '?' || c == '<' || c == '>' || c == '|')
+        break;
+      ++end;
+    }
+    const std::string name = text.substr(name_at, end - name_at);
+    bool shared = name.empty();
+    for (const char* keep : kShared) {
+      if (name.size() == std::strlen(keep) && starts_with_ci(name, 0, keep)) shared = true;
+    }
+    out.append(text, i, name_at - i);
+    out += shared ? name : std::string("<user>");
+    i = end;
+  }
+  return out;
+}
+
+// "scheme://user:password@host" -> "scheme://<redacted>@host".
+std::string redact_url_userinfo(const std::string& text) {
+  std::string out;
+  out.reserve(text.size());
+  size_t i = 0;
+  while (i < text.size()) {
+    if (text.compare(i, 3, "://") != 0) {
+      out.push_back(text[i++]);
+      continue;
+    }
+    size_t end = i + 3;
+    size_t last_at = std::string::npos;
+    while (end < text.size() && end - i < 512) {
+      const char c = text[end];
+      if (c == '/' || c == '?' || c == '#' || c == ' ' || c == '\n' || c == '\r' ||
+          c == '"' || c == '\'' || c == '<' || c == '>')
+        break;
+      if (c == '@') last_at = end;
+      ++end;
+    }
+    out += "://";
+    if (last_at != std::string::npos && last_at > i + 3) {
+      out += "<redacted>";
+      i = last_at;  // the '@' and the host are copied by the main loop
+    } else {
+      i += 3;
+    }
+  }
+  return out;
+}
+
+bool token_char(char c) {
+  return std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '_' || c == '-' ||
+         c == '~' || c == '+' || c == '/' || c == '=';
+}
+
+// name=value, name: value, "name": "value", and bare "Bearer <token>".
+std::string redact_credentials(const std::string& text) {
+  std::string out;
+  out.reserve(text.size());
+  size_t i = 0;
+  while (i < text.size()) {
+    const bool at_start = i == 0 || !ident_char(text[i - 1]);
+    if (!at_start || !std::isalpha(static_cast<unsigned char>(text[i]))) {
+      out.push_back(text[i++]);
+      continue;
+    }
+    size_t ident_end = i;
+    while (ident_end < text.size() && ident_end - i < 64 && ident_char(text[ident_end]))
+      ++ident_end;
+    // A sentence-ending full stop is not part of the name.
+    while (ident_end > i && text[ident_end - 1] == '.') --ident_end;
+    const std::string ident = text.substr(i, ident_end - i);
+
+    // "Bearer abcdef..." with no header name in front of it.
+    if (ident.size() == 6 && starts_with_ci(ident, 0, "bearer") && ident_end < text.size() &&
+        text[ident_end] == ' ') {
+      size_t value_end = ident_end + 1;
+      while (value_end < text.size() && token_char(text[value_end])) ++value_end;
+      if (value_end - (ident_end + 1) >= 12 &&
+          text.compare(ident_end + 1, 10, "<redacted>") != 0) {
+        out.append(text, i, ident_end + 1 - i);
+        out += "<redacted>";
+        i = value_end;
+        continue;
+      }
+    }
+
+    size_t j = ident_end;
+    if (j < text.size() && (text[j] == '"' || text[j] == '\'')) ++j;  // closing quote of a name
+    while (j < text.size() && text[j] == ' ') ++j;
+    if (ident.empty() || j >= text.size() || (text[j] != '=' && text[j] != ':') ||
+        !credential_name(ident)) {
+      out.append(text, i, ident_end - i);
+      i = ident_end;
+      continue;
+    }
+    ++j;
+    while (j < text.size() && text[j] == ' ') ++j;
+    size_t value_end = j;
+    if (j < text.size() && (text[j] == '"' || text[j] == '\'')) {
+      const char quote = text[j];
+      ++j;
+      value_end = j;
+      while (value_end < text.size() && text[value_end] != quote && text[value_end] != '\n' &&
+             text[value_end] != '\r')
+        ++value_end;
+    } else {
+      for (const char* scheme : {"bearer ", "basic ", "digest ", "negotiate ", "ntlm "}) {
+        if (starts_with_ci(text, j, scheme)) {
+          j += std::strlen(scheme);
+          break;
+        }
+      }
+      value_end = j;
+      while (value_end < text.size()) {
+        const char c = text[value_end];
+        if (c == '&' || c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == '"' ||
+            c == '\'' || c == ';' || c == ',' || c == ')' || c == '>' || c == '}')
+          break;
+        ++value_end;
+      }
+    }
+    if (text.compare(j, 10, "<redacted>") == 0) value_end = j;  // already done
+    if (value_end == j) {  // nothing to hide ("key: " at the end of a line)
+      out.append(text, i, ident_end - i);
+      i = ident_end;
+      continue;
+    }
+    out.append(text, i, j - i);
+    out += "<redacted>";
+    i = value_end;
+  }
+  return out;
+}
+
+std::string swap_separators(std::string text, char from, const std::string& to) {
+  std::string out;
+  for (char c : text) {
+    if (c == from) out += to;
+    else out.push_back(c);
+  }
+  return out;
+}
+
+}  // namespace
+
 std::string redact_report(const std::string& text, const std::string& profile_dir,
                           const std::string& user_name) {
   std::string out = text;
-  if (profile_dir.size() >= 4) out = replace_all_ci(out, profile_dir, "%USERPROFILE%");
-  // The account name on its own, where it still appears as a path component.
-  if (user_name.size() >= 2) {
-    out = replace_all_ci(out, "\\Users\\" + user_name, "\\Users\\<user>");
-    out = replace_all_ci(out, "/Users/" + user_name, "/Users/<user>");
+  // The profile directory in each spelling a log or an error text can carry:
+  // as Windows reports it, with forward slashes, and escaped inside JSON.
+  if (profile_dir.size() >= 4) {
+    out = replace_all_ci(out, profile_dir, "%USERPROFILE%");
+    out = replace_all_ci(out, swap_separators(profile_dir, '\\', "/"), "%USERPROFILE%");
+    out = replace_all_ci(out, swap_separators(profile_dir, '\\', "\\\\"), "%USERPROFILE%");
   }
-  // Credential-looking values. Nothing in this program sends any, so this is
-  // a guard for whatever a proxy or a future provider puts in an error text.
-  static const char* kSecretKeys[] = {"token", "access_token", "apikey", "api_key",
-                                      "key", "password", "passwd", "secret",
-                                      "authorization", "auth", "signature", "sig"};
-  const std::string lower = to_lower_ascii(out);
-  std::string result;
-  result.reserve(out.size());
-  size_t i = 0;
-  while (i < out.size()) {
-    bool redacted = false;
-    const bool boundary = i == 0 || !(std::isalnum(static_cast<unsigned char>(out[i - 1])) ||
-                                      out[i - 1] == '_');
-    if (boundary) {
-      for (const char* key : kSecretKeys) {
-        const size_t n = std::strlen(key);
-        if (lower.compare(i, n, key) != 0) continue;
-        size_t j = i + n;
-        if (j >= out.size() || (out[j] != '=' && out[j] != ':')) continue;
-        ++j;
-        while (j < out.size() && out[j] == ' ') ++j;
-        // "Authorization: Bearer abc" - keep the scheme word, drop the value.
-        if (lower.compare(j, 7, "bearer ") == 0) j += 7;
-        else if (lower.compare(j, 6, "basic ") == 0) j += 6;
-        size_t value_end = j;
-        while (value_end < out.size() && out[value_end] != '&' && out[value_end] != ' ' &&
-               out[value_end] != '\n' && out[value_end] != '\r' && out[value_end] != '"' &&
-               out[value_end] != '\'' && out[value_end] != ';')
-          ++value_end;
-        if (value_end == j) continue;
-        result.append(out, i, j - i);
-        result += "<redacted>";
-        i = value_end;
-        redacted = true;
-        break;
-      }
+  out = redact_profile_components(out);
+  // The account name where it is unmistakably an account: DOMAIN\name is not
+  // produced by this program, but "user=name" style text from a proxy can be.
+  if (user_name.size() >= 3) {
+    out = replace_all_ci(out, "user=" + user_name, "user=<user>");
+    out = replace_all_ci(out, "username=" + user_name, "username=<user>");
+  }
+  out = redact_url_userinfo(out);
+  return redact_credentials(out);
+}
+
+// ------------------------------------------------------------ lyric cache
+
+namespace {
+
+// Header values are single lines; a title carrying a line break must not be
+// able to add or override a header field.
+std::string header_value(const std::string& value) {
+  std::string out = value;
+  for (char& c : out) {
+    if (c == '\n' || c == '\r') c = ' ';
+  }
+  return out;
+}
+
+}  // namespace
+
+std::string serialize_cached_lyrics(const Lyrics& l) {
+  std::string s = "YTLY2\n";
+  s += "title=" + header_value(l.title) + "\n";
+  s += "artist=" + header_value(l.artist) + "\n";
+  s += "album=" + header_value(l.album) + "\n";
+  s += "source=" + header_value(l.source) + "\n";
+  s += "variant=" + header_value(l.variant) + "\n";
+  s += std::string("synced=") + (l.synced ? "1" : "0") + "\n";
+  s += "--lrc--\n";
+  s += lyrics_to_lrc(l.lines);
+  s += "--plain--\n";
+  s += l.plain;
+  s += "\n";
+  return s;
+}
+
+bool parse_cached_lyrics(const std::string& data, Lyrics& out) {
+  // "YTLY1" sheets were stored by builds whose matching accepted look-alike
+  // titles and other cuts of a song; they are ignored and fetched again.
+  if (!starts_with(data, "YTLY2\n")) return false;
+  out = Lyrics();
+  bool synced = false;
+  bool saw_synced = false;
+  // The section markers are whole lines. Searching for the bare text would
+  // also find it inside a title or a lyric line.
+  const size_t lrc_marker = data.find("\n--lrc--\n");
+  if (lrc_marker == std::string::npos) return false;
+  const size_t lrc_at = lrc_marker + 1;
+  const size_t plain_marker = data.find("\n--plain--\n", lrc_at + 7);
+  if (plain_marker == std::string::npos) return false;
+  const size_t plain_at = plain_marker + 1;
+
+  size_t pos = 6;
+  while (pos < lrc_at) {
+    const size_t nl = data.find('\n', pos);
+    if (nl == std::string::npos || nl >= lrc_at) break;
+    const std::string kv = data.substr(pos, nl - pos);
+    pos = nl + 1;
+    const size_t eq = kv.find('=');
+    if (eq == std::string::npos) continue;
+    const std::string k = kv.substr(0, eq), v = kv.substr(eq + 1);
+    if (k == "title") out.title = v;
+    else if (k == "artist") out.artist = v;
+    else if (k == "album") out.album = v;
+    else if (k == "source") out.source = v;
+    else if (k == "variant") out.variant = v;
+    else if (k == "synced") {
+      if (v != "0" && v != "1") return false;
+      synced = v == "1";
+      saw_synced = true;
     }
-    if (!redacted) result.push_back(out[i++]);
   }
-  return result;
+  if (!saw_synced) return false;  // truncated before the header was complete
+  const std::string lrc_section = data.substr(lrc_at + 8, plain_at - (lrc_at + 8));
+  const std::string plain_section = data.substr(plain_at + 10);
+
+  if (synced) {
+    if (!lrc_parse(lrc_section, out.lines) || out.lines.empty()) return false;
+    out.synced = true;
+    return true;
+  }
+  out.synced = false;
+  out.plain = plain_section;
+  while (!out.plain.empty() && (out.plain.back() == '\n' || out.plain.back() == '\r'))
+    out.plain.pop_back();
+  return !out.plain.empty();
+}
+
+bool pe_is_x64_gui_application(const std::string& head, uint64_t file_size) {
+  constexpr uint64_t kMinBytes = 128u << 10;
+  constexpr uint64_t kMaxBytes = 64u << 20;
+  if (file_size < kMinBytes || file_size > kMaxBytes) return false;
+  auto u8 = [&](size_t at) { return static_cast<unsigned>(static_cast<unsigned char>(head[at])); };
+  auto u16 = [&](size_t at) { return u8(at) | (u8(at + 1) << 8); };
+  if (head.size() < 0x40 || head[0] != 'M' || head[1] != 'Z') return false;
+  const uint64_t pe = static_cast<uint64_t>(u16(0x3C)) | (static_cast<uint64_t>(u16(0x3E)) << 16);
+  // Signature (4) + COFF header (20) + optional header through Subsystem (70).
+  constexpr uint64_t kNeeded = 4 + 20 + 70;
+  if (pe < 0x40 || pe + kNeeded > head.size() || pe + kNeeded > file_size) return false;
+  const size_t at = static_cast<size_t>(pe);
+  if (head[at] != 'P' || head[at + 1] != 'E' || head[at + 2] != 0 || head[at + 3] != 0)
+    return false;
+  const unsigned machine = u16(at + 4);
+  const unsigned optional_size = u16(at + 20);
+  const unsigned characteristics = u16(at + 22);
+  const unsigned magic = u16(at + 24);
+  const unsigned subsystem = u16(at + 24 + 68);
+  return machine == 0x8664 &&                 // x86-64
+         optional_size >= 70 &&
+         (characteristics & 0x0002) != 0 &&   // IMAGE_FILE_EXECUTABLE_IMAGE
+         (characteristics & 0x2000) == 0 &&   // not a DLL
+         magic == 0x20B &&                    // PE32+
+         subsystem == 2;                      // Windows GUI
+}
+
+bool untimed_cache_entry_expired(bool synced, int age_days) {
+  // An unreadable timestamp (age < 0) is treated as fresh: looking the song
+  // up on every play would be worse than keeping words that fit.
+  return !synced && age_days >= kUntimedCacheDays;
+}
+
+ProviderFailure classify_provider_response(bool transport_error, int http_status) {
+  ProviderFailure f;
+  if (transport_error) {
+    f.transient = true;
+    f.message = "Lyrics provider transport error";
+    return f;
+  }
+  if (http_status == 200) return f;
+  if (http_status == 404) {
+    f.message = "No lyrics in the database for this track.";
+  } else if (http_status == 408 || http_status == 425 || http_status == 429 ||
+             (http_status >= 500 && http_status <= 599)) {
+    f.transient = true;
+    f.message = "Provider is temporarily rate-limited or unavailable; try again later.";
+  } else {
+    f.message = "Lookup failed (HTTP " + std::to_string(http_status) + ").";
+  }
+  return f;
 }
 
 }  // namespace ytl

@@ -53,8 +53,10 @@ jobs:
             echo "::error::The committed download differs from a fresh build of this commit. Run ./scripts/build.sh with the pinned toolchain and commit the result."
             exit 1
           fi
-      - name: Prepare release metadata
-        run: python3 scripts/generate_release.py --output-dir .build/release
+      # The same gate the stable-release workflow runs before publishing, so a
+      # commit that could not be released is caught here, not at tag time.
+      - name: Dry-run the release gate (nothing is published)
+        run: python3 scripts/verify_release.py --tag "v$(cat VERSION)" --built dist/YoutubeLyrics.exe --ref HEAD --output-dir .build/release
 
   windows-native:
     name: Windows native build and resource check
@@ -136,3 +138,74 @@ jobs:
           if ($text -match [regex]::Escape($env:USERNAME)) {
             throw 'the report contains the Windows account name; redaction failed'
           }
+      # Headless checks inside the real program on real Windows: data-folder
+      # reads and writes, settings, the media listener starting and stopping,
+      # leaving during a lyric request, and report redaction. It proves nothing
+      # about what the window, tray or desktop mode look like.
+      - name: Run the self-test on Windows
+        shell: pwsh
+        run: |
+          $result = Join-Path $env:RUNNER_TEMP 'ytl-self-test.txt'
+          $process = Start-Process -FilePath (Resolve-Path dist/YoutubeLyrics.exe).Path `
+            -ArgumentList '--self-test', "`"$result`"" -PassThru
+          if (-not $process.WaitForExit(180000)) {
+            $process.Kill()
+            throw 'the self-test did not finish within 180 s'
+          }
+          if (Test-Path $result) { Get-Content $result -Encoding UTF8 } else { throw 'the self-test wrote no result file' }
+          if ($process.ExitCode -ne 0) { throw "the self-test failed (exit code $($process.ExitCode))" }
+          $text = Get-Content $result -Raw -Encoding UTF8
+          if ($text -notmatch 'RESULT: PASS') { throw 'the self-test result file does not say PASS' }
+          if ($text -match 'FAIL  ') { throw 'a self-test check failed' }
+          if ($text -match [regex]::Escape($env:USERNAME)) {
+            throw 'the self-test output contains the Windows account name; redaction failed'
+          }
+          if (Test-Path (Join-Path $env:LOCALAPPDATA 'YouTubeLyrics\self-test-probe.txt')) {
+            throw 'the self-test left its probe file behind'
+          }
+      # Starts the real program with its window and message loop, confirms it
+      # stays up and refuses a second copy, then ends it the way Quit does and
+      # requires a clean shutdown with every worker stopped. The runner has a
+      # desktop session but nobody looks at it: this does not show the window
+      # is drawn correctly.
+      - name: Start the program, then shut it down cleanly
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path dist/YoutubeLyrics.exe).Path
+          $log = Join-Path $env:LOCALAPPDATA 'YouTubeLyrics\ytlyrics.log'
+          if (Test-Path $log) { Remove-Item $log }
+
+          $none = Start-Process -FilePath $exe -ArgumentList '--quit' -PassThru -Wait
+          if ($none.ExitCode -ne 2) { throw "--quit with nothing running returned $($none.ExitCode), expected 2" }
+
+          $app = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 8
+          if ($app.HasExited) {
+            if (Test-Path $log) { Get-Content $log -Encoding UTF8 }
+            throw "the program exited by itself within 8 s (exit code $($app.ExitCode))"
+          }
+
+          # A second copy must hand over to the first and leave.
+          $second = Start-Process -FilePath $exe -PassThru
+          if (-not $second.WaitForExit(15000)) {
+            $second.Kill(); $app.Kill()
+            throw 'a second copy kept running; the single-instance check failed'
+          }
+          if ($app.HasExited) { throw 'starting a second copy ended the first' }
+
+          $quit = Start-Process -FilePath $exe -ArgumentList '--quit' -PassThru -Wait
+          if ($quit.ExitCode -ne 0) { $app.Kill(); throw "--quit returned $($quit.ExitCode), expected 0" }
+          if (-not $app.WaitForExit(20000)) {
+            $app.Kill()
+            if (Test-Path $log) { Get-Content $log -Encoding UTF8 }
+            throw 'the program did not exit within 20 s of being asked to quit'
+          }
+          if ($app.ExitCode -ne 0) { throw "the program exited with code $($app.ExitCode)" }
+
+          Get-Content $log -Encoding UTF8
+          $text = Get-Content $log -Raw -Encoding UTF8
+          $version = (Get-Content VERSION -Raw).Trim()
+          if ($text -notmatch [regex]::Escape("started $version")) { throw 'the log has no start line for this version' }
+          if ($text -notmatch 'stopped \(clean\)') { throw 'the log does not record a clean stop' }
+          $left = Get-Process -Name YoutubeLyrics -ErrorAction SilentlyContinue
+          if ($left) { $left | Stop-Process -Force; throw 'a YoutubeLyrics process was left running' }

@@ -342,4 +342,29 @@ std::string replace_all_ci(const std::string& text, const std::string& needle,
 std::string redact_report(const std::string& text, const std::string& profile_dir,
                           const std::string& user_name);
 
+// ---------------------------------------------------------------- lyric cache
+// One cached sheet on disk. Parsing is strict: a truncated, hand-edited or
+// otherwise damaged file is refused (and the song is simply looked up again)
+// rather than half-read.
+std::string serialize_cached_lyrics(const Lyrics& l);
+bool parse_cached_lyrics(const std::string& data, Lyrics& out);
+
+// Untimed words are the fallback answer; after this many days a cached untimed
+// sheet is looked up again in case timed lyrics have been published since.
+constexpr int kUntimedCacheDays = 7;
+bool untimed_cache_entry_expired(bool synced, int age_days);
+
+// Update safety: is this file (its first bytes in `head`, its total size in
+// `file_size`) an x86-64 PE32+ Windows GUI *application*? A DLL, a console
+// tool, a 32-bit or ARM image, or a truncated download is refused before it
+// can replace the running program.
+bool pe_is_x64_gui_application(const std::string& head, uint64_t file_size);
+
+// What one provider response means for the rest of the lookup.
+struct ProviderFailure {
+  bool transient = false;  // network/server trouble: worth retrying later
+  std::string message;     // empty when the response is usable (HTTP 200)
+};
+ProviderFailure classify_provider_response(bool transport_error, int http_status);
+
 }  // namespace ytl

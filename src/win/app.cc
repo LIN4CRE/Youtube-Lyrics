@@ -38,6 +38,8 @@ const int kHotkeySettings = 3;
 const int kHotkeyFullscreen = 4;
 const UINT kTrayId = 1;
 const UINT WM_APP_SHOW_EXISTING = WM_APP + 9;
+// "YoutubeLyrics.exe --quit": ask the running copy to exit cleanly.
+const UINT WM_APP_QUIT_EXISTING = WM_APP + 10;
 
 App* g_app = nullptr;
 std::mutex g_log_mu;
@@ -1526,7 +1528,15 @@ void Config::save() const {
   data += "win_y=" + std::to_string(win_y) + "\n";
   data += "win_w=" + std::to_string(win_w) + "\n";
   data += "win_h=" + std::to_string(win_h) + "\n";
-  write_file_atomic(appdata_dir() + "\\config.ini", data);
+  if (!write_file_atomic(appdata_dir() + "\\config.ini", data)) {
+    // Settings still apply for this session; say why they will not persist.
+    static bool reported = false;
+    if (!reported) {
+      reported = true;
+      logf("config: could not save config.ini (error %lu)",
+           static_cast<unsigned long>(GetLastError()));
+    }
+  }
 }
 
 // ----------------------------------------------------------------- App methods
@@ -1762,13 +1772,17 @@ void App::nudge_song_offset(int delta_ms) {
   }
   song_offset_ms = std::max(-60000, std::min(60000, song_offset_ms + delta_ms));
   song_offsets.set(song_offset_key, song_offset_ms);
-  write_file_atomic(appdata_dir() + "\\offsets.txt", serialize_offset_store(song_offsets));
-  char buf[96];
+  const bool saved = write_file_atomic(appdata_dir() + "\\offsets.txt",
+                                       serialize_offset_store(song_offsets));
+  if (!saved) logf("sync: could not save offsets.txt (error %lu)",
+                   static_cast<unsigned long>(GetLastError()));
+  char buf[112];
   if (song_offset_ms == 0) {
     std::snprintf(buf, sizeof(buf), "This song: no sync correction");
   } else {
-    std::snprintf(buf, sizeof(buf), "This song: sync %+.2f s (remembered)",
-                  song_offset_ms / 1000.0);
+    // Only claim it is remembered when it actually reached the disk.
+    std::snprintf(buf, sizeof(buf), "This song: sync %+.2f s (%s)", song_offset_ms / 1000.0,
+                  saved ? "remembered" : "could not be saved; this session only");
   }
   show_toast(buf);
   invalidate();
@@ -1780,7 +1794,10 @@ void App::reset_offsets() {
   if (!song_offset_key.empty() && song_offset_ms != 0) {
     song_offset_ms = 0;
     song_offsets.set(song_offset_key, 0);
-    write_file_atomic(appdata_dir() + "\\offsets.txt", serialize_offset_store(song_offsets));
+    if (!write_file_atomic(appdata_dir() + "\\offsets.txt",
+                           serialize_offset_store(song_offsets)))
+      logf("sync: could not save offsets.txt (error %lu)",
+           static_cast<unsigned long>(GetLastError()));
   }
   show_toast("Sync correction reset");
   invalidate();
@@ -1789,10 +1806,20 @@ void App::reset_offsets() {
 
 void App::export_diagnostics() {
   std::string path;
-  if (export_diagnostic_report(*this, &path)) {
-    show_toast("Diagnostic report saved and copied to the clipboard", 4200);
-  } else {
-    show_toast("Could not write the diagnostic report", 4200);
+  switch (export_diagnostic_report(*this, &path)) {
+    case ReportExport::Saved:
+      show_toast("Report saved and copied. It lists recent songs: read it before sharing.",
+                 6000);
+      break;
+    case ReportExport::ClipboardOnly:
+      show_toast("The report file could not be written; the report is on the clipboard.",
+                 6000);
+      break;
+    case ReportExport::Failed:
+    default:
+      show_toast("The diagnostic report could not be created (no file access, clipboard busy).",
+                 6000);
+      break;
   }
 }
 
@@ -2014,6 +2041,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       app->desktop_host = nullptr;
       apply_desktop_mode(*app);
     }
+    return 0;
+  }
+  if (msg == WM_APP_QUIT_EXISTING) {
+    logf("quit requested from the command line");
+    app->quitting = true;
+    PostMessageW(hwnd, WM_CLOSE, 0, 0);
     return 0;
   }
   if (msg == WM_APP_SHOW_EXISTING) {
@@ -2364,6 +2397,33 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR command_line, int show_cm
     return write_diagnostic_report(report, path) ? 0 : 1;
   }
 
+  // "--self-test [file]": run the checks that need no window and no user, and
+  // exit 0 only if all of them passed. Used by the Windows CI job; it never
+  // touches the saved settings, cache or sync corrections.
+  if (launch_flag.rfind(L"--self-test", 0) == 0) {
+    std::wstring target = launch_flag.substr(11);
+    while (!target.empty() && (target.front() == L' ' || target.front() == L'\t'))
+      target.erase(target.begin());
+    if (target.size() >= 2 && target.front() == L'"' && target.back() == L'"')
+      target = target.substr(1, target.size() - 2);
+    App headless;
+    headless.inst = inst;
+    headless.cfg.load();
+    std::string path = wide_to_utf8(target);
+    if (path.empty()) path = appdata_dir() + "\\self-test.txt";
+    return run_self_test(headless, path) ? 0 : 1;
+  }
+
+  // "--quit": close the copy that is already running (for scripts, and so an
+  // automated test can end a session the same way a user's Quit does).
+  // Exit code 0 = asked it to quit, 2 = nothing was running.
+  if (launch_flag == L"--quit") {
+    HWND existing = FindWindowW(kClassName, nullptr);
+    if (!existing) return 2;
+    PostMessageW(existing, WM_APP_QUIT_EXISTING, 0, 0);
+    return 0;
+  }
+
   GdiplusStartupInput gdi_input;
   ULONG_PTR gdi_token = 0;
   GdiplusStartup(&gdi_token, &gdi_input, nullptr);
@@ -2524,9 +2584,16 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR command_line, int show_cm
   logf("shutting down");
   app.cfg.save();
   app.destroy_view_resources();
-  media_stop();
-  lyrics_stop();
+  const bool media_stopped = media_stop();
+  const bool lyrics_stopped = lyrics_stop();
+  logf("stopped (%s)", media_stopped && lyrics_stopped ? "clean" : "a worker was still busy");
   if (app.single_instance) CloseHandle(app.single_instance);
+  if (!media_stopped || !lyrics_stopped || update_worker_stuck()) {
+    // A worker is still inside a system call and still uses this module's
+    // globals. A normal return would run their destructors underneath it;
+    // ExitProcess ends the threads first and skips that teardown.
+    ExitProcess(static_cast<UINT>(msg.wParam));
+  }
   CoUninitialize();
   GdiplusShutdown(gdi_token);
   return static_cast<int>(msg.wParam);

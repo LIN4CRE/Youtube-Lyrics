@@ -7,6 +7,7 @@
 #include "smtc_script.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -18,6 +19,15 @@ HANDLE g_thread = nullptr;
 HANDLE g_stop = nullptr;
 DWORD g_thread_id = 0;
 
+// Listener health, for the diagnostic report and the self-test. Written by the
+// listener thread, read from the UI thread.
+std::atomic<int> g_helper_starts{0};
+std::atomic<int> g_helper_start_failures{0};
+std::atomic<int> g_helper_lines{0};
+std::atomic<int> g_helper_bad_lines{0};
+std::atomic<bool> g_helper_running{false};
+std::atomic<int64_t> g_helper_last_line_at{0};
+
 struct ChildProc {
   HANDLE process = nullptr;
   HANDLE out_read = nullptr;
@@ -28,6 +38,7 @@ struct ChildProc {
 };
 
 void close_child(ChildProc& c) {
+  g_helper_running.store(false);
   if (c.process) {
     TerminateProcess(c.process, 0);
     CloseHandle(c.process);
@@ -81,11 +92,18 @@ bool spawn_helper(ChildProc& c) {
 
   std::wstring script_path = utf8_to_wide(appdata_dir() + "\\smtc.ps1");
   wchar_t cmd[2048];
-  swprintf(cmd, 2048,
+  const int written = swprintf(cmd, 2048,
            L"\"%ls\" -NoProfile -NonInteractive -ExecutionPolicy Bypass "
            L"-WindowStyle Hidden -File \"%ls\" -ParentPid %lu",
            ps.c_str(), script_path.c_str(),
            static_cast<unsigned long>(GetCurrentProcessId()));
+  if (written < 0 || written >= 2048) {
+    // A profile path too long for the command line: starting a truncated
+    // command would run the wrong thing, so do not start at all.
+    const int failures = ++g_helper_start_failures;
+    if (failures == 1) logf("media: helper command line is too long; not started");
+    return false;
+  }
 
   STARTUPINFOW si{};
   si.cb = sizeof(si);
@@ -103,10 +121,18 @@ bool spawn_helper(ChildProc& c) {
   if (nul_in != INVALID_HANDLE_VALUE) CloseHandle(nul_in);
   CloseHandle(out_write);
   if (!started) {
+    const DWORD error = GetLastError();
     CloseHandle(out_read);
-    logf("media: failed to start powershell (err %lu)", GetLastError());
+    // Once, then every 100th time: a machine without Windows PowerShell would
+    // otherwise write this line every few seconds for as long as it runs.
+    const int failures = g_helper_start_failures.fetch_add(1);
+    if (failures % 100 == 0)
+      logf("media: failed to start powershell (err %lu, attempt %d)",
+           static_cast<unsigned long>(error), failures + 1);
     return false;
   }
+  g_helper_starts.fetch_add(1);
+  g_helper_running.store(true);
   CloseHandle(pi.hThread);
   c.process = pi.hProcess;
   c.out_read = out_read;
@@ -121,16 +147,21 @@ void handle_line(App& app, const std::string& line) {
   MediaState fresh;
   int64_t now = static_cast<int64_t>(GetTickCount64());
   if (!media_parse_line(line, fresh, now)) {
-    logf("media: unparsable line (%zu bytes)", line.size());
+    if (g_helper_bad_lines.fetch_add(1) < 20)
+      logf("media: unparsable line (%zu bytes)", line.size());
     return;
   }
+  g_helper_lines.fetch_add(1);
+  g_helper_last_line_at.store(now);
   {
     std::lock_guard<std::mutex> lock(app.mu);
     // Keep the previous position anchor if this poll is identical in every
     // respect but the reported position, so smoothing stays stable.
     app.media = fresh;
   }
-  PostMessageW(app.hwnd, WM_APP_MEDIA, 0, 0);
+  // No window in the headless self-test; a null handle would post to this
+  // thread's own queue, which nothing reads.
+  if (app.hwnd) PostMessageW(app.hwnd, WM_APP_MEDIA, 0, 0);
 }
 
 DWORD WINAPI thread_main(LPVOID param) {
@@ -275,6 +306,19 @@ bool media_parse_line(const std::string& line, MediaState& out, int64_t now) {
   return true;
 }
 
+MediaHelperStatus media_helper_status() {
+  MediaHelperStatus status;
+  status.starts = g_helper_starts.load();
+  status.start_failures = g_helper_start_failures.load();
+  status.lines = g_helper_lines.load();
+  status.bad_lines = g_helper_bad_lines.load();
+  status.running = g_helper_running.load();
+  const int64_t last = g_helper_last_line_at.load();
+  status.ms_since_last_line =
+      last > 0 ? static_cast<int64_t>(GetTickCount64()) - last : -1;
+  return status;
+}
+
 bool media_start(App& app) {
   g_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   if (!g_stop) return false;
@@ -285,19 +329,27 @@ bool media_start(App& app) {
   return g_thread != nullptr;
 }
 
-void media_stop() {
+bool media_stop() {
   if (g_stop) SetEvent(g_stop);
   if (g_thread) {
     // The worker owns a reference to App and may be in its bounded 2-second
     // retry sleep. Never release App storage or its stop event before it exits.
-    WaitForSingleObject(g_thread, 10000);
+    const DWORD wait = WaitForSingleObject(g_thread, 10000);
     CloseHandle(g_thread);
     g_thread = nullptr;
+    if (wait != WAIT_OBJECT_0) {
+      // The thread still reads the stop event: leave it open. The process is
+      // exiting, which reclaims it.
+      logf("media: listener did not stop within ten seconds (wait=%lu)",
+           static_cast<unsigned long>(wait));
+      return false;
+    }
   }
   if (g_stop) {
     CloseHandle(g_stop);
     g_stop = nullptr;
   }
+  return true;
 }
 
 }  // namespace ytl
