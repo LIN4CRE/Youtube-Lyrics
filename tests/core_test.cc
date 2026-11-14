@@ -1235,7 +1235,185 @@ static void test_update_image_validation() {
 
 }
 
+static void test_desktop_machine() {
+  using P = DesktopPhase;
+  using E = DesktopEvent;
+  DesktopMachine m;
+  // Off ignores everything but Enable, including a late success.
+  for (E e : {E::AttachSucceeded, E::AttachFailed, E::SurfaceLost, E::ShellRestarted,
+              E::DisplayChanged, E::PowerResumed, E::DrawRefused, E::ManualRetry, E::Disable}) {
+    DesktopAction a = desktop_machine_step(m, e, 100);
+    CHECK(m.phase == P::Off);
+    CHECK(!a.attempt_now && !a.release_layer && !a.announce_failure);
+  }
+  CHECK(!desktop_machine_attempt_due(m, 1 << 30));
+  CHECK(!desktop_machine_may_draw(m));
+  CHECK(!desktop_machine_in_trouble(m));
+
+  // Enable -> Attaching; a setting alone never means attached.
+  DesktopAction a = desktop_machine_step(m, E::Enable, 1000);
+  CHECK(m.phase == P::Attaching && a.attempt_now);
+  CHECK(!desktop_machine_may_draw(m));
+  CHECK(desktop_machine_attempt_due(m, 1000));
+  CHECK(!desktop_machine_in_trouble(m));  // first attempt has not failed yet
+
+  // Quick retries, then Failed with exactly one announcement.
+  int announced = 0;
+  int64_t now = 1000;
+  for (int i = 1; i <= kDesktopQuickAttempts; ++i) {
+    a = desktop_machine_step(m, E::AttachFailed, now);
+    announced += a.announce_failure ? 1 : 0;
+    if (i < kDesktopQuickAttempts) {
+      CHECK(m.phase == P::Attaching);
+      CHECK(desktop_machine_in_trouble(m));
+      CHECK(!desktop_machine_attempt_due(m, now + kDesktopQuickRetryMs - 1));
+      CHECK(desktop_machine_attempt_due(m, now + kDesktopQuickRetryMs));
+      now += kDesktopQuickRetryMs;
+    }
+  }
+  CHECK(m.phase == P::Failed);
+  CHECK_EQ(announced, 1);
+  CHECK(!desktop_machine_may_draw(m));
+  CHECK(!desktop_machine_attempt_due(m, now + kDesktopSlowRetryMs - 1));
+  CHECK(desktop_machine_attempt_due(m, now + kDesktopSlowRetryMs));
+  // Further failures stay Failed, slowly, and silent.
+  a = desktop_machine_step(m, E::AttachFailed, now);
+  CHECK(m.phase == P::Failed && !a.announce_failure);
+  // A slow retry that works recovers fully and re-arms the announcement.
+  a = desktop_machine_step(m, E::AttachSucceeded, now);
+  CHECK(m.phase == P::Attached && desktop_machine_may_draw(m));
+  CHECK_EQ(m.attempts, 0);
+  CHECK(!m.failure_announced);
+  CHECK(!desktop_machine_attempt_due(m, now + 999999));
+  CHECK_EQ(m.restores, 0);
+
+  // Surface lost -> Restoring after a settle delay; success counts a restore.
+  a = desktop_machine_step(m, E::SurfaceLost, 50000);
+  CHECK(m.phase == P::Restoring && a.release_layer && !a.attempt_now);
+  CHECK(!desktop_machine_may_draw(m));
+  CHECK(!desktop_machine_attempt_due(m, 50000 + kDesktopLossSettleMs - 1));
+  CHECK(desktop_machine_attempt_due(m, 50000 + kDesktopLossSettleMs));
+  // A second loss report while restoring changes nothing.
+  a = desktop_machine_step(m, E::SurfaceLost, 50100);
+  CHECK(m.phase == P::Restoring && !a.release_layer);
+  desktop_machine_step(m, E::AttachSucceeded, 52000);
+  CHECK(m.phase == P::Attached);
+  CHECK_EQ(m.restores, 1);
+
+  // Explorer restart: immediate attempt from any active state.
+  a = desktop_machine_step(m, E::ShellRestarted, 60000);
+  CHECK(m.phase == P::Restoring && a.release_layer && a.attempt_now);
+  desktop_machine_step(m, E::AttachFailed, 60000);
+  CHECK(m.phase == P::Restoring);
+  desktop_machine_step(m, E::AttachSucceeded, 62000);
+  CHECK_EQ(m.restores, 2);
+
+  // Display and power changes rebuild the layer and are counted separately.
+  for (E e : {E::DisplayChanged, E::PowerResumed}) {
+    a = desktop_machine_step(m, e, 70000);
+    CHECK(m.phase == P::Recovering && a.release_layer && a.attempt_now);
+    CHECK(!desktop_machine_may_draw(m));
+    desktop_machine_step(m, E::AttachSucceeded, 70001);
+    CHECK(m.phase == P::Attached);
+  }
+  CHECK_EQ(m.recoveries, 2);
+  CHECK_EQ(m.restores, 2);
+
+  // While already restoring, a display change only brings the attempt forward.
+  desktop_machine_step(m, E::SurfaceLost, 80000);
+  a = desktop_machine_step(m, E::DisplayChanged, 80010);
+  CHECK(m.phase == P::Restoring && a.attempt_now && !a.release_layer);
+  desktop_machine_step(m, E::AttachSucceeded, 80020);
+
+  // Transparent drawing refused: Failed, layer removed, nothing substituted.
+  a = desktop_machine_step(m, E::DrawRefused, 90000);
+  CHECK(m.phase == P::Failed && a.release_layer && a.announce_failure);
+  CHECK(!desktop_machine_may_draw(m));
+  CHECK(desktop_machine_in_trouble(m));
+  a = desktop_machine_step(m, E::DrawRefused, 90001);
+  CHECK(!a.release_layer && !a.announce_failure);
+  // A display change gives a failed layer a fresh start.
+  a = desktop_machine_step(m, E::DisplayChanged, 91000);
+  CHECK(m.phase == P::Recovering && a.attempt_now);
+  desktop_machine_step(m, E::AttachSucceeded, 91001);
+
+  // Manual retry: from Attached re-verifies by rebuilding; from Failed restarts.
+  a = desktop_machine_step(m, E::ManualRetry, 95000);
+  CHECK(m.phase == P::Recovering && a.release_layer && a.attempt_now);
+  for (int i = 0; i < kDesktopQuickAttempts; ++i) desktop_machine_step(m, E::AttachFailed, 95000);
+  CHECK(m.phase == P::Failed);
+  a = desktop_machine_step(m, E::ManualRetry, 96000);
+  CHECK(m.phase == P::Attaching && a.attempt_now && m.attempts == 0 && !m.failure_announced);
+
+  // Disable from anywhere releases and resets; a stale success is ignored.
+  a = desktop_machine_step(m, E::Disable, 97000);
+  CHECK(m.phase == P::Off && a.release_layer);
+  CHECK_EQ(m.restores, 0);
+  desktop_machine_step(m, E::AttachSucceeded, 97001);
+  CHECK(m.phase == P::Off);
+  // A stale failure report after success does not disturb an attached layer.
+  desktop_machine_step(m, E::Enable, 98000);
+  desktop_machine_step(m, E::AttachSucceeded, 98001);
+  desktop_machine_step(m, E::AttachFailed, 98002);
+  CHECK(m.phase == P::Attached && m.attempts == 0);
+  // Enable twice is harmless.
+  a = desktop_machine_step(m, E::Enable, 98003);
+  CHECK(m.phase == P::Attached && !a.attempt_now);
+
+  // Exhaustive: no sequence of events reaches Attached except via success,
+  // and Off is only left by Enable.
+  const E all[] = {E::Enable, E::Disable, E::AttachSucceeded, E::AttachFailed, E::SurfaceLost,
+                   E::ShellRestarted, E::DisplayChanged, E::PowerResumed, E::DrawRefused,
+                   E::ManualRetry};
+  unsigned seed = 12345;
+  DesktopMachine r;
+  for (int i = 0; i < 20000; ++i) {
+    seed = seed * 1103515245u + 12345u;
+    const E e = all[(seed >> 16) % 10];
+    const P before = r.phase;
+    const DesktopAction step = desktop_machine_step(r, e, i * 10);
+    if (r.phase == P::Attached && before != P::Attached) CHECK(e == E::AttachSucceeded);
+    if (before == P::Off && r.phase != P::Off) CHECK(e == E::Enable);
+    if (r.phase == P::Off) CHECK(!step.attempt_now && !step.announce_failure);
+    if (step.release_layer) CHECK(r.phase != P::Attached);
+    CHECK(r.attempts >= 0 && r.attempts <= kDesktopQuickAttempts + 20000);
+    CHECK(std::string(desktop_phase_name(r.phase)) != "unknown");
+  }
+}
+
+static void test_monitor_choice() {
+  CHECK(parse_monitor_choice("").all);
+  CHECK(parse_monitor_choice("ALL").all);
+  CHECK(parse_monitor_choice(" primary ").primary_only);
+  CHECK(!parse_monitor_choice("primary").all);
+  MonitorChoice c = parse_monitor_choice("3, 1,1 ,x,0,99,2");
+  CHECK(!c.all && !c.primary_only);
+  CHECK_EQ(c.numbers.size(), static_cast<size_t>(3));
+  CHECK_STR(format_monitor_choice(c), "1,2,3");
+  CHECK_STR(format_monitor_choice(parse_monitor_choice("garbage")), "all");
+  CHECK_STR(format_monitor_choice(parse_monitor_choice("primary")), "primary");
+  CHECK_STR(format_monitor_choice(parse_monitor_choice("2")), "2");
+
+  CHECK_EQ(select_monitors(parse_monitor_choice("all"), 3, 1).size(), static_cast<size_t>(3));
+  CHECK_EQ(select_monitors(parse_monitor_choice("all"), 0, 0).size(), static_cast<size_t>(0));
+  std::vector<int> s = select_monitors(parse_monitor_choice("primary"), 3, 2);
+  CHECK(s.size() == 1 && s[0] == 2);
+  s = select_monitors(parse_monitor_choice("2,3"), 3, 0);
+  CHECK(s.size() == 2 && s[0] == 1 && s[1] == 2);
+  // Display 3 unplugged: display 2 remains.
+  s = select_monitors(parse_monitor_choice("2,3"), 2, 0);
+  CHECK(s.size() == 1 && s[0] == 1);
+  // Every chosen display is gone: the primary, never nothing.
+  s = select_monitors(parse_monitor_choice("3"), 2, 1);
+  CHECK(s.size() == 1 && s[0] == 1);
+  // A nonsense primary index is tolerated.
+  s = select_monitors(parse_monitor_choice("primary"), 2, 7);
+  CHECK(s.size() == 1 && s[0] == 0);
+}
+
 int main() {
+  test_desktop_machine();
+  test_monitor_choice();
   test_utf8();
   test_json();
   test_semantic_versions();
