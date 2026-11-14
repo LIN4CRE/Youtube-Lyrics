@@ -105,7 +105,7 @@ Optional integrity check (PowerShell):
 Get-FileHash .\YoutubeLyrics.exe -Algorithm SHA256
 ```
 
-Expected SHA-256 for the current 1.6.0 download is listed in [`YoutubeLyrics.exe.sha256`](docs/downloads/YoutubeLyrics.exe.sha256) and beside the download on the [project website](https://youtube-lyrics-seven.vercel.app/). Compare it before running the file. The checksum is served over HTTPS; it is an integrity check, not a code signature.
+Expected SHA-256 for the current 1.7.0 download is listed in [`YoutubeLyrics.exe.sha256`](docs/downloads/YoutubeLyrics.exe.sha256) and beside the download on the [project website](https://youtube-lyrics-seven.vercel.app/). Compare it before running the file. The checksum is served over HTTPS; it is an integrity check, not a code signature.
 
 Windows may show **"Windows protected your PC"** because the file is not
 code-signed. The source is public; continue only if you trust the download. If

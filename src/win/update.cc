@@ -38,6 +38,19 @@ HWND g_app_window = nullptr;
 std::mutex g_job_mutex;
 std::mutex g_request_mutex;
 Job g_job;
+// Last thing the updater did, for the diagnostic report.
+std::mutex g_status_mutex;
+std::string g_status = "no update check has run in this session";
+
+void set_status(const std::string& text) {
+  SYSTEMTIME st;
+  GetLocalTime(&st);
+  char stamp[16];
+  std::snprintf(stamp, sizeof(stamp), "%02d:%02d:%02d ", st.wHour, st.wMinute, st.wSecond);
+  std::lock_guard<std::mutex> lock(g_status_mutex);
+  g_status = stamp + text;
+}
+
 bool g_download_queued_or_running = false;
 bool g_check_queued_or_running = false;
 HINTERNET g_active_request = nullptr;
@@ -775,13 +788,26 @@ void do_check(bool manual) {
   UpdateRelease release;
   std::string error;
   if (!get_release(release, error)) {
+    if (!stopping()) {
+      set_status("check failed: " + error);
+      // An automatic check stays silent on screen, but not in the log: a
+      // machine that can never reach the update server should be diagnosable.
+      logf("update: %s check failed: %s", manual ? "manual" : "automatic", error.c_str());
+    }
     if (!stopping() && manual) post_error(error, true);
     return;
   }
   if (release.asset_url.empty()) {
+    set_status("up to date (" YTL_VERSION_STRING " is the newest stable release)");
     if (manual && g_app_window) PostMessageW(g_app_window, WM_APP_UPDATE_NONE, 1, 0);
     return;
   }
+  set_status("version " + release.version + " is available (" +
+             std::to_string(release.asset_size) + " bytes, from " +
+             (site_asset_url(release.asset_url, "YoutubeLyrics.exe") ? "the project site"
+                                                                     : "GitHub Releases") +
+             ")");
+  logf("update: version %s is available", release.version.c_str());
   post_owned(WM_APP_UPDATE_AVAILABLE,
              new UpdateRelease(std::move(release)), manual ? 1 : 0);
 }
@@ -791,9 +817,15 @@ void do_download(const UpdateRelease& release) {
   UpdateStage stage;
   std::string error;
   if (!download_release(release, stage, error)) {
-    if (!stopping()) post_error(error, true);
+    if (!stopping()) {
+      set_status("download of " + release.version + " failed: " + error);
+      logf("update: download failed: %s", error.c_str());
+      post_error(error, true);
+    }
     return;
   }
+  set_status("version " + release.version + " downloaded and verified");
+  logf("update: version %s downloaded and verified", release.version.c_str());
   post_owned(WM_APP_UPDATE_READY, new UpdateStage(std::move(stage)));
 }
 
@@ -837,7 +869,14 @@ $replacement = $Target + '.ytl-new'
 $dir = Split-Path -Parent $Target
 try {
   $parent = Get-Process -Id $ParentPid -ErrorAction SilentlyContinue
-  if ($null -ne $parent) { $parent.WaitForExit() }
+  if ($null -ne $parent) {
+    # Bounded: if the running copy never exits, nothing has been touched yet,
+    # so give up cleanly instead of waiting for ever as a hidden process.
+    if (-not $parent.WaitForExit(60000)) {
+      Remove-Item -LiteralPath $Stage -Force -ErrorAction SilentlyContinue
+      exit 2
+    }
+  }
   $sourceHash = (Get-FileHash -LiteralPath $Stage -Algorithm SHA256).Hash.ToLowerInvariant()
   if ($sourceHash -ne $ExpectedHash.ToLowerInvariant()) { throw 'Staged update checksum mismatch.' }
   Copy-Item -LiteralPath $Stage -Destination $replacement -Force
@@ -867,8 +906,45 @@ try {
 
 }  // namespace
 
-void update_start(App& app, bool automatic_check) {
+std::string update_status_text() {
+  std::lock_guard<std::mutex> lock(g_status_mutex);
+  return g_status;
+}
+
+// An update that was interrupted (power loss, a killed helper) can leave a
+// partial download, an unused staged copy, or the replacement helper's
+// ".ytl-new"/".ytl-backup" files beside the executable. This process is
+// running, so the executable in place is good and none of them are needed.
+void update_cleanup_leftovers(bool helper_may_be_running) {
+  int removed = 0;
+  const std::wstring dir = utf8_to_wide(appdata_dir() + "\\updates");
+  WIN32_FIND_DATAW entry{};
+  HANDLE search = FindFirstFileW((dir + L"\\YoutubeLyrics-*").c_str(), &entry);
+  if (search != INVALID_HANDLE_VALUE) {
+    do {
+      if (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+      if (DeleteFileW((dir + L"\\" + entry.cFileName).c_str())) ++removed;
+    } while (FindNextFileW(search, &entry));
+    FindClose(search);
+  }
+  wchar_t self[MAX_PATH] = {};
+  const DWORD length = GetModuleFileNameW(nullptr, self, MAX_PATH);
+  // Straight after a replacement the helper is still watching this process
+  // start, and the backup is what it would roll back to.
+  if (!helper_may_be_running && length > 0 && length < MAX_PATH) {
+    for (const wchar_t* suffix : {L".ytl-new", L".ytl-backup"}) {
+      const std::wstring path = std::wstring(self) + suffix;
+      if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES &&
+          DeleteFileW(path.c_str()))
+        ++removed;
+    }
+  }
+  if (removed > 0) logf("update: removed %d leftover file(s) from an earlier update", removed);
+}
+
+void update_start(App& app, bool automatic_check, bool launched_by_update_helper) {
   if (g_thread) return;
+  update_cleanup_leftovers(launched_by_update_helper);
   g_app_window = app.hwnd;
   g_stop_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   g_wake_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);

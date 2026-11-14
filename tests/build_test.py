@@ -30,6 +30,7 @@ def load(name: str, relative: str):
 
 verify = load("verify_build", "verify_build.py")
 facts = load("release_facts", "release_facts.py")
+normalize_pe = load("normalize_pe", "normalize_pe.py")
 
 
 def minimal_x64_pe(size: int = 160 * 1024) -> bytes:
@@ -180,6 +181,57 @@ class BuiltArtifactTests(unittest.TestCase):
             hashlib.sha256(BUILT_EXE.read_bytes()).hexdigest(),
             "the downloadable copy must be the exact binary that was verified",
         )
+
+
+class NormalizePeTests(unittest.TestCase):
+    """The step that makes two builds of the same source byte-identical."""
+
+    def test_timestamp_is_fixed_and_result_is_stable(self) -> None:
+        first = bytearray(minimal_x64_pe())
+        second = bytearray(first)
+        struct.pack_into("<I", first, 0x88, 0x11111111)   # COFF TimeDateStamp
+        struct.pack_into("<I", second, 0x88, 0x22222222)
+        a = normalize_pe.normalize(bytes(first))
+        b = normalize_pe.normalize(bytes(second))
+        self.assertEqual(a, b, "two link times must normalise to the same bytes")
+        self.assertEqual(struct.unpack_from("<I", a, 0x88)[0], normalize_pe.FIXED_TIMESTAMP)
+        self.assertEqual(normalize_pe.normalize(a), a, "normalising twice changes nothing")
+        self.assertEqual(len(a), len(first))
+
+    def test_different_code_stays_different(self) -> None:
+        first = bytearray(minimal_x64_pe())
+        second = bytearray(first)
+        second[-1] ^= 0xFF
+        self.assertNotEqual(normalize_pe.normalize(bytes(first)),
+                            normalize_pe.normalize(bytes(second)))
+
+    def test_rejects_files_that_are_not_pe32_plus(self) -> None:
+        with self.assertRaises(normalize_pe.PeError):
+            normalize_pe.normalize(b"not an executable" * 64)
+        wrong = bytearray(minimal_x64_pe())
+        struct.pack_into("<H", wrong, 0x98, 0x10B)  # PE32 (32-bit) magic
+        with self.assertRaises(normalize_pe.PeError):
+            normalize_pe.normalize(bytes(wrong))
+
+    @unittest.skipUnless(BUILT_EXE.exists(), "no built executable in this checkout")
+    def test_published_executable_is_already_normalised(self) -> None:
+        data = BUILT_EXE.read_bytes()
+        self.assertEqual(
+            normalize_pe.normalize(data), data,
+            "docs/downloads/YoutubeLyrics.exe was not produced by scripts/build.sh "
+            "(its link timestamp is not normalised), so it cannot be reproduced",
+        )
+
+    def test_both_build_scripts_compile_the_same_sources(self) -> None:
+        import re
+        sh = (ROOT / "scripts" / "build.sh").read_text(encoding="utf-8")
+        ps = (ROOT / "scripts" / "build.ps1").read_text(encoding="utf-8")
+        on_disk = {f"src/win/{p.name}" for p in (ROOT / "src" / "win").glob("*.cc")}
+        on_disk.add("src/core/core.cc")
+        for name, text in (("build.sh", sh), ("build.ps1", ps)):
+            listed = set(re.findall(r"src/(?:win|core)/\w+\.cc", text))
+            self.assertEqual(listed, on_disk, f"{name} does not compile every source file")
+            self.assertIn("normalize_pe.py", text, f"{name} skips the reproducibility step")
 
 
 if __name__ == "__main__":

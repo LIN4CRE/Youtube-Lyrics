@@ -957,11 +957,12 @@ void paint_chrome(App& app, Graphics& g, int w, int h) {
       status_line += "  \xC2\xB7  untimed";
     }
   }
-  if (app.cfg.offset_ms != 0) {
+  if (app.total_offset_ms() != 0) {
     char buf[64];
-    std::snprintf(buf, sizeof(buf), "%ssync %+.2fs",
+    std::snprintf(buf, sizeof(buf), "%ssync %+.2fs%s",
                   status_line.empty() ? "" : "  \xC2\xB7  ",
-                  app.cfg.offset_ms / 1000.0);
+                  app.total_offset_ms() / 1000.0,
+                  app.song_offset_ms != 0 ? " for this song" : "");
     status_line += buf;
   }
   if (!status_line.empty()) {
@@ -1056,16 +1057,17 @@ void paint_help(App& app, Graphics& g, int w, int h) {
   };
   static const Row kLyrics[] = {
       {L"\u2191 / \u2193  + / \u2212", L"Bigger / smaller text"},
-      {L"\u2190 / \u2192", L"Nudge lyric timing by 0.25 s"},
+      {L"\u2190 / \u2192", L"This song earlier / later by 0.25 s"},
       {L"F", L"Reset text size"},
       {L"R", L"Look the lyrics up again"},
       {L"K", L"Karaoke wipe on / off"},
+      {L"D", L"Save a diagnostic report"},
   };
   static const Row kLook[] = {
       {L"T", L"Theme"},
       {L"C", L"Album-art tint on / off"},
       {L"B", L"Next cinematic wallpaper"},
-      {L"[", L"Quieter / brighter background"},
+      {L"[", L"Background darkness (cycles)"},
       {L"Ctrl+Alt+S", L"Settings"},
       {L"F1 / H", L"Show / hide this help"},
       {L"Q", L"Quit"},

@@ -365,6 +365,7 @@ constexpr int kIdResetOffset = 2003;
 constexpr int kIdOpenLyrics = 2004;
 constexpr int kIdClearCache = 2005;
 constexpr int kIdCheckUpdates = 2006;
+constexpr int kIdDiagnostics = 2008;
 constexpr int kIdModeWallpaper = 2010;
 constexpr int kIdFullscreen = 2011;
 constexpr int kIdTopmost = 2012;
@@ -405,7 +406,7 @@ constexpr int kButton = 3;
 constexpr int kValue = 4;
 
 const RowSpec kRows[] = {
-    {0, 0, kLabelOnly, L"Sync offset", false},
+    {0, 0, kLabelOnly, L"Sync, all songs", false},
     {kIdOffsetMinus, 0, kButton, nullptr, true},
     {kIdOffset, 0, kButton, nullptr, true},
     {0, 0, kLabelOnly, L"Text size", false},
@@ -415,6 +416,7 @@ const RowSpec kRows[] = {
     {kIdOpenLyrics, 0, kButton, nullptr, false},
     {kIdClearCache, 0, kButton, nullptr, false},
     {kIdCheckUpdates, 0, kButton, nullptr, false},
+    {kIdDiagnostics, 0, kButton, nullptr, false},
     {kIdResetOffset, 0, kButton, nullptr, false},
 
     {kIdModeWallpaper, 1, kCheck, nullptr, false},
@@ -728,8 +730,12 @@ void handle_command(SettingsWindow& s, int id) {
       refresh_values(s);
       return;
     case kIdResetOffset:
-      app.cfg.offset_ms = 0;
-      break;
+      app.reset_offsets();
+      refresh_values(s);
+      return;
+    case kIdDiagnostics:
+      app.export_diagnostics();
+      return;
     case kIdOpenLyrics: {
       const std::wstring folder = utf8_to_wide(appdata_dir() + "\\lyrics");
       if (!CreateDirectoryW(folder.c_str(), nullptr) &&
@@ -869,10 +875,11 @@ LRESULT CALLBACK settings_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
       add_control(s, kIdOffsetMinus, ControlKind::Button, L"Earlier \u22120.25 s");
       add_control(s, kIdFont, ControlKind::Button, L"100%");
       add_control(s, kIdWipe, ControlKind::Check, L"Karaoke wipe on the active line");
-      add_control(s, kIdResetOffset, ControlKind::Button, L"Reset sync offset");
+      add_control(s, kIdResetOffset, ControlKind::Button, L"Reset sync correction");
       add_control(s, kIdOpenLyrics, ControlKind::Button, L"Open lyrics folder");
       add_control(s, kIdClearCache, ControlKind::Button, L"Clear lyrics cache");
       add_control(s, kIdCheckUpdates, ControlKind::Button, L"Check for updates");
+      add_control(s, kIdDiagnostics, ControlKind::Button, L"Save diagnostic report");
       add_control(s, kIdModeWallpaper, ControlKind::Check, L"On the desktop (behind windows)");
       add_control(s, kIdFullscreen, ControlKind::Check, L"Full screen (in front)");
       add_control(s, kIdTopmost, ControlKind::Check, L"Above other windows");

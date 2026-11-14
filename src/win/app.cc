@@ -364,6 +364,7 @@ void on_media(App& app) {
       m.duration_s = refined.duration_s;
       app.active_track = clean_track(refined, false);
       app.current_key = track_key(app.active_track);
+      app.load_song_offset();
       app.pending_key.clear();
       app.pending_track = TrackInfo();
       app.pending_seen = 0;
@@ -416,6 +417,7 @@ void on_media(App& app) {
                                !same_track(app.active_track, next);
         app.active_track = clean_track(next, false);
         app.current_key = track_key(app.active_track);
+        app.load_song_offset();
         app.pending_key.clear();
         app.pending_track = TrackInfo();
         app.pending_seen = 0;
@@ -449,7 +451,7 @@ void on_media(App& app) {
       const int64_t duration = static_cast<int64_t>(app.active_media.duration_s * 1000.0);
       int64_t frozen = interpolate_pos(app.active_media.pos_ms, app.active_media.at_ms,
                                         now, true, duration);
-      frozen -= app.cfg.offset_ms;
+      frozen -= app.total_offset_ms();
       if (frozen < 0) frozen = 0;
       app.active_media.pos_ms = frozen;
       app.active_media.at_ms = now;
@@ -460,6 +462,7 @@ void on_media(App& app) {
       logf("media: session gone for 3s; clearing '%s'",
            track_label(app.active_track).c_str());
       app.active_track = TrackInfo();
+      app.load_song_offset();
       app.active_media = MediaState();
       app.current_key.clear();
       app.missing_since = 0;
@@ -549,6 +552,15 @@ HWND find_desktop_host() {
 }
 
 void apply_desktop_mode(App& app);
+
+}  // namespace
+
+bool desktop_host_available() {
+  const HWND host = find_desktop_host();
+  return host != nullptr && IsWindow(host);
+}
+
+namespace {
 
 void enable_dark_titlebar(HWND hwnd) {
   BOOL dark = TRUE;
@@ -1018,13 +1030,14 @@ void show_tray_menu(App& app) {
               17, L"Random wallpaper on launch");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, 4, L"Reload lyrics\tR");
-  AppendMenuW(menu, MF_STRING, 10, L"Reset sync offset");
+  AppendMenuW(menu, MF_STRING, 10, L"Reset sync correction");
   AppendMenuW(menu, MF_STRING | (app.view.help ? MF_CHECKED : 0), 5,
               L"Keyboard shortcuts\tF1");
   AppendMenuW(menu, MF_STRING, 8, L"Open local lyrics folder");
   AppendMenuW(menu, MF_STRING, 9, L"Clear automatic lyrics cache");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, 18, L"Check for updates");
+  AppendMenuW(menu, MF_STRING, 21, L"Save a diagnostic report\tD");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, 11, L"About Youtube-Lyrics");
   AppendMenuW(menu, MF_STRING, 12, L"Help out via PayPal");
@@ -1098,10 +1111,10 @@ void show_tray_menu(App& app) {
       app.open_settings();
       break;
     case 10:
-      app.cfg.offset_ms = 0;
-      app.cfg.save();
-      app.show_toast("Sync offset reset");
-      invalidate_window(app);
+      app.reset_offsets();
+      break;
+    case 21:
+      app.export_diagnostics();
       break;
     case 9: {
       const int removed = lyrics_clear_cache();
@@ -1526,11 +1539,11 @@ int64_t App::current_pos_ms() const {
                                   : 0;
   int64_t pos = interpolate_pos(m.pos_ms, m.at_ms, now_ms(), m.playing,
                                 duration_ms);
-  if (cfg.offset_ms > 0 &&
-      pos > std::numeric_limits<int64_t>::max() - cfg.offset_ms) {
+  const int offset = total_offset_ms();
+  if (offset > 0 && pos > std::numeric_limits<int64_t>::max() - offset) {
     pos = std::numeric_limits<int64_t>::max();
   } else {
-    pos += cfg.offset_ms;
+    pos += offset;
   }
   if (pos < 0) pos = 0;
   if (duration_ms > 0 && pos > duration_ms) pos = duration_ms;
@@ -1723,6 +1736,66 @@ void App::nudge_offset(int delta_ms) {
   settings_refresh(*this);
 }
 
+int App::total_offset_ms() const {
+  return std::max(-60000, std::min(60000, cfg.offset_ms + song_offset_ms));
+}
+
+// Looks up the correction saved for the track on screen. Cheap enough to call
+// on every media poll: it only does work when the song actually changes.
+void App::load_song_offset() {
+  const std::string key =
+      active_track.title.empty() ? std::string() : track_preference_key(active_track);
+  if (key == song_offset_key) return;
+  song_offset_key = key;
+  song_offset_ms = key.empty() ? 0 : song_offsets.get(key);
+  if (song_offset_ms != 0)
+    logf("sync: using the saved %+d ms correction for this song", song_offset_ms);
+}
+
+// The arrow keys correct the song being watched, and the correction is kept
+// for the next time it plays. Before 1.7.0 they moved one global offset, so a
+// fix for one badly timed sheet threw every other song out.
+void App::nudge_song_offset(int delta_ms) {
+  if (song_offset_key.empty()) {
+    nudge_offset(delta_ms);
+    return;
+  }
+  song_offset_ms = std::max(-60000, std::min(60000, song_offset_ms + delta_ms));
+  song_offsets.set(song_offset_key, song_offset_ms);
+  write_file_atomic(appdata_dir() + "\\offsets.txt", serialize_offset_store(song_offsets));
+  char buf[96];
+  if (song_offset_ms == 0) {
+    std::snprintf(buf, sizeof(buf), "This song: no sync correction");
+  } else {
+    std::snprintf(buf, sizeof(buf), "This song: sync %+.2f s (remembered)",
+                  song_offset_ms / 1000.0);
+  }
+  show_toast(buf);
+  invalidate();
+}
+
+void App::reset_offsets() {
+  cfg.offset_ms = 0;
+  cfg.save();
+  if (!song_offset_key.empty() && song_offset_ms != 0) {
+    song_offset_ms = 0;
+    song_offsets.set(song_offset_key, 0);
+    write_file_atomic(appdata_dir() + "\\offsets.txt", serialize_offset_store(song_offsets));
+  }
+  show_toast("Sync correction reset");
+  invalidate();
+  settings_refresh(*this);
+}
+
+void App::export_diagnostics() {
+  std::string path;
+  if (export_diagnostic_report(*this, &path)) {
+    show_toast("Diagnostic report saved and copied to the clipboard", 4200);
+  } else {
+    show_toast("Could not write the diagnostic report", 4200);
+  }
+}
+
 void App::set_font_scale(double scale) {
   if (scale < 0.6) scale = 0.6;
   if (scale > 2.0) scale = 2.0;
@@ -1892,10 +1965,13 @@ void handle_key(App& app, WPARAM key) {
       app.set_font_scale(app.cfg.font_scale - 0.07);
       break;
     case VK_LEFT:
-      app.nudge_offset(-250);
+      app.nudge_song_offset(-250);
       break;
     case VK_RIGHT:
-      app.nudge_offset(250);
+      app.nudge_song_offset(250);
+      break;
+    case 'D':
+      app.export_diagnostics();
       break;
     case VK_F1:
     case 'H':
@@ -2269,6 +2345,25 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR command_line, int show_cm
 
   set_dpi_awareness();
 
+  // "--diagnostics [file]": write a diagnostic report, including a live check
+  // of each lyric provider and update source, and exit without opening a
+  // window. For support, and for exercising a build on a real Windows machine.
+  if (launch_flag.rfind(L"--diagnostics", 0) == 0) {
+    std::wstring target = launch_flag.substr(13);
+    while (!target.empty() && (target.front() == L' ' || target.front() == L'\t'))
+      target.erase(target.begin());
+    if (target.size() >= 2 && target.front() == L'"' && target.back() == L'"')
+      target = target.substr(1, target.size() - 2);
+    App headless;
+    headless.inst = inst;
+    headless.cfg.load();
+    headless.song_offsets = parse_offset_store(read_file(appdata_dir() + "\\offsets.txt"));
+    std::string path = wide_to_utf8(target);
+    if (path.empty()) path = appdata_dir() + "\\diagnostics-command-line.txt";
+    const std::string report = build_diagnostic_report(headless, true);
+    return write_diagnostic_report(report, path) ? 0 : 1;
+  }
+
   GdiplusStartupInput gdi_input;
   ULONG_PTR gdi_token = 0;
   GdiplusStartup(&gdi_token, &gdi_input, nullptr);
@@ -2310,6 +2405,7 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR command_line, int show_cm
   // idle screen then explains itself once instead of only saying "Listening".
   app.first_run = read_file(appdata_dir() + "\\config.ini").empty();
   app.cfg.load();
+  app.song_offsets = parse_offset_store(read_file(appdata_dir() + "\\offsets.txt"));
   if (app.cfg.wallpaper_random_start && kWallpaperCount > 1) {
     const unsigned int seed = static_cast<unsigned int>(GetTickCount64()) ^
                               static_cast<unsigned int>(GetCurrentProcessId());
@@ -2397,7 +2493,8 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR command_line, int show_cm
 
   media_start(app);
   lyrics_start(app);
-  update_start(app, !launched_after_update_failure);  // skip re-prompt after a failed replacement
+  update_start(app, !launched_after_update_failure,
+               launched_after_update || launched_after_update_failure);  // skip re-prompt after a failed replacement
   app.rebuild_layout(true);
   SetTimer(app.hwnd, kFrameTimer, 16, nullptr);
 
