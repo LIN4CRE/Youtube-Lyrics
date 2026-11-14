@@ -755,7 +755,7 @@ void handle_command(SettingsWindow& s, int id) {
       return;
     }
     case kIdCheckUpdates:
-      app.show_toast("Checking GitHub for updates…", 2200);
+      app.show_toast("Checking for updates…", 2200);
       update_request_check(app, true);
       return;
     case kIdModeWallpaper: {

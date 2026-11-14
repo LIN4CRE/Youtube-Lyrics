@@ -27,6 +27,7 @@ been run on a Windows machine as part of this release; see `AUDIT.md`.
 ### Changed
 
 - **The download page serves its own file.** The button used GitHub's "latest release" link, which was still handing out 1.4.0. It now points at the copy published with the site, so the page, its checksum and the file always match.
+- **Updates no longer depend on GitHub Releases.** The updater checks the release published with the project site (`youtube-lyrics-seven.vercel.app`) first and GitHub Releases second, with the same size, checksum and x64 checks for both. Copies older than 1.6.0 only know about GitHub Releases, so they have to be replaced by hand once.
 - An application manifest declares Windows 10/11 support and per-monitor DPI awareness.
 
 ## 1.5.0 — 2026-11-12

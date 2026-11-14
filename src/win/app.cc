@@ -954,7 +954,7 @@ void show_update_progress(App& app) {
   if (!dialog) return;
 
   app.update_progress_label = CreateWindowExW(
-      0, L"STATIC", L"Downloading and verifying the official GitHub release…",
+      0, L"STATIC", L"Downloading and verifying the official release…",
       WS_CHILD | WS_VISIBLE | SS_LEFT, 20, 20, 394, 24, dialog,
       reinterpret_cast<HMENU>(static_cast<INT_PTR>(kUpdateProgressLabelId)),
       app.inst, nullptr);
@@ -1091,7 +1091,7 @@ void show_tray_menu(App& app) {
       break;
     }
     case 18:
-      app.show_toast("Checking GitHub for updates…", 2200);
+      app.show_toast("Checking for updates…", 2200);
       update_request_check(app, true);
       break;
     case 19:
@@ -2078,7 +2078,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           L"A new version of Youtube-Lyrics is available!\n\n"
           L"Installed version: " + widen(YTL_VERSION_STRING) +
           L"\nAvailable version: " + widen(release->version) +
-          L"\n\nDownload and install this official GitHub release now?";
+          L"\n\nDownload and install this official release now?";
       const int answer = MessageBoxW(nullptr, prompt.c_str(),
                                      L"Youtube-Lyrics update",
                                      MB_YESNO | MB_ICONINFORMATION | MB_SETFOREGROUND);
@@ -2093,7 +2093,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (wParam == 1000) {
           SendMessageW(app->update_progress_bar, PBM_SETMARQUEE, TRUE, 35);
           SetWindowTextW(app->update_progress_label,
-                         L"Connecting securely to the official GitHub release…");
+                         L"Connecting securely to the official release…");
         } else {
           SendMessageW(app->update_progress_bar, PBM_SETMARQUEE, FALSE, 0);
           SendMessageW(app->update_progress_bar, PBM_SETPOS,
