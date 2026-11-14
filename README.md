@@ -1,6 +1,6 @@
 <div align="center">
 
-<a href="https://github.com/LIN4CRE/Youtube-Lyrics/releases/latest/download/YoutubeLyrics.exe"><img src="docs/brand/badge-download.png" alt="Download YoutubeLyrics.exe for Windows x64"></a>
+<a href="https://youtube-lyrics-seven.vercel.app/downloads/YoutubeLyrics.exe"><img src="docs/brand/badge-download.png" alt="Download YoutubeLyrics.exe for Windows x64"></a>
 &nbsp; · &nbsp;
 <a href="https://paypal.me/delinacre16"><img src="docs/brand/badge-support.png" alt="Help me out via PayPal"></a>
 
@@ -105,7 +105,7 @@ Optional integrity check (PowerShell):
 Get-FileHash .\YoutubeLyrics.exe -Algorithm SHA256
 ```
 
-Expected SHA-256 for the current 1.6.0 download is listed in [`YoutubeLyrics.exe.sha256`](docs/downloads/YoutubeLyrics.exe.sha256) and beside the download on the [project website](https://lin4cre.github.io/Youtube-Lyrics/). Compare it before running the file. The checksum is served by GitHub over HTTPS; it is an integrity check, not a code signature.
+Expected SHA-256 for the current 1.6.0 download is listed in [`YoutubeLyrics.exe.sha256`](docs/downloads/YoutubeLyrics.exe.sha256) and beside the download on the [project website](https://youtube-lyrics-seven.vercel.app/). Compare it before running the file. The checksum is served over HTTPS; it is an integrity check, not a code signature.
 
 Windows may show **"Windows protected your PC"** because the file is not
 code-signed. The source is public; continue only if you trust the download. If
@@ -368,7 +368,7 @@ Space Grotesk, JetBrains Mono, Inter).
 <sub>Built for people who would rather look at the song than at a column.</sub>
 </div>
 
-[download]: https://github.com/LIN4CRE/Youtube-Lyrics/releases/latest/download/YoutubeLyrics.exe
+[download]: https://youtube-lyrics-seven.vercel.app/downloads/YoutubeLyrics.exe
 [support]: https://paypal.me/delinacre16
 [lrclib]: https://lrclib.net
 [zig]: https://ziglang.org

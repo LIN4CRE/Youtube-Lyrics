@@ -114,8 +114,8 @@ Run on 14 November 2026 in this sandbox:
 - `./scripts/build.sh` — Zig/MinGW x86-64 Windows GUI cross-build. The build is
   gated: icon generation → icon verification → resource compilation → compile to a
   temporary path → `verify_build.py` → publish → re-verify the published copy.
-  - **Distributed build: 1,018,368 bytes (994 KiB)**, SHA-256
-    `e9eca38575f313b63e68ef226bbc0e11a3b1db7736959b54e870333c1aebe7aa`.
+  - **Distributed build: 1,021,952 bytes (998 KiB)**, SHA-256
+    `4ce5d0d1e18e3791a2d2f344aafbe4291e5f5c88e543e90f650ccc45606a1bbf`.
   - `verify_build.py`: `0x8664 windows-gui`, version `1.6.0`, icon frames
     `[16, 20, 24, 32, 40, 48, 64, 96, 128, 256]`, wallpapers
     `city-rain.jpg, forest-mist.jpg, mountain-night.jpg`.

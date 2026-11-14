@@ -1,4 +1,5 @@
-// Youtube-Lyrics automatic updates: only official stable GitHub Releases are trusted.
+// Youtube-Lyrics automatic updates: only the project site and official stable
+// GitHub Releases are trusted.
 #include "update.h"
 
 #include "app.h"
@@ -126,6 +127,19 @@ bool release_asset_url(const std::string& url, const std::string& tag,
                                 utf8_to_wide(tag) + L"/" +
                                 utf8_to_wide(asset_name);
   return parsed.path == expected;
+}
+
+// The project site publishes the same three files beside the download page.
+// It is a second official source so that updates do not depend on GitHub
+// Releases being published.
+const wchar_t kSiteHost[] = L"youtube-lyrics-seven.vercel.app";
+const char kSiteBase[] = "https://youtube-lyrics-seven.vercel.app/downloads/";
+
+bool site_asset_url(const std::string& url, const char* asset_name) {
+  ParsedUrl parsed;
+  if (!parse_url(url, parsed) || parsed.host != kSiteHost || !parsed.extra.empty())
+    return false;
+  return parsed.path == L"/downloads/" + utf8_to_wide(asset_name);
 }
 
 void set_active_request(HINTERNET request) {
@@ -455,7 +469,77 @@ uint64_t json_u64(const JValue& root, const char* key) {
   return static_cast<uint64_t>(value->num);
 }
 
+// Reads the release published with the project site. Returns true when the
+// site answered with valid metadata; `newer` says whether it is an update.
+bool check_site(UpdateRelease& release, bool& newer, std::string& error) {
+  newer = false;
+  const std::string base = kSiteBase;
+  std::string metadata_body;
+  if (!get_url(base + "release.json", L"application/json", kMaxReleaseMetadata,
+               metadata_body, error))
+    return false;
+  ReleaseMetadata metadata;
+  if (!parse_release_metadata(metadata_body, "LIN4CRE/Youtube-Lyrics", metadata) ||
+      metadata.size_bytes < (128u << 10) || metadata.size_bytes > kMaxExecutableBytes) {
+    error = "The project site returned invalid release metadata.";
+    return false;
+  }
+  StableVersion site_version, current_version;
+  if (!parse_stable_version(metadata.version, site_version) ||
+      !parse_stable_version(YTL_VERSION_STRING, current_version)) {
+    error = "The project site release has an unsupported semantic version.";
+    return false;
+  }
+  if (compare_stable_versions(site_version, current_version) <= 0) {
+    release.version = YTL_VERSION_STRING;
+    return true;
+  }
+  std::string checksum_body, sidecar_hash;
+  if (!get_url(base + "YoutubeLyrics.exe.sha256", L"text/plain", 4096, checksum_body,
+               error))
+    return false;
+  if (!parse_sha256_sidecar(checksum_body, sidecar_hash) ||
+      sidecar_hash != metadata.sha256) {
+    error = "The site checksum file does not match release.json.";
+    return false;
+  }
+  release.version = metadata.version;
+  release.tag = metadata.tag;
+  release.asset_url = base + "YoutubeLyrics.exe";
+  release.asset_size = metadata.size_bytes;
+  release.sha256 = metadata.sha256;
+  newer = true;
+  return true;
+}
+
+bool check_github(UpdateRelease& release, std::string& error);
+
 bool check_latest(UpdateRelease& release, std::string& error) {
+  // The project site first; GitHub Releases second. An update found by either
+  // is offered, and a failure of one does not hide the other.
+  UpdateRelease site;
+  bool site_newer = false;
+  std::string site_error;
+  const bool site_ok = check_site(site, site_newer, site_error);
+  if (site_ok && site_newer) {
+    release = site;
+    return true;
+  }
+  UpdateRelease hub;
+  std::string hub_error;
+  if (check_github(hub, hub_error)) {
+    release = hub;
+    return true;
+  }
+  if (site_ok) {
+    release = site;
+    return true;
+  }
+  error = site_error.empty() ? hub_error : site_error;
+  return false;
+}
+
+bool check_github(UpdateRelease& release, std::string& error) {
   const std::string api_url =
       "https://api.github.com/repos/LIN4CRE/Youtube-Lyrics/releases/latest";
   std::string response;
@@ -637,7 +721,8 @@ bool valid_x64_pe(const std::wstring& path) {
 
 bool download_release(const UpdateRelease& release, UpdateStage& stage,
                      std::string& error) {
-  if (!release_asset_url(release.asset_url, release.tag, "YoutubeLyrics.exe") ||
+  if ((!release_asset_url(release.asset_url, release.tag, "YoutubeLyrics.exe") &&
+       !site_asset_url(release.asset_url, "YoutubeLyrics.exe")) ||
       !valid_hex_sha256(release.sha256) || release.asset_size < (128u << 10) ||
       release.asset_size > kMaxExecutableBytes) {
     error = "The update package failed release-source validation.";
