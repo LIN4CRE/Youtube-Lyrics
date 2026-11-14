@@ -49,6 +49,19 @@ struct MediaState {
   std::string art_path;   // cover-art file written by the helper (may be empty)
   std::string app;        // source app id (chrome.exe, Spotify.exe, ...)
   std::string raw;        // raw JSON, shown in the help overlay for debugging
+  // When the player last wrote its timeline (Unix ms), 0 when it never says.
+  // Two tracks sharing one stamp means the second has no position of its own
+  // yet: the reported position still belongs to the song before it.
+  int64_t timeline_stamp = 0;
+  // The helper could not extrapolate a believable position from the timeline.
+  bool timeline_stale = false;
+};
+
+// Where the lyrics are shown. Exactly one of these is in effect at a time.
+enum class DisplayMode {
+  Desktop,     // behind the desktop icons, click-through, never focused
+  Fullscreen,  // a real foreground full-screen window on one monitor
+  Window,      // an ordinary resizable window
 };
 
 // ---------------------------------------------------------------------- config
@@ -71,6 +84,13 @@ struct Config {
   bool wallpaper_auto_rotate = true;
   int wallpaper_interval_minutes = 30;
   int wallpaper_dim = 12;  // percent, subtle by default
+  // Last size and position of the ordinary window (0 x 0 = never saved).
+  int win_x = 0, win_y = 0, win_w = 0, win_h = 0;
+
+  DisplayMode mode() const {
+    if (wallpaper) return DisplayMode::Desktop;
+    return fullscreen ? DisplayMode::Fullscreen : DisplayMode::Window;
+  }
 
   void load();
   void save() const;
@@ -82,6 +102,7 @@ struct Config {
 struct View {
   // background cache (gradient + cover art), rebuilt only when inputs change
   Gdiplus::Bitmap* bg = nullptr;
+  Gdiplus::CachedBitmap* bg_cached = nullptr;  // device-format copy of `bg`
   int bg_w = 0;
   int bg_h = 0;
   std::string bg_art;
@@ -136,6 +157,7 @@ struct View {
   int64_t hint_until = 0;
   bool cursor_hidden = false;
   int64_t last_mouse = 0;
+  POINT last_mouse_pt{-1, -1};
   int64_t last_pulse_paint = 0;
 };
 
@@ -161,6 +183,10 @@ struct App {
   LyricsState lstate = LyricsState::Idle;
   std::string lmessage;  // detail for NotFound / Error
   int lyrics_req_id = 0; // id of the in-flight lookup
+  // A lookup that failed because the network or the provider was down is
+  // retried by itself a couple of times instead of leaving "not found" up.
+  int64_t lyrics_retry_at = 0;
+  int lyrics_retries = 0;
 
   // laid out display lines
   std::vector<DispLine> disp;
@@ -194,6 +220,7 @@ struct App {
   bool windowed = false;      // currently a normal window (not full screen)
   RECT windowed_rect{};
   bool hidden_to_tray = false;
+  bool tray_hint_shown = false;     // "still running in the tray" balloon
   bool quitting = false;
   HANDLE single_instance = nullptr;
   HWND settings_window = nullptr;   // native settings dialog, when open
@@ -217,6 +244,9 @@ struct App {
   void invalidate();
 
   // view toggles
+  // The one place a display mode is chosen: updates the config, re-parents and
+  // restyles the window, and brings a foreground mode to the front.
+  void set_display_mode(DisplayMode mode);
   void toggle_fullscreen();
   void toggle_topmost();
   void toggle_theme();
@@ -250,6 +280,7 @@ void relayout(App& app, int w, int h);
 void refresh_art(App& app);
 double scroll_target(const App& app, int h);
 Gdiplus::Font* get_font(App& app, int px, int weight);
+void trim_font_cache(App& app);
 const wchar_t* theme_name(int index);
 const wchar_t* wallpaper_name(int index);
 

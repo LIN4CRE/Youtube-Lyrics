@@ -1,7 +1,7 @@
 // Youtube-Lyrics - "what is playing" listener.
 //
 // Spawns a long lived Windows PowerShell helper (smtc.ps1, embedded in the exe)
-// that reports the current media session as JSON lines, one per ~400 ms. The
+// that reports the current media session as JSON lines, one per ~250 ms. The
 // thread below reads that pipe and turns each line into a MediaState snapshot.
 #include "app.h"
 #include "smtc_script.h"
@@ -24,6 +24,7 @@ struct ChildProc {
   std::string pending;  // partial line buffer
   int64_t started_at = 0;
   int64_t last_output_at = 0;
+  bool heard = false;  // has produced output since it was started
 };
 
 void close_child(ChildProc& c) {
@@ -39,11 +40,11 @@ void close_child(ChildProc& c) {
   c.pending.clear();
 }
 
+// Checked before every helper start, not once per run: a disk cleaner that
+// removes the script while the app is running must not leave every later
+// restart launching a file that is no longer there.
 bool ensure_script_file() {
-  static bool done = false;
-  static bool ok = false;
-  if (done) return ok;
-  done = true;
+  bool ok = false;
   std::string dir = appdata_dir();
   if (dir.empty()) return ok = false;
   std::string path = dir + "\\smtc.ps1";
@@ -58,6 +59,8 @@ bool ensure_script_file() {
 
 bool spawn_helper(ChildProc& c) {
   c.pending.clear();
+  c.heard = false;
+  if (!ensure_script_file()) logf("media: could not write helper script");
   SECURITY_ATTRIBUTES sa{};
   sa.nLength = sizeof(sa);
   sa.bInheritHandle = TRUE;
@@ -164,6 +167,7 @@ DWORD WINAPI thread_main(LPVOID param) {
       DWORD want = avail < sizeof(buf) ? avail : sizeof(buf);
       if (ReadFile(child.out_read, buf, want, &got, nullptr) && got > 0) {
         child.last_output_at = static_cast<int64_t>(GetTickCount64());
+        child.heard = true;
         child.pending.append(buf, got);
         size_t nl;
         while ((nl = child.pending.find('\n')) != std::string::npos) {
@@ -186,8 +190,12 @@ DWORD WINAPI thread_main(LPVOID param) {
 
     // Watchdog: helper silent for a long time -> restart it.
     int64_t now = static_cast<int64_t>(GetTickCount64());
-    if (now - child.last_output_at > 12000) {
-      logf("media: helper silent for 12s, restarting");
+    // PowerShell can take well over ten seconds to start on a slow or busy
+    // machine (small laptops, antivirus scanning the script). Restarting it
+    // after 12 s there meant it never got going at all, so a start-up is given
+    // much longer than a helper that was talking and then went quiet.
+    if (child.process && now - child.last_output_at > (child.heard ? 15000 : 45000)) {
+      logf("media: helper silent for %s, restarting", child.heard ? "15s" : "45s");
       close_child(child);
       Sleep(500);
     }
@@ -252,6 +260,11 @@ bool media_parse_line(const std::string& line, MediaState& out, int64_t now) {
   out.pos_ms = static_cast<int64_t>(position_s * 1000.0);
   out.art_path = v.get_str("art");
   out.app = v.get_str("app");
+  const double stamp = v.get_num("upd", 0);
+  out.timeline_stamp = (std::isfinite(stamp) && stamp > 0.0 && stamp < 9.0e15)
+                           ? static_cast<int64_t>(stamp)
+                           : 0;
+  out.timeline_stale = v.get_num("stale", 0) > 0.5;
   out.key = track_key(out.track);
 
   // Ignore sessions that are not music: system UI, ads, stinger jingles, game
@@ -277,7 +290,7 @@ void media_stop() {
   if (g_thread) {
     // The worker owns a reference to App and may be in its bounded 2-second
     // retry sleep. Never release App storage or its stop event before it exits.
-    WaitForSingleObject(g_thread, INFINITE);
+    WaitForSingleObject(g_thread, 10000);
     CloseHandle(g_thread);
     g_thread = nullptr;
   }

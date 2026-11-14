@@ -31,6 +31,9 @@ const Theme kThemes[] = {
 };
 const int kThemeCount = static_cast<int>(sizeof(kThemes) / sizeof(kThemes[0]));
 
+// How much larger the line being sung is drawn than the lines around it.
+constexpr double kActiveScale = 1.14;
+
 const Theme& theme(int index) {
   if (index < 0 || index >= kThemeCount) index = 0;
   return kThemes[index];
@@ -109,6 +112,29 @@ void draw_text(Graphics& g, const std::wstring& s, Font* font, const RectF& box,
   g.DrawString(s.c_str(), static_cast<INT>(s.size()), font, box, &fmt, &brush);
 }
 
+// Lyric text with a contact shadow, so it stays readable over a bright part of
+// a photograph. `outline` is for the colour-keyed fallback layer, where the
+// text sits directly on the user's own wallpaper with no dimming at all and a
+// soft shadow cannot exist (the window has no per-pixel alpha): it gets a
+// solid dark edge on all four diagonals instead.
+void draw_text_backing(Graphics& g, const std::wstring& s, Font* font,
+                       const RectF& box, int alpha, bool outline) {
+  if (s.empty() || alpha <= 0) return;
+  const REAL d = std::max(1.0f, font->GetSize() * 0.045f);
+  if (outline) {
+    const ARGB edge = 0xFF000000u;
+    const REAL offsets[4][2] = {{-d, -d}, {d, -d}, {-d, d}, {d, d}};
+    for (const auto& o : offsets) {
+      RectF moved(box.X + o[0], box.Y + o[1], box.Width, box.Height);
+      draw_text(g, s, font, moved, edge);
+    }
+    return;
+  }
+  const int shadow_alpha = std::min(190, alpha * 3 / 4);
+  RectF moved(box.X, box.Y + d * 1.4f, box.Width, box.Height);
+  draw_text(g, s, font, moved, static_cast<ARGB>(shadow_alpha) << 24);
+}
+
 void draw_rounded_rect(Graphics& g, const RectF& r, REAL radius, ARGB fill,
                        bool border, ARGB border_color) {
   GraphicsPath path;
@@ -155,6 +181,14 @@ const wchar_t* wallpaper_name(int index) {
       L"Rainfall District", L"Midnight Range", L"Stillwood", L"Drift"};
   if (index < 0 || index >= kWallpaperCount) index = 0;
   return names[index];
+}
+
+// Resizing a window asks for a new set of font sizes at every step. Dropped
+// only between frames, never while a caller may still hold a pointer.
+void trim_font_cache(App& app) {
+  if (app.view.fonts.size() <= 80) return;
+  for (auto& entry : app.view.fonts) delete entry.second;
+  app.view.fonts.clear();
 }
 
 Gdiplus::Font* get_font(App& app, int px, int weight) {
@@ -348,19 +382,22 @@ void ensure_background(App& app, int w, int h) {
     return;
   }
 
-  // Cap the cached background to about two megapixels. The display back buffer
-  // remains native-resolution for crisp lyrics, but the cinematic still does
-  // not allocate another full 4K/8K bitmap in memory.
+  // The background is cached at the window's own size (up to 4K) so that each
+  // frame copies it instead of rescaling a smaller bitmap, which was the most
+  // expensive thing the renderer did on a high-resolution screen. Above 4K it
+  // is capped and stretched.
   const double cache_scale = std::min(
-      1.0, std::min(1920.0 / static_cast<double>(w),
-                    1080.0 / static_cast<double>(h)));
+      1.0, std::min(3840.0 / static_cast<double>(w),
+                    2160.0 / static_cast<double>(h)));
   const int bw = std::max(1, static_cast<int>(std::lround(w * cache_scale)));
   const int bh = std::max(1, static_cast<int>(std::lround(h * cache_scale)));
-  Bitmap* bg = new Bitmap(bw, bh, PixelFormat32bppRGB);
+  Bitmap* bg = new Bitmap(bw, bh, PixelFormat32bppPARGB);
   if (!bg || bg->GetLastStatus() != Ok) {
     delete bg;
     return;
   }
+  delete v.bg_cached;
+  v.bg_cached = nullptr;
   Graphics g(bg);
   g.SetSmoothingMode(SmoothingModeAntiAlias);
   g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
@@ -424,6 +461,11 @@ void ensure_background(App& app, int w, int h) {
   glow(g, bw * 0.86, bh * 0.88, bh * 0.36, bh * 0.30,
        (0x16 << 24) | (ar << 16) | (ag << 8) | ab);
 
+  // A broad, soft darkening behind the lyric column. The stills are busy in
+  // the middle; without this, pale text over a pale part of the picture was
+  // lost. It is independent of the user's "background darkness" setting.
+  glow(g, bw * 0.5, bh * 0.47, bw * 0.50, bh * 0.50, 0x66000000u);
+
   // Soft edge vignette and readability scrims, cached once per wallpaper/settings change.
   GraphicsPath vig_path;
   vig_path.AddEllipse(RectF(-static_cast<REAL>(bw) * 0.18f,
@@ -455,6 +497,7 @@ void ensure_background(App& app, int w, int h) {
 
 void relayout(App& app, int w, int h) {
   View& v = app.view;
+  trim_font_cache(app);
   v.line_top.clear();
   v.line_h.clear();
   v.total_h = 0;
@@ -469,44 +512,52 @@ void relayout(App& app, int w, int h) {
   }
 
   Graphics& mg = measure_graphics();
-  const double col_w = std::min(w * 0.80, 1400.0);
-  const double active_scale = 1.0;
-  const double max_text_w = col_w;
+  const double col_w = std::min(w * 0.86, 1560.0);
+  // The active line is drawn larger than the rest; rows are wrapped to a width
+  // that still fits when a row is enlarged.
+  const double active_scale = kActiveScale;
+  // (5 % more for the semibold weight the active line switches to.)
+  const double max_text_w = col_w / (active_scale * 1.05);
 
   const std::vector<LyricLine>& src =
       app.lyrics.synced ? app.lyrics.lines : app.pending_plain_lines;
   if (src.empty()) return;
 
-  double base = std::min(std::max(h * 0.042, 16.0), 88.0) * app.cfg.font_scale;
-  if (!app.lyrics.synced) base = std::min(base, h * 0.035);
+  // Text size comes from the window, never from the song. It used to be shrunk
+  // until the single longest line of the sheet fitted on one row (down to
+  // 13 px), and untimed sheets were shrunk until the whole song fitted on
+  // screen, so one long line, or one long song, made every line unreadable.
+  // Long lines are wrapped instead, and the size has a floor relative to the
+  // window.
+  double base = std::min(std::max(h * 0.056, 20.0), 112.0);
+  base = std::min(base, std::max(18.0, col_w / 17.0));  // narrow windows
+  base *= app.cfg.font_scale;
+  const double floor_px = std::max(16.0, base * 0.76);
 
   auto measure_at = [&](const std::string& text, double px) {
     Font* f = get_font(app, static_cast<int>(std::lround(px)), 400);
     return measure_text(mg, wide(text), f);
   };
 
-  // Shrink to fit: wide lines first, then (for unsynced sheets) total height.
-  // Wrapping is only used when shrinking would make the text unreadably small.
-  for (int attempt = 0; attempt < 30; ++attempt) {
-    double widest = 0;
+  // A modest shrink is allowed when it lets most lines stay on one row: fit
+  // the 85th-percentile line, and let the few longer ones wrap.
+  {
+    std::vector<double> widths;
+    widths.reserve(src.size());
     for (const auto& l : src) {
-      if (l.text.empty()) continue;
-      widest = std::max(widest, measure_at(l.text, base));
+      if (!l.text.empty()) widths.push_back(measure_at(l.text, base));
     }
-    bool too_wide = widest > max_text_w;
-    bool too_tall = false;
-    double est_total = base * 1.5 * static_cast<double>(src.size());
-    if (!app.lyrics.synced && est_total > h * 0.88) too_tall = true;
-
-    if ((too_wide || too_tall) && base > 13.0) {
-      double factor = 0.95;
-      if (too_wide && widest > 0) factor = std::min(factor, max_text_w / widest);
-      if (too_tall && est_total > 0) factor = std::min(factor, (h * 0.88) / est_total);
-      base = std::max(13.0, base * std::max(0.82, factor));
-      continue;
+    if (!widths.empty()) {
+      std::sort(widths.begin(), widths.end());
+      const size_t index = std::min(widths.size() - 1,
+                                    static_cast<size_t>(widths.size() * 0.85));
+      const double typical = widths[index];
+      if (typical > max_text_w && typical > 0) {
+        base = std::max(floor_px, base * max_text_w / typical);
+      }
     }
-    break;
   }
+  base = std::floor(base);
 
   auto measure_fn = [&](const std::string& text, double px) {
     return measure_at(text, px) + 6.0;
@@ -588,10 +639,11 @@ double timed_segment_fill_width(Graphics& g, const DispLine& line,
 void draw_feathered_wipe(Graphics& g, const std::wstring& text, Font* font,
                          const RectF& box, double full_w, double filled_w,
                          double col_x, double col_w,
-                         ARGB base_color, ARGB dim_color) {
+                         ARGB base_color, ARGB dim_color, bool outline) {
   if (text.empty() || full_w <= 0.0) return;
 
   // 1. Draw the calm, unsung dimmed text first
+  draw_text_backing(g, text, font, box, static_cast<int>(base_color >> 24), outline);
   draw_text(g, text, font, box, dim_color);
 
   if (filled_w <= 0.5) return;
@@ -644,6 +696,7 @@ void paint_lyrics(App& app, Graphics& g, int w, int h) {
   // here made the wipe visibly lag behind the vocal on fast lines. The feathered
   // gradient in draw_feathered_wipe supplies the visual softening instead.
   const double progress = (a >= 0) ? line_progress(app.disp, a, pos) : 0.0;
+  const bool keyed = app.cfg.mode() == DisplayMode::Desktop && !app.desktop_parented;
 
   int first = 0;
   if (a >= 0) first = std::max(0, a - 16);
@@ -677,11 +730,14 @@ void paint_lyrics(App& app, Graphics& g, int w, int h) {
     // 208 -> 52 across roughly five rows: close lines stay readable, distant
     // ones recede instead of disappearing. Readability beats deep fading when
     // the sheet is projected onto a cinematic still.
-    const int base_alpha = static_cast<int>(std::max(62.0, 208.0 - dist * 26.0));
+    const int base_alpha = static_cast<int>(std::max(88.0, 214.0 - dist * 24.0));
     int alpha = static_cast<int>(base_alpha + (255 - base_alpha) * row_act);
     if (!has_display_timing) alpha = 225;
 
-    Font* font = get_font(app, static_cast<int>(std::lround(v.base_px)), (act > 0.4) ? 600 : 400);
+    // The sung line grows as it lights and settles back as it passes.
+    const double scale = 1.0 + (kActiveScale - 1.0) * row_act;
+    Font* font = get_font(app, static_cast<int>(std::lround(v.base_px * scale)),
+                          (row_act > 0.4) ? 600 : 400);
     std::wstring text = wide(app.disp[i].text);
     const double full_w = measure_text(g, text, font);
 
@@ -711,7 +767,12 @@ void paint_lyrics(App& app, Graphics& g, int w, int h) {
     }
 
     ARGB base_color = (th.text & 0x00FFFFFF) | (static_cast<ARGB>(alpha) << 24);
-    ARGB dim_color = (th.text & 0x00FFFFFF) | (static_cast<ARGB>(std::max(48.0, alpha * 0.42)) << 24);
+    // The not-yet-sung part of the active line must never be fainter than the
+    // lines around it, or the line being sung is the hardest one to read.
+    ARGB dim_color = (th.text & 0x00FFFFFF) |
+                     (static_cast<ARGB>(std::max(132.0, alpha * 0.60)) << 24);
+    // Only rows near the focus get a backing; far rows are faint by design.
+    const bool backing = dist <= 5 || !has_display_timing;
 
     if (is_active && app.lyrics.synced && app.cfg.wipe) {
       double filled_w = app.disp[i].segments.empty()
@@ -736,8 +797,9 @@ void paint_lyrics(App& app, Graphics& g, int w, int h) {
       }
 
       draw_feathered_wipe(g, text, font, box, full_w, filled_w, col_x, v.col_w,
-                          base_color, dim_color);
+                          base_color, dim_color, keyed);
     } else {
+      if (backing) draw_text_backing(g, text, font, box, alpha, keyed);
       draw_text(g, text, font, box, base_color);
     }
   }
@@ -765,10 +827,12 @@ void paint_plain(App& app, Graphics& g, int w, int h) {
       alpha = std::max(70, 0xE4 - dist * 24);
     }
     ARGB c = (th.text & 0x00FFFFFF) | (static_cast<ARGB>(alpha) << 24);
-    draw_text(g, wide(app.disp[i].text), font,
-              RectF(static_cast<REAL>(col_x), static_cast<REAL>(y),
-                    static_cast<REAL>(v.col_w), static_cast<REAL>(v.line_h[i])),
-              c);
+    const RectF row(static_cast<REAL>(col_x), static_cast<REAL>(y),
+                    static_cast<REAL>(v.col_w), static_cast<REAL>(v.line_h[i]));
+    const std::wstring row_text = wide(app.disp[i].text);
+    draw_text_backing(g, row_text, font, row, alpha,
+                      app.cfg.mode() == DisplayMode::Desktop && !app.desktop_parented);
+    draw_text(g, row_text, font, row, c);
   }
 }
 
@@ -946,15 +1010,24 @@ void paint_hint(App& app, Graphics& g, int w, int h) {
   int64_t left = v.hint_until - now;
   double fade = left < 1200 ? left / 1200.0 : 1.0;
   const Theme& th = theme(app.cfg.theme);
-  const std::wstring text = app.cfg.wallpaper && !app.windowed
-      ? L"Ctrl+Alt+W  wallpaper mode   \xC2\xB7   Ctrl+Alt+L  hide or show"
-      : L"F11  full screen   \xC2\xB7   F1  shortcuts   \xC2\xB7   Ctrl+Alt+L  hide";
+  const DisplayMode mode = app.cfg.mode();
+  const std::wstring text =
+      mode == DisplayMode::Desktop
+          ? L"On the desktop   \u00b7   Ctrl+Alt+F  full screen   \u00b7   "
+            L"Ctrl+Alt+S  settings   \u00b7   Ctrl+Alt+L  hide"
+          : (mode == DisplayMode::Fullscreen
+                 ? L"Esc  leave full screen   \u00b7   F1  shortcuts   \u00b7   "
+                   L"Ctrl+Alt+W  move to the desktop"
+                 : L"F11  full screen   \u00b7   F1  shortcuts   \u00b7   "
+                   L"Ctrl+Alt+W  move to the desktop");
   double px = std::min(std::max(h * 0.017, 11.0), 20.0);
-  ARGB c = (th.text & 0x00FFFFFF) | (static_cast<ARGB>(std::min(150.0, 150.0 * fade)) << 24);
-  draw_text(g, text, get_font(app, static_cast<int>(px), 400),
-            RectF(0, static_cast<REAL>(h - px * 4.5), static_cast<REAL>(w),
-                  static_cast<REAL>(px * 2.2)),
-            c);
+  ARGB c = (th.text & 0x00FFFFFF) | (static_cast<ARGB>(std::min(170.0, 170.0 * fade)) << 24);
+  Font* font = get_font(app, static_cast<int>(px), 400);
+  const RectF box(0, static_cast<REAL>(h - px * 4.5), static_cast<REAL>(w),
+                  static_cast<REAL>(px * 2.2));
+  draw_text_backing(g, text, font, box, static_cast<int>(170 * fade),
+                    mode == DisplayMode::Desktop && !app.desktop_parented);
+  draw_text(g, text, font, box, c);
 }
 
 void paint_help(App& app, Graphics& g, int w, int h) {
@@ -974,10 +1047,11 @@ void paint_help(App& app, Graphics& g, int w, int h) {
     int count;
   };
   static const Row kWindow[] = {
-      {L"F11", L"Full screen / windowed"},
-      {L"Esc", L"Leave full screen, then hide to tray"},
-      {L"A", L"Always on top (window mode)"},
-      {L"Ctrl+Alt+W", L"Lyrics on the desktop, or back to a window"},
+      {L"F11", L"Full screen / window"},
+      {L"Ctrl+Alt+F", L"Full screen from any app"},
+      {L"Esc", L"Close this, or leave full screen"},
+      {L"A", L"Always on top"},
+      {L"Ctrl+Alt+W", L"Lyrics on the desktop, or back"},
       {L"Ctrl+Alt+L", L"Show / hide from any app"},
   };
   static const Row kLyrics[] = {
@@ -1005,11 +1079,19 @@ void paint_help(App& app, Graphics& g, int w, int h) {
   int row_total = 0;
   for (const Group& group : kGroups) row_total += group.count;
 
-  double panel_w = std::min(w * 0.82, 940.0);
+  // Three columns side by side: the panel is as tall as its longest column, and
+  // the type is scaled down until it fits a small window in both directions.
+  int longest = 0;
+  for (const Group& group : kGroups) longest = std::max(longest, group.count);
+  (void)row_total;
+  double panel_w = std::min(w * 0.94, 1040.0);
   double key_px = std::min(std::max(h * 0.0165, 11.0), 19.0);
+  key_px = std::min(key_px, panel_w / 58.0);
+  const double rows_needed = longest + 6.2;
+  if (key_px * 2.1 * rows_needed > h * 0.94) key_px = h * 0.94 / (2.1 * rows_needed);
+  key_px = std::max(7.0, key_px);
   double row_h = key_px * 2.1;
-  double panel_h = row_h * (row_total + 4.4);
-  panel_h = std::min(panel_h, h * 0.92);
+  double panel_h = std::min(row_h * rows_needed, h * 0.96);
   RectF panel(static_cast<REAL>((w - panel_w) / 2),
               static_cast<REAL>((h - panel_h) / 2), static_cast<REAL>(panel_w),
               static_cast<REAL>(panel_h));
@@ -1180,10 +1262,14 @@ void render_frame(App& app, Graphics& g, int w, int h) {
   g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
   g.SetPixelOffsetMode(PixelOffsetModeHalf);
 
-  const bool desktop_wallpaper = app.cfg.wallpaper && !app.windowed;
+  trim_font_cache(app);
+  const bool desktop_wallpaper = app.cfg.mode() == DisplayMode::Desktop;
   const bool fallback_top = desktop_wallpaper && !app.desktop_parented;
 
   if (fallback_top) {
+    // ClearType's coloured sub-pixels would be composited against the key
+    // colour and show as fringes over the real wallpaper.
+    g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
     // In fallback mode where WorkerW could not be parented, clear with the
     // color-key color RGB(16, 16, 24) so that the user's desktop wallpaper
     // and desktop icons remain 100% visible and unobstructed.
@@ -1192,8 +1278,24 @@ void render_frame(App& app, Graphics& g, int w, int h) {
   } else {
     ensure_background(app, w, h);
     if (app.view.bg) {
-      g.DrawImage(app.view.bg,
-                  RectF(0, 0, static_cast<REAL>(w), static_cast<REAL>(h)));
+      View& v = app.view;
+      bool drawn = false;
+      if (static_cast<int>(v.bg->GetWidth()) == w &&
+          static_cast<int>(v.bg->GetHeight()) == h) {
+        // Same size as the window: blit a device-format copy.
+        if (!v.bg_cached) v.bg_cached = new CachedBitmap(v.bg, &g);
+        if (v.bg_cached && v.bg_cached->GetLastStatus() == Ok &&
+            g.DrawCachedBitmap(v.bg_cached, 0, 0) == Ok) {
+          drawn = true;
+        } else {
+          // The display format changed under us; rebuild it next frame.
+          delete v.bg_cached;
+          v.bg_cached = nullptr;
+        }
+      }
+      if (!drawn) {
+        g.DrawImage(v.bg, RectF(0, 0, static_cast<REAL>(w), static_cast<REAL>(h)));
+      }
     } else {
       SolidBrush black(Color(0xFF101018));
       g.FillRectangle(&black, RectF(0, 0, static_cast<REAL>(w),
@@ -1250,7 +1352,7 @@ void render_frame(App& app, Graphics& g, int w, int h) {
   }
 
   if (!desktop_wallpaper || has_current_session) paint_chrome(app, g, w, h);
-  if (!desktop_wallpaper) paint_hint(app, g, w, h);
+  paint_hint(app, g, w, h);
   paint_toast(app, g, w, h);
   paint_help(app, g, w, h);
 }

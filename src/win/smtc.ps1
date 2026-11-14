@@ -49,7 +49,9 @@ if ($null -eq $asTaskGeneric) {
 # Turns a WinRT IAsyncOperation into a blocking call.
 function Await($op, $type) {
     $task = $asTaskGeneric.MakeGenericMethod($type).Invoke($null, @($op))
-    $task.Wait(-1) | Out-Null
+    # Bounded: a media session that never answers (a tab being closed, a player
+    # that is hung) used to block here for ever, and with it every lyric.
+    if (-not $task.Wait(8000)) { throw 'media session did not answer in time' }
     return $task.Result
 }
 
@@ -120,7 +122,13 @@ function Get-ArtPath($props, [string]$key) {
 
 # --- main loop --------------------------------------------------------------
 $manager = $null
+$managerAt = [DateTime]::MinValue
 $consecutiveErrors = 0
+# The app whose session was last seen *playing*. A paused session is only ever
+# reported for this app: Windows' "current session" can be a player that was
+# paused hours ago, and following it put a long-forgotten song's lyrics on
+# screen whenever the real player stopped between tracks.
+$lastApp = ''
 
 while ($true) {
     if ($ParentPid -gt 0) {
@@ -128,7 +136,12 @@ while ($true) {
     }
 
     try {
+        # The manager is cheap to request; refreshing it periodically means a
+        # stale COM object can never leave the listener deaf for the rest of
+        # the session.
+        if ($null -ne $manager -and ((Get-Date) - $managerAt).TotalSeconds -gt 120) { $manager = $null }
         if ($null -eq $manager) {
+            $managerAt = Get-Date
             $manager = Await ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager, Windows.Media.Control, ContentType = WindowsRuntime]::RequestAsync()) $tMgr
         }
         if ($null -eq $manager) { throw 'no session manager' }
@@ -162,29 +175,38 @@ while ($true) {
             }
         }
 
-        # Prefer Windows' current playing session, then another ranked playing
-        # session. If nothing is playing, retain only the current known music
-        # session while it is explicitly Paused: its position stays frozen so
-        # the user can resume without losing the lyric sheet. Stopped/closed
-        # sessions are still ignored, and a new playing session always wins.
-        $pausedCurrent = $null
+        # Prefer Windows' current session when it is playing, then the best
+        # ranked playing session. When nothing is playing, keep following the
+        # app we were already showing while it is explicitly Paused, so the
+        # sheet survives a pause. A paused session from any other app is never
+        # adopted.
         try {
             $current = $manager.GetCurrentSession()
             if ($null -ne $current) {
                 $currentInfo = $current.GetPlaybackInfo()
                 $currentRank = & $musicRank $current.SourceAppUserModelId
-                if ($null -ne $currentInfo -and $currentRank -gt 0) {
-                    $currentState = [string]$currentInfo.PlaybackStatus
-                    if ($currentState -eq 'Playing') { $chosen = $current }
-                    elseif ($currentState -eq 'Paused') { $pausedCurrent = $current }
+                if ($null -ne $currentInfo -and $currentRank -gt 0 -and
+                    ([string]$currentInfo.PlaybackStatus) -eq 'Playing') {
+                    $chosen = $current
                 }
             }
         } catch { }
         if ($null -eq $chosen -and $null -ne $firstPlaying) {
             $chosen = $firstPlaying
         }
-        if ($null -eq $chosen -and $null -ne $pausedCurrent) {
-            $chosen = $pausedCurrent
+        if ($null -ne $chosen) {
+            $lastApp = [string]$chosen.SourceAppUserModelId
+        } elseif ($lastApp -ne '') {
+            foreach ($s in $sessions) {
+                try {
+                    if (([string]$s.SourceAppUserModelId) -ne $lastApp) { continue }
+                    $info = $s.GetPlaybackInfo()
+                    if ($null -ne $info -and ([string]$info.PlaybackStatus) -eq 'Paused') {
+                        $chosen = $s
+                        break
+                    }
+                } catch { }
+            }
         }
 
         if ($null -eq $chosen) {
@@ -200,6 +222,8 @@ while ($true) {
         $album = ''
         $pos = 0.0
         $dur = 0.0
+        $upd = [int64]0
+        $stale = 0
 
         try { $status = [string]$chosen.GetPlaybackInfo().PlaybackStatus } catch { }
         if ($status -eq '') { $status = 'Unknown' }
@@ -219,11 +243,25 @@ while ($true) {
             $start = $tl.StartTime.TotalSeconds
             $pos = $tl.Position.TotalSeconds - $start
             $dur = $tl.EndTime.TotalSeconds - $start
-            if ($status -eq 'Playing') {
-                $delta = ([DateTimeOffset]::UtcNow - $tl.LastUpdatedTime).TotalSeconds
-                if ($delta -gt 0) {
-                    $pos += $delta
-                    if ($dur -gt 0 -and $pos -gt $dur) { $pos = $dur }
+            # LastUpdatedTime says when the player last wrote the timeline. Some
+            # players never set it (it reads as the year 1601); extrapolating
+            # from that pinned the position to the end of the song.
+            $stamp = $tl.LastUpdatedTime
+            if ($stamp.Year -ge 2015) {
+                $upd = [int64]$stamp.ToUnixTimeMilliseconds()
+                if ($status -eq 'Playing') {
+                    $delta = ([DateTimeOffset]::UtcNow - $stamp).TotalSeconds
+                    if ($delta -gt 0) {
+                        if ($dur -gt 0 -and ($pos + $delta) -gt ($dur + 1.5)) {
+                            # The timeline is older than the rest of the track:
+                            # it belongs to a previous song or was never
+                            # refreshed. Report it as stale, do not invent.
+                            $stale = 1
+                            $pos = $dur
+                        } else {
+                            $pos += $delta
+                        }
+                    }
                 }
             }
         } catch { }
@@ -246,6 +284,8 @@ while ($true) {
                 dur    = [math]::Round([double]$dur, 3)
                 app    = [string]$chosen.SourceAppUserModelId
                 art    = $art
+                upd    = $upd
+                stale  = $stale
                 tick   = [int64](([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()))
             })
         $consecutiveErrors = 0
@@ -258,5 +298,5 @@ while ($true) {
         continue
     }
 
-    Start-Sleep -Milliseconds 200
+    Start-Sleep -Milliseconds 250
 }

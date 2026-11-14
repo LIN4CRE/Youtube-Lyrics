@@ -105,7 +105,7 @@ Optional integrity check (PowerShell):
 Get-FileHash .\YoutubeLyrics.exe -Algorithm SHA256
 ```
 
-Expected SHA-256 for the current 1.5.0 download is listed in [`YoutubeLyrics.exe.sha256`](docs/downloads/YoutubeLyrics.exe.sha256) and beside the download on the [project website](https://lin4cre.github.io/Youtube-Lyrics/). Compare it before running the file. The checksum is served by GitHub over HTTPS; it is an integrity check, not a code signature.
+Expected SHA-256 for the current 1.6.0 download is listed in [`YoutubeLyrics.exe.sha256`](docs/downloads/YoutubeLyrics.exe.sha256) and beside the download on the [project website](https://lin4cre.github.io/Youtube-Lyrics/). Compare it before running the file. The checksum is served by GitHub over HTTPS; it is an integrity check, not a code signature.
 
 Windows may show **"Windows protected your PC"** because the file is not
 code-signed. The source is public; continue only if you trust the download. If
@@ -125,10 +125,12 @@ ships with Windows.
 The default is desktop-wallpaper mode: the display attempts to sit on Explorer's
 WorkerW desktop layer behind desktop icons, never takes focus, and passes clicks
 through. If WorkerW is unavailable, it falls back to the bottom of the normal
-window z-order. `Ctrl+Alt+W` switches between that and the normal display;
-`Ctrl+Alt+L` hides or restores it from any app. The wallpaper behavior still
-needs runtime verification on Windows. In normal display mode, `F11` toggles
-full screen/windowed and `Esc` leaves full screen, then hides to the tray. `F1`
+window z-order. `Ctrl+Alt+W` switches between that and the foreground display;
+`Ctrl+Alt+L` hides or restores it from any app, and `Ctrl+Alt+F` goes straight
+to full screen from anywhere (including from the desktop layer). The wallpaper
+behavior still needs runtime verification on Windows. `F11` or a double-click
+toggles full screen/windowed, and `Esc` leaves full screen for a window; it
+never hides the display. The window's size and position are remembered. `F1`
 shows shortcuts and the
 raw media-session state when the window is focused.
 
@@ -139,8 +141,8 @@ raw media-session state when the window is focused.
 | `Ctrl`+`Alt`+`W` | Toggle desktop wallpaper mode | | `F` | Reset text size |
 | `Ctrl`+`Alt`+`L` | Show / hide from any app | | `R` | Look the lyrics up again |
 | `Ctrl`+`Alt`+`S` | Settings window | | `[` | Quieter / brighter background |
-| `F11` | Full screen ⇄ windowed (normal mode) | | `C` | Cover-art background |
-| `Esc` | Leave full screen, then hide to tray | | `K` | Karaoke wipe |
+| `F11` · `Ctrl`+`Alt`+`F` | Full screen ⇄ windowed | | `C` | Cover-art background |
+| `Esc` | Close help, then leave full screen | | `K` | Karaoke wipe |
 | `A` | Always on top (normal mode) | | `Q` | Quit |
 | `↑` `↓` `+` `−` | Bigger / smaller text | | `T` | Theme |
 | `←` `→` | Shift lyric timing ±0.25 s | | `F1` `H` | Help overlay |

@@ -734,6 +734,80 @@ static void test_track_variants() {
   CHECK_STR(parsed.variant, "live");
 }
 
+// 1.6.0: a sheet for a different song, or a different-length recording of the
+// same song, must never be shown as timed karaoke.
+static void test_wrong_sheet_rejection() {
+  // Real words at the end of a title are part of the title.
+  CHECK_STR(clean_track(TrackInfo{"Car Radio", "Twenty One Pilots", "", 0}).title, "Car Radio");
+  CHECK_STR(clean_track(TrackInfo{"Come Clean", "Hilary Duff", "", 0}).title, "Come Clean");
+  CHECK_STR(clean_track(TrackInfo{"Numb 4K", "Linkin Park", "", 0}).title, "Numb");
+
+  // "Home" is not "Homecoming": containment counts whole words only.
+  CHECK(text_similarity("Home", "Homecoming") < 0.6);
+  CHECK(text_similarity("In the End", "in the end") > 0.99);
+  CHECK(same_title_text("In The End", "in the end!"));
+  CHECK(!same_title_text("Home", "Homecoming"));
+
+  // A timed sheet has to fit the recording it is shown against.
+  Lyrics sheet;
+  sheet.synced = true;
+  for (int i = 0; i < 40; ++i) sheet.lines.push_back(LyricLine{i * 5000, "line", {}});
+  CHECK(lyrics_fit_duration(sheet, 200.0));   // last line at 195 s
+  CHECK(!lyrics_fit_duration(sheet, 150.0));  // runs 45 s past the end
+  CHECK(!lyrics_fit_duration(sheet, 900.0));  // stops in the first quarter
+  CHECK(lyrics_fit_duration(sheet, 0.0));     // unknown length: nothing to compare
+
+  auto one = [](const char* title, const char* artist, int duration) {
+    return std::string("[{\"trackName\":\"") + title + "\",\"artistName\":\"" + artist +
+           "\",\"duration\":" + std::to_string(duration) +
+           ",\"syncedLyrics\":\"[00:01.00] a\\n[00:02.00] b\",\"plainLyrics\":\"a\\nb\"}]";
+  };
+  JValue v;
+  double score = 0;
+  bool trusted = false;
+  TrackInfo want{"In the End", "Linkin Park", "", 216.0};
+
+  CHECK(json_parse(one("In the End", "Linkin Park", 217), v));
+  CHECK(best_candidate(v, want, &score, &trusted) != nullptr);
+  CHECK(trusted);
+
+  // Same song, 30 s longer (a live or extended cut): words yes, timing no.
+  CHECK(json_parse(one("In the End", "Linkin Park", 246), v));
+  trusted = true;
+  CHECK(best_candidate(v, want, &score, &trusted) != nullptr);
+  CHECK(!trusted);
+
+  // More than a minute out is a different recording altogether.
+  CHECK(json_parse(one("In the End", "Linkin Park", 300), v));
+  CHECK(best_candidate(v, want, &score, &trusted) == nullptr);
+
+  // A near-miss title is only accepted when the length agrees closely.
+  CHECK(json_parse(one("In the End Part Two", "Linkin Park", 226), v));
+  CHECK(best_candidate(v, want, &score, &trusted) == nullptr);
+
+  // No artist to check against: the length has to agree.
+  TrackInfo anonymous{"In the End", "", "", 216.0};
+  CHECK(json_parse(one("In the End", "Someone Else", 240), v));
+  CHECK(best_candidate(v, anonymous, &score, &trusted) == nullptr);
+
+  // lyrics.ovh states which song it answered with; a different one is refused.
+  Lyrics out;
+  CHECK(!parse_lyrics_ovh_payload(
+      "{\"lyrics\":\"Paroles de la chanson Despacito par Luis Fonsi\\nline one\\nline two\"}",
+      want, out));
+  CHECK(parse_lyrics_ovh_payload(
+      "{\"lyrics\":\"Paroles de la chanson In the End par Linkin Park\\nIt starts with one\\nthing\"}",
+      want, out));
+  CHECK(out.plain.find("Paroles") == std::string::npos);
+  CHECK(out.plain.find("It starts with one") != std::string::npos);
+
+  // An answer far longer than any song is a scraped page, not lyrics.
+  std::string huge = "{\"lyrics\":\"";
+  for (int i = 0; i < 450; ++i) huge += "another line\\n";
+  huge += "\"}";
+  CHECK(!parse_lyrics_ovh_payload(huge, want, out));
+}
+
 int main() {
   test_utf8();
   test_json();
@@ -749,6 +823,7 @@ int main() {
   test_extra_providers();
   test_enhanced_matching();
   test_track_variants();
+  test_wrong_sheet_rejection();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

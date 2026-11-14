@@ -1,12 +1,12 @@
 # Youtube-Lyrics — engineering audit
 
-**Reviewed:** 12 November 2026
+**Reviewed:** 14 November 2026
 
-**Version under review:** 1.5.0
+**Version under review:** 1.6.0
 
 **Repository:** `LIN4CRE/Youtube-Lyrics`
 
-**Branch:** `arena/f0895620-youtube-lyrics`, from `febb2c154d4ddb9d3b12ab9b3403d08d1e8e165e`
+**Branch:** `arena/75852981-youtube-lyrics`, from `e0048124e4b965d7fcca48d7edcbb1b8f9fbf02f`
 
 > **Scope of this audit.** Everything below was measured in a Linux sandbox with
 > the Zig/MinGW-w64 cross toolchain. There was no Windows machine, no VM and no
@@ -81,11 +81,30 @@ keyboard at all. Both are fixed, and a test now re-runs the layout geometry.
   version resource and loads the executable with `LoadLibraryEx`.
 - **`Config::version`** written to `config.ini` for future migrations.
 
+## 1.6.0 addendum
+
+1.6.0 rewrites display-mode handling (desktop / full screen / window), the
+playback-position tracker, the lyric-candidate acceptance rules and the text
+sizing; `CHANGELOG.md` lists each change. What was and was not verified:
+
+- **Verified here:** the Windows build compiles and links cleanly with
+  `-Wall -Wextra`; the PE passes `verify_build.py`; the matching, title clean-up
+  and sheet-length rules are covered by 28 new portable checks.
+- **Not verified here:** everything that needs a running Windows desktop. In
+  particular the full-screen/desktop/window switching, the DPI-virtualised
+  settings window, the new application manifest, text size and contrast on a
+  real display, and the media-helper timeouts have been compiled but never
+  executed. They should be checked on Windows 10 and 11 before this release is
+  treated as proven.
+- GitHub Actions did not run for this release (the account's Actions are
+  blocked), so CI results are the local runs listed below, and the site is
+  deployed from `docs/` by Vercel.
+
 ## Verification performed
 
-Run on 12 November 2026 in this sandbox:
+Run on 14 November 2026 in this sandbox:
 
-- `./scripts/test.sh` — **3,400 portable-core checks, 0 failures**, compiled with
+- `./scripts/test.sh` — **3,428 portable-core checks, 0 failures**, compiled with
   `-fsanitize=address,undefined` and `-Wall -Wextra`. Plus:
   - 4 release-metadata tests,
   - 10 build-verification/documentation tests,
@@ -95,9 +114,9 @@ Run on 12 November 2026 in this sandbox:
 - `./scripts/build.sh` — Zig/MinGW x86-64 Windows GUI cross-build. The build is
   gated: icon generation → icon verification → resource compilation → compile to a
   temporary path → `verify_build.py` → publish → re-verify the published copy.
-  - **Distributed build: 910,848 bytes (890 KiB)**, SHA-256
-    `55de6cd3a4bcbd08f6bef8482f16ce79c17416acede9dea6231e3d034a2c0631`.
-  - `verify_build.py`: `0x8664 windows-gui`, version `1.5.0`, icon frames
+  - **Distributed build: 1,018,368 bytes (994 KiB)**, SHA-256
+    `e9eca38575f313b63e68ef226bbc0e11a3b1db7736959b54e870333c1aebe7aa`.
+  - `verify_build.py`: `0x8664 windows-gui`, version `1.6.0`, icon frames
     `[16, 20, 24, 32, 40, 48, 64, 96, 128, 256]`, wallpapers
     `city-rain.jpg, forest-mist.jpg, mountain-night.jpg`.
 - `dist/YoutubeLyrics.exe` and `docs/downloads/YoutubeLyrics.exe` are
