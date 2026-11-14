@@ -275,6 +275,51 @@ else:
 
 
 @unittest.skipUnless(shutil.which("bash") and shutil.which("sha256sum"), "needs bash and coreutils")
+class AcceptanceGateTests(unittest.TestCase):
+    """A stable release needs a human Windows sign-off for the exact binary."""
+
+    SHA = "a" * 64
+
+    def record(self, **changes) -> str:
+        data = {
+            "version": "2.0.0",
+            "sha256": self.SHA,
+            "windows_build": "Windows 11 26100.1",
+            "tested_by": "someone",
+            "date": "2026-12-01",
+            "desktop_test": "pass",
+            "manual_matrix": "pass",
+        }
+        data.update(changes)
+        return json.dumps({k: v for k, v in data.items() if v is not None})
+
+    def test_a_complete_record_for_this_binary_passes(self) -> None:
+        self.assertEqual(gate.check_acceptance(self.record(), "2.0.0", self.SHA)["tested_by"],
+                         "someone")
+
+    def test_everything_else_is_refused(self) -> None:
+        cases = [
+            ("not valid JSON", "{", {}),
+            ("different binary", None, {"sha256": "b" * 64}),
+            ("is for version", None, {"version": "1.9.0"}),
+            ("no 'windows_build'", None, {"windows_build": None}),
+            ("no 'tested_by'", None, {"tested_by": "  "}),
+            ("desktop_test is 'incomplete'", None, {"desktop_test": "incomplete"}),
+            ("manual_matrix is None", None, {"manual_matrix": None}),
+        ]
+        for pattern, raw, changes in cases:
+            with self.subTest(pattern=pattern):
+                text = raw if raw is not None else self.record(**changes)
+                with self.assertRaisesRegex(gate.ReleaseError, pattern):
+                    gate.check_acceptance(text, "2.0.0", self.SHA)
+
+    def test_a_development_commit_cannot_be_released(self) -> None:
+        gate.check_channel("stable\n")
+        for text in ("development\n", "", "Stable"):
+            with self.assertRaisesRegex(gate.ReleaseError, "development build"):
+                gate.check_channel(text)
+
+
 class PublishScriptTests(unittest.TestCase):
     """scripts/publish_release.sh against a stand-in for the gh command."""
 

@@ -26,10 +26,13 @@ window views remain as options, and everything you can change is in one native
 settings window (`Ctrl+Alt+S`). LRCLIB results are matched before display;
 lyrics.ovh is an untimed fallback without response-side track metadata.
 
-> **Status of desktop mode in this version: rebuilt, not yet verified.** The
-> desktop layer was redesigned for this version and compiles cleanly, but it
-> has **not been run on a Windows machine**. See
-> [Checking desktop mode on your PC](#checking-desktop-mode-on-your-pc).
+> **Which version is which.** The download on the site and in
+> `docs/downloads` is the last stable release. This repository's source is
+> ahead of it: it is the 2.0 development line, in which desktop mode was
+> rebuilt as described below. **That work has not been run on a Windows
+> machine and is not released.** Sections below describe the development
+> source unless they say otherwise. Status:
+> [`engineering/READINESS-2.0.md`](engineering/READINESS-2.0.md).
 
 [![Windows 10 / 11](docs/brand/badge-platform.png)](#requirements)
 [![MIT](docs/brand/badge-licence.png)](LICENSE)
@@ -110,7 +113,7 @@ Optional integrity check (PowerShell):
 Get-FileHash .\YoutubeLyrics.exe -Algorithm SHA256
 ```
 
-Expected SHA-256 for the current 1.8.0 download is listed in [`YoutubeLyrics.exe.sha256`](docs/downloads/YoutubeLyrics.exe.sha256) and beside the download on the [project website](https://youtube-lyrics-seven.vercel.app/). Compare it before running the file. The checksum is served over HTTPS; it is an integrity check, not a code signature.
+Expected SHA-256 for the current 1.7.1 download is listed in [`YoutubeLyrics.exe.sha256`](docs/downloads/YoutubeLyrics.exe.sha256) and beside the download on the [project website](https://youtube-lyrics-seven.vercel.app/). Compare it before running the file. The checksum is served over HTTPS; it is an integrity check, not a code signature.
 
 Windows may show **"Windows protected your PC"** because the file is not
 code-signed. The source is public; continue only if you trust the download. If
@@ -148,7 +151,20 @@ with the reason — and a button that restores desktop mode or retries the
 attachment. By default the lyrics are drawn over your existing Windows
 wallpaper; *Cinematic scene instead of my wallpaper* shows one of the bundled
 scenes behind the lyrics while they are visible. *Show artist and title* and
-*Dim the lyrics while paused* are switches in the same window.
+*Dim the lyrics while paused* are switches in the same window, with *Fade
+speed* and *Text shadow*.
+
+With more than one display, *Show on* chooses all displays (the default), the
+main display only, or one display. Each display gets its own layer; displays of
+different sizes show the largest display's frame scaled to fit. Displays are
+re-detected when one is added, removed or rearranged.
+
+*Start with Windows* adds a per-user start-up entry (no administrator rights,
+no service); unticking it removes the entry.
+
+If the layer cannot attach, or Windows refuses to draw it transparently,
+nothing is shown on the desktop and the reason appears in Settings, the tray
+menu and the diagnostic report. Your wallpaper is never replaced as a fallback.
 
 In the foreground modes `F11` or a double-click toggles full screen/windowed,
 and `Esc` leaves full screen for a window. The window's size and position are
@@ -422,22 +438,37 @@ will not work. The display itself still runs.
 ## Checking desktop mode on your PC
 
 Desktop mode depends on how Explorer builds the desktop, which differs between
-Windows versions and cannot be checked without running on Windows. Two tools
-report what really happened on your machine:
+Windows versions and cannot be checked without running on Windows.
 
-1. Close Youtube-Lyrics, then run `YoutubeLyrics.exe --desktop-test result.txt`
-   from a terminal. For a few seconds it places a test card on the real desktop,
-   then checks and records: whether the layer attached and to which Explorer
-   window, whether it is beneath the icon layer, whether it could be drawn,
-   whether a click at its centre reaches the desktop rather than the layer,
-   that focus did not move, and its window styles. It saves a screenshot next
-   to the report and exits 0 only if every check passed.
-2. While the app is running, **Save a diagnostic report** (tray menu) includes
-   a *DESKTOP INTEGRATION* section: attachment state, parent window, styles,
-   size, monitor, DPI, drawing mode, frames shown, and the Explorer desktop
-   windows found.
+One command runs every automated check and writes a single report (minimise
+your windows with Win+D first):
 
-If the result is not a pass, please open an issue with `result.txt`.
+```
+powershell -ExecutionPolicy Bypass -File scripts\verify.ps1
+```
+
+It checks the build tools, builds, runs the portable tests and release checks,
+the program's self-test and the desktop test, and exits 0 only if every step
+passed (1 = something failed, 2 = something could not be checked). Add
+`-SkipBuild` to check an existing `dist\YoutubeLyrics.exe` without Zig or
+Python. Results are in `.build\verify\`.
+
+The desktop test on its own is `YoutubeLyrics.exe --desktop-test result.txt`.
+For a few seconds it places a test card on the real desktop of each chosen
+display and records, each as PASS, FAIL or SKIP: which Explorer window was
+chosen, the layer's actual parent and styles, its order relative to the icon
+layer, its size against the display, DPI awareness, whether a transparent frame
+was accepted and reached the screen, what hit-testing finds at its centre, that
+focus did not move, and whether the screenshot was saved. It does **not** show
+that icons can be used through lyrics, that every window covers them, or how
+anything looks; those are in
+[`engineering/WINDOWS_TEST_MATRIX.md`](engineering/WINDOWS_TEST_MATRIX.md).
+
+While the app is running, **Save a diagnostic report** (tray menu) includes a
+*DESKTOP INTEGRATION* section with the same facts for the live layer, plus
+frame times.
+
+If the result is not a pass, please open an issue with the report.
 
 ## Help out
 

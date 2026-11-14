@@ -2406,4 +2406,186 @@ ProviderFailure classify_provider_response(bool transport_error, int http_status
   return f;
 }
 
+// ------------------------------------------------- desktop attachment machine
+
+DesktopAction desktop_machine_step(DesktopMachine& m, DesktopEvent event, int64_t now_ms) {
+  DesktopAction action;
+  if (event == DesktopEvent::Enable) {
+    if (m.phase != DesktopPhase::Off) return action;
+    m = DesktopMachine{};
+    m.phase = DesktopPhase::Attaching;
+    m.next_attempt_ms = now_ms;
+    action.attempt_now = true;
+    return action;
+  }
+  // Nothing but Enable means anything while desktop mode is off. In
+  // particular a late AttachSucceeded must not resurrect the layer.
+  if (m.phase == DesktopPhase::Off) return action;
+
+  auto restart = [&](DesktopPhase phase, int64_t delay_ms) {
+    m.phase = phase;
+    m.attempts = 0;
+    m.next_attempt_ms = now_ms + delay_ms;
+    action.release_layer = true;
+    action.attempt_now = delay_ms == 0;
+  };
+
+  switch (event) {
+    case DesktopEvent::Disable:
+      m = DesktopMachine{};
+      action.release_layer = true;
+      break;
+    case DesktopEvent::AttachSucceeded:
+      if (m.phase == DesktopPhase::Attached) break;
+      if (m.phase == DesktopPhase::Restoring) ++m.restores;
+      if (m.phase == DesktopPhase::Recovering) ++m.recoveries;
+      m.phase = DesktopPhase::Attached;
+      m.attempts = 0;
+      m.next_attempt_ms = 0;
+      m.failure_announced = false;
+      break;
+    case DesktopEvent::AttachFailed:
+      if (m.phase == DesktopPhase::Attached) break;  // stale report
+      ++m.attempts;
+      if (m.phase == DesktopPhase::Failed) {
+        m.next_attempt_ms = now_ms + kDesktopSlowRetryMs;
+      } else if (m.attempts >= kDesktopQuickAttempts) {
+        m.phase = DesktopPhase::Failed;
+        m.next_attempt_ms = now_ms + kDesktopSlowRetryMs;
+        action.announce_failure = !m.failure_announced;
+        m.failure_announced = true;
+      } else {
+        m.next_attempt_ms = now_ms + kDesktopQuickRetryMs;
+      }
+      break;
+    case DesktopEvent::SurfaceLost:
+      // Explorer usually takes a moment to rebuild its desktop.
+      if (m.phase == DesktopPhase::Attached) restart(DesktopPhase::Restoring, kDesktopLossSettleMs);
+      break;
+    case DesktopEvent::ShellRestarted:
+      restart(DesktopPhase::Restoring, 0);
+      break;
+    case DesktopEvent::DisplayChanged:
+    case DesktopEvent::PowerResumed:
+      if (m.phase == DesktopPhase::Attached || m.phase == DesktopPhase::Failed) {
+        restart(DesktopPhase::Recovering, 0);
+      } else {
+        // Already trying: just do not wait for the timer.
+        m.next_attempt_ms = now_ms;
+        action.attempt_now = true;
+      }
+      break;
+    case DesktopEvent::DrawRefused:
+      // No substitute picture is ever shown. The layer is removed and the
+      // failure reported; it is retried slowly in case the cause was passing.
+      if (m.phase != DesktopPhase::Attached) break;
+      m.phase = DesktopPhase::Failed;
+      m.attempts = 0;
+      m.next_attempt_ms = now_ms + kDesktopSlowRetryMs;
+      action.release_layer = true;
+      action.announce_failure = !m.failure_announced;
+      m.failure_announced = true;
+      break;
+    case DesktopEvent::ManualRetry:
+      m.failure_announced = false;
+      restart(m.phase == DesktopPhase::Attached ? DesktopPhase::Recovering
+                                                : (m.phase == DesktopPhase::Failed
+                                                       ? DesktopPhase::Attaching
+                                                       : m.phase),
+              0);
+      break;
+    case DesktopEvent::Enable:
+      break;
+  }
+  return action;
+}
+
+bool desktop_machine_attempt_due(const DesktopMachine& m, int64_t now_ms) {
+  if (m.phase == DesktopPhase::Off || m.phase == DesktopPhase::Attached) return false;
+  return now_ms >= m.next_attempt_ms;
+}
+
+bool desktop_machine_may_draw(const DesktopMachine& m) {
+  return m.phase == DesktopPhase::Attached;
+}
+
+bool desktop_machine_in_trouble(const DesktopMachine& m) {
+  return m.phase == DesktopPhase::Failed ||
+         (m.phase != DesktopPhase::Off && m.phase != DesktopPhase::Attached && m.attempts > 0);
+}
+
+const char* desktop_phase_name(DesktopPhase phase) {
+  switch (phase) {
+    case DesktopPhase::Off: return "not attached (desktop mode is off)";
+    case DesktopPhase::Attaching: return "attaching";
+    case DesktopPhase::Attached: return "attached";
+    case DesktopPhase::Restoring: return "restoring after an Explorer restart";
+    case DesktopPhase::Recovering: return "recovering after a display or power change";
+    case DesktopPhase::Failed: return "failed";
+  }
+  return "unknown";
+}
+
+MonitorChoice parse_monitor_choice(const std::string& text) {
+  MonitorChoice choice;
+  const std::string value = to_lower_ascii(trim(text));
+  if (value.empty() || value == "all") return choice;
+  choice.all = false;
+  if (value == "primary") {
+    choice.primary_only = true;
+    return choice;
+  }
+  size_t pos = 0;
+  while (pos <= value.size()) {
+    size_t comma = value.find(',', pos);
+    if (comma == std::string::npos) comma = value.size();
+    const std::string item = trim(value.substr(pos, comma - pos));
+    pos = comma + 1;
+    if (item.empty() || item.size() > 2) continue;
+    int number = 0;
+    bool digits = true;
+    for (char c : item) {
+      if (c < '0' || c > '9') { digits = false; break; }
+      number = number * 10 + (c - '0');
+    }
+    if (!digits || number < 1 || number > 64) continue;
+    bool seen = false;
+    for (int n : choice.numbers) seen = seen || n == number;
+    if (!seen) choice.numbers.push_back(number);
+  }
+  for (size_t i = 1; i < choice.numbers.size(); ++i)
+    for (size_t j = i; j > 0 && choice.numbers[j - 1] > choice.numbers[j]; --j)
+      std::swap(choice.numbers[j - 1], choice.numbers[j]);
+  // Nothing usable in the list: behave as the default rather than as "none".
+  if (choice.numbers.empty()) choice.all = true;
+  return choice;
+}
+
+std::string format_monitor_choice(const MonitorChoice& choice) {
+  if (choice.primary_only) return "primary";
+  if (choice.all || choice.numbers.empty()) return "all";
+  std::string out;
+  for (int n : choice.numbers) {
+    if (!out.empty()) out += ",";
+    out += std::to_string(n);
+  }
+  return out;
+}
+
+std::vector<int> select_monitors(const MonitorChoice& choice, int count, int primary_index) {
+  std::vector<int> out;
+  if (count <= 0) return out;
+  if (primary_index < 0 || primary_index >= count) primary_index = 0;
+  if (choice.primary_only) {
+    out.push_back(primary_index);
+  } else if (choice.all || choice.numbers.empty()) {
+    for (int i = 0; i < count; ++i) out.push_back(i);
+  } else {
+    for (int n : choice.numbers)
+      if (n >= 1 && n <= count) out.push_back(n - 1);
+    if (out.empty()) out.push_back(primary_index);
+  }
+  return out;
+}
+
 }  // namespace ytl

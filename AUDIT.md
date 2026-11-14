@@ -2,7 +2,14 @@
 
 **Reviewed:** 14 November 2026
 
-**Version under review:** 1.8.0 (unreleased; the 1.7.1 review is kept below)
+**Version under review:** 2.0 development line (builds numbered 1.9.0, unreleased). The stable download is the last 1.7 release.
+
+> **2.0 work.** Findings, the manual Windows matrix and the readiness report
+> for 2.0 are in `engineering/`: `FINDINGS-2.0.md`, `WINDOWS_TEST_MATRIX.md`,
+> `READINESS-2.0.md`. Verdict there: **not ready; nothing has been run on
+> Windows.** The sections below are the earlier audits, kept as history; where
+> the 1.8.0 section mentions an opaque fallback or a primary-monitor limit, the
+> 2.0 documents supersede it.
 
 **Repository:** `LIN4CRE/Youtube-Lyrics`
 

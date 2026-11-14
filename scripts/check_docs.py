@@ -61,7 +61,11 @@ def parse(path: Path) -> Links:
 
 
 def release_facts() -> tuple[str, int, str]:
-    version = (ROOT / "VERSION").read_text(encoding="ascii").strip()
+    # The site and README describe the published stable download, which is not
+    # necessarily the version under development in VERSION.
+    import json as _json
+    version = _json.loads(
+        (ROOT / "docs" / "downloads" / "release.json").read_text(encoding="utf-8"))["version"]
     exe = ROOT / "docs" / "downloads" / "YoutubeLyrics.exe"
     if not exe.is_file():
         raise SystemExit("docs/downloads/YoutubeLyrics.exe is missing; run scripts/build.sh")
@@ -82,7 +86,7 @@ def check_release_facts(path: Path, text: str, facts: tuple[str, int, str]) -> l
 
     for found in set(re.findall(r"\b\d+\.\d+\.\d+\b", text)):
         if found != version:
-            errors.append(f"{path.name}: mentions version {found}, VERSION is {version}")
+            errors.append(f"{path.name}: mentions version {found}, the stable release is {version}")
 
     for found in re.findall(r"about (\d+) KiB", text):
         # Allow a 1 KiB rounding window for how the page describes the file.
@@ -139,7 +143,7 @@ def main() -> int:
         version = facts[0]
         for found in set(re.findall(r"\b\d+\.\d+\.\d+\b", text)):
             if found != version:
-                errors.append(f"{document.name}: mentions version {found}, VERSION is {version}")
+                errors.append(f"{document.name}: mentions version {found}, the stable release is {version}")
 
     if errors:
         print("Documentation check failed:")

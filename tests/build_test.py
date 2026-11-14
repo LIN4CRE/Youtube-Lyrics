@@ -16,7 +16,10 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-BUILT_EXE = ROOT / "docs" / "downloads" / "YoutubeLyrics.exe"
+# The build of this working tree. docs/downloads is the stable channel and is
+# only the same file when RELEASE_CHANNEL is "stable".
+BUILT_EXE = ROOT / "dist" / "YoutubeLyrics.exe"
+STABLE_EXE = ROOT / "docs" / "downloads" / "YoutubeLyrics.exe"
 
 
 def load(name: str, relative: str):
@@ -135,9 +138,9 @@ class ReleaseFactsTests(unittest.TestCase):
         self.assertIn("about 1234 KiB", updated_readme)
 
     def test_sidecar_disagreement_is_fatal(self) -> None:
-        if not BUILT_EXE.is_file():
+        if not STABLE_EXE.is_file():
             self.skipTest("no build present")
-        digest = hashlib.sha256(BUILT_EXE.read_bytes()).hexdigest()
+        digest = hashlib.sha256(STABLE_EXE.read_bytes()).hexdigest()
         report = facts.facts()
         self.assertEqual(report["sha256"], digest)
 
@@ -158,8 +161,32 @@ class BuiltArtifactTests(unittest.TestCase):
         report = verify.validate(BUILT_EXE)
         self.assertEqual(report["version"], (ROOT / "VERSION").read_text().strip())
 
+    def test_development_builds_never_reach_the_stable_channel(self) -> None:
+        """docs/downloads is what the updater installs. While RELEASE_CHANNEL is
+        not 'stable', it must not be the build of the working tree."""
+        import json
+
+        channel = (ROOT / "RELEASE_CHANNEL").read_text().strip()
+        self.assertIn(channel, ("development", "stable"))
+        version = (ROOT / "VERSION").read_text().strip()
+        manifest = json.loads((ROOT / "docs" / "downloads" / "release.json").read_text())
+        if channel == "stable":
+            self.assertEqual(manifest["version"], version)
+            self.assertTrue((ROOT / "release" / "acceptance.json").is_file(),
+                            "a stable release needs a Windows acceptance record")
+        else:
+            self.assertNotEqual(
+                manifest["version"], version,
+                "the stable channel advertises the version under development")
+        for script in ("build.sh", "build.ps1"):
+            text = (ROOT / "scripts" / script).read_text(encoding="utf-8")
+            self.assertIn("RELEASE_CHANNEL", text)
+            self.assertLess(text.index("RELEASE_CHANNEL"),
+                            text.index("generate_release.py"),
+                            f"{script} must check the channel before publishing")
+
     def test_sidecar_and_manifest_agree_with_the_binary(self) -> None:
-        digest = hashlib.sha256(BUILT_EXE.read_bytes()).hexdigest()
+        digest = hashlib.sha256(STABLE_EXE.read_bytes()).hexdigest()
         sidecar = (ROOT / "docs" / "downloads" / "YoutubeLyrics.exe.sha256").read_text()
         self.assertEqual(sidecar.split()[0], digest)
 
@@ -168,17 +195,19 @@ class BuiltArtifactTests(unittest.TestCase):
 
         data = json.loads(manifest)
         self.assertEqual(data["sha256"], digest)
-        self.assertEqual(data["size_bytes"], BUILT_EXE.stat().st_size)
-        self.assertEqual(data["version"], (ROOT / "VERSION").read_text().strip())
+        self.assertEqual(data["size_bytes"], STABLE_EXE.stat().st_size)
+        self.assertEqual(data["channel"], "stable")
         self.assertEqual(data["tag"], "v" + data["version"])
 
     def test_dist_and_downloads_are_byte_identical(self) -> None:
         dist = ROOT / "dist" / "YoutubeLyrics.exe"
         if not dist.is_file():
             self.skipTest("dist copy absent")
+        if (ROOT / "RELEASE_CHANNEL").read_text().strip() != "stable":
+            self.skipTest("development channel: dist/ is a candidate, not the download")
         self.assertEqual(
             hashlib.sha256(dist.read_bytes()).hexdigest(),
-            hashlib.sha256(BUILT_EXE.read_bytes()).hexdigest(),
+            hashlib.sha256(STABLE_EXE.read_bytes()).hexdigest(),
             "the downloadable copy must be the exact binary that was verified",
         )
 

@@ -367,4 +367,76 @@ struct ProviderFailure {
 };
 ProviderFailure classify_provider_response(bool transport_error, int http_status);
 
+// ------------------------------------------------- desktop attachment machine
+// The life of the desktop wallpaper layer, as a pure state machine so that
+// every transition can be tested without Windows. The Win32 code (desktop.cc)
+// reports events and carries out the returned action; it never sets the phase
+// itself. "Attached" is only ever reached through AttachSucceeded, which the
+// Win32 code sends after it has verified the real parent window and styles.
+enum class DesktopPhase {
+  Off,         // another display mode is selected: not attached, not trying
+  Attaching,   // desktop mode was selected; no layer yet
+  Attached,    // verified child of the shell's desktop surface
+  Restoring,   // Explorer restarted or closed the surface; attaching again
+  Recovering,  // a display or power change invalidated the layout; rebuilding
+  Failed,      // repeated attempts failed, or drawing was refused; nothing shown
+};
+
+enum class DesktopEvent {
+  Enable,           // desktop mode selected
+  Disable,          // another mode selected, or the program is closing
+  AttachSucceeded,  // layer created and verified
+  AttachFailed,     // an attempt did not produce a verified layer
+  SurfaceLost,      // the layer or its Explorer parent disappeared
+  ShellRestarted,   // Explorer announced a new taskbar
+  DisplayChanged,   // monitors added, removed, moved, resized or rescaled
+  PowerResumed,     // the PC woke up
+  DrawRefused,      // Windows would not draw the transparent layer
+  ManualRetry,      // the user asked for another attempt
+};
+
+struct DesktopMachine {
+  DesktopPhase phase = DesktopPhase::Off;
+  int attempts = 0;             // failed attempts since the phase was entered
+  int64_t next_attempt_ms = 0;  // when the next attempt is due
+  int restores = 0;             // successful re-attachments after Explorer loss
+  int recoveries = 0;           // successful rebuilds after display/power changes
+  bool failure_announced = false;
+};
+
+struct DesktopAction {
+  bool release_layer = false;     // destroy any layer windows now
+  bool attempt_now = false;       // try to attach immediately
+  bool announce_failure = false;  // tell the user, once, that it is not working
+};
+
+constexpr int kDesktopQuickAttempts = 5;
+constexpr int64_t kDesktopQuickRetryMs = 2000;
+constexpr int64_t kDesktopSlowRetryMs = 30000;
+constexpr int64_t kDesktopLossSettleMs = 1500;
+
+DesktopAction desktop_machine_step(DesktopMachine& machine, DesktopEvent event, int64_t now_ms);
+// True when the Win32 code should make an attachment attempt.
+bool desktop_machine_attempt_due(const DesktopMachine& machine, int64_t now_ms);
+// Lyrics may be drawn only in this state.
+bool desktop_machine_may_draw(const DesktopMachine& machine);
+// True for the states the user should be told about as "not working".
+bool desktop_machine_in_trouble(const DesktopMachine& machine);
+const char* desktop_phase_name(DesktopPhase phase);
+
+// Which displays the desktop lyrics are shown on. Stored in config.ini as
+// "all", "primary", or a comma-separated list of 1-based display numbers
+// (displays are numbered left to right, then top to bottom).
+struct MonitorChoice {
+  bool all = true;
+  bool primary_only = false;
+  std::vector<int> numbers;  // sorted, unique, each >= 1
+};
+MonitorChoice parse_monitor_choice(const std::string& text);
+std::string format_monitor_choice(const MonitorChoice& choice);
+// Applies a choice to `count` displays of which `primary_index` (0-based) is
+// the primary one. Never returns an empty selection while a display exists: a
+// choice that names only displays that are gone falls back to the primary.
+std::vector<int> select_monitors(const MonitorChoice& choice, int count, int primary_index);
+
 }  // namespace ytl

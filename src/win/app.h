@@ -89,6 +89,10 @@ struct Config {
   bool desktop_scene = false;
   bool show_track = true;   // discreet artist / title / progress line
   bool dim_paused = true;   // lyrics are a little fainter while paused
+  // Displays the desktop lyrics appear on: "all", "primary" or "1,3".
+  std::string desktop_monitors = "all";
+  int fade_ms = 600;        // desktop fade-in time; fade-out is 1.5x this
+  int shadow = 1;           // dark edge behind desktop text: 0 off, 1 soft, 2 strong
   // Last size and position of the ordinary window (0 x 0 = never saved).
   int win_x = 0, win_y = 0, win_w = 0, win_h = 0;
 
@@ -177,45 +181,44 @@ struct View {
 // when Explorer exits, and the main window owns the tray icon, hotkeys and
 // timers, which must survive that.
 
-enum class DesktopAttach {
-  Inactive,   // another display mode is selected
-  Attached,   // child of the shell's desktop surface, verified
-  Restored,   // as Attached, after Explorer restarted
-  Retrying,   // not attached; another attempt is scheduled
-  Failed,     // several attempts failed; still retried, slowly
-};
-
-struct DesktopLayer {
-  HWND hwnd = nullptr;       // the layer window (null when not attached)
-  HWND host = nullptr;       // Explorer window it is a child of
-  HWND icons = nullptr;      // SHELLDLL_DefView, the icon layer
-  DesktopAttach state = DesktopAttach::Inactive;
-  std::string strategy;      // which shell layout was found
-  std::string detail;        // why the last attempt failed, in plain words
-  DWORD last_error = 0;
-  int attempts = 0;          // since the mode was entered or last success
-  int restores = 0;          // successful re-attachments after a loss
-  int64_t attached_at = 0;
-  int64_t next_retry_at = 0;
-  int64_t last_check_at = 0;
-  bool lost = false;         // the surface went away underneath us
-  bool below_icons = false;  // z-order relative to the icon layer confirmed
-  bool opaque = false;       // per-pixel transparency was refused; scene drawn
-  bool visible = false;
-  bool failure_notified = false;
-  bool closing = false;      // we are destroying it ourselves
-  RECT monitor{};            // target monitor, screen coordinates
+// One layer window: one display.
+struct DesktopSurface {
+  HWND hwnd = nullptr;
+  RECT monitor{};            // the display, screen coordinates
+  int number = 0;            // 1-based, left to right then top to bottom
+  bool primary = false;
   int w = 0, h = 0;
-  // 32-bit premultiplied back buffer
+  UINT dpi = 0;
+  bool below_icons = false;  // z-order relative to the icon layer confirmed
+  bool visible = false;
+  // 32-bit premultiplied back buffer (only allocated when needed)
   HDC dc = nullptr;
   HBITMAP bmp = nullptr;
   HGDIOBJ old_bmp = nullptr;
   void* bits = nullptr;
   int buf_w = 0, buf_h = 0;
+};
+
+struct DesktopLayer {
+  DesktopMachine machine;    // the only place the attachment state lives
+  HWND host = nullptr;       // Explorer window the layers are children of
+  HWND icons = nullptr;      // SHELLDLL_DefView, the icon layer
+  std::string strategy;      // which shell layout was found
+  std::string detail;        // why the last attempt failed, in plain words
+  DWORD last_error = 0;
+  std::vector<DesktopSurface> surfaces;
+  int reference = -1;        // surface the lyrics are laid out for
+  int w = 0, h = 0;          // its size
+  int monitors_total = 0;
+  std::string signature;     // display arrangement the surfaces were built for
+  int64_t last_check_at = 0;
+  bool closing = false;      // we are destroying the windows ourselves
+  bool lost_pending = false; // a window was destroyed from outside
   int presents = 0;
   int present_failures = 0;
+  int consecutive_draw_failures = 0;
   DWORD present_error = 0;
-  int last_alpha = -1;
+  double frame_ms_total = 0.0, frame_ms_max = 0.0, frame_ms_last = 0.0;
 };
 
 // --------------------------------------------------------------------- the app
@@ -278,6 +281,9 @@ struct App {
   // 0..1 opacity of the desktop layer: fades in when music with lyrics is
   // playing and out when it stops, so an idle desktop shows nothing at all.
   double presence = 0.0;
+  // The lyric sheet was withdrawn (song changed, session ended) while it was on
+  // the desktop: its last frame is faded out as it stands, never re-rendered.
+  bool fade_frozen = false;
   int64_t paused_since = 0;
   HWND update_progress_hwnd = nullptr;
   HWND update_progress_bar = nullptr;
@@ -411,23 +417,38 @@ void notify_from_tray(App& app, const wchar_t* title, const wchar_t* text);
 // Implemented in desktop.cc
 // Creates the layer window inside Explorer's desktop surface and verifies it.
 // Updates app.desktop (state, detail, strategy) either way.
-bool desktop_layer_attach(App& app);
-void desktop_layer_detach(App& app);   // back to DesktopAttach::Inactive
-// Health check and repositioning; cheap, called from the frame timer and on
-// display, power and Explorer events. Schedules and performs retries.
+void desktop_layer_enable(App& app);    // desktop mode selected
+void desktop_layer_disable(App& app);   // another mode, or shutting down
+// Health check, display-arrangement check and due retries. Cheap; called from
+// the frame timer. `force` skips the two-second throttle.
 void desktop_layer_tick(App& app, bool force);
-// Explorer announced a new taskbar: whatever we were attached to is gone.
 void desktop_layer_shell_restarted(App& app);
-// Draws one frame and shows it at `alpha` (0..255). False if drawing failed.
+void desktop_layer_display_changed(App& app);
+void desktop_layer_power_resumed(App& app);
+void desktop_layer_retry(App& app);     // the user asked
+// True only when verified layer windows exist. Never derived from settings.
+bool desktop_layer_attached(const App& app);
+bool desktop_layer_trouble(const App& app);
+// Renders the current frame and shows it at `alpha` (0-255) on every chosen
+// display. False when nothing could be drawn.
 bool desktop_layer_present(App& app, int alpha);
 void desktop_layer_hide(App& app);
-// One line for Settings and the tray; several lines for the report.
+int desktop_layer_display_count();
+// Shows the frame that is already on the layer at a new opacity, without
+// rendering. Used to fade the previous song's last frame away.
+bool desktop_layer_refade(App& app, int alpha);
+
+// "Start with Windows": a per-user Run entry (no administrator rights, no
+// service). The registry is the only record; nothing is cached in config.ini.
+bool autostart_enabled();
+bool set_autostart(bool on);
+void autostart_refresh_path();
 std::string desktop_layer_status(const App& app);
 std::string desktop_layer_report(const App& app);
 // "--desktop-test": attaches a test card to the desktop for a few seconds on
 // this machine, checks parent, z-order, focus and click-through, saves a
 // screenshot next to `path`, and writes what it found. True if all passed.
-bool run_desktop_test(App& app, const std::string& path);
+int run_desktop_test(App& app, const std::string& path);
 void logf(const char* fmt, ...);
 // Deliberately fails in release mode instead of shipping a silently missing
 // asset: used for the initial window and tray icon paths.

@@ -106,6 +106,18 @@ if ($res.Count -gt 0) {
 $hash = (Get-FileHash $tempExe -Algorithm SHA256).Hash.ToLowerInvariant()
 if (-not $hash) { Fail 'could not compute a SHA-256 checksum' }
 
+# docs\downloads is the STABLE CHANNEL (served by the site, installed by the
+# updater). Only a build made with RELEASE_CHANNEL = stable may replace it.
+$channel = ''
+if (Test-Path RELEASE_CHANNEL) { $channel = (Get-Content RELEASE_CHANNEL -Raw).Trim() }
+if ($channel -ne 'stable') {
+    Move-Item -Force $tempExe dist\YoutubeLyrics.exe
+    Write-Host "built dist\YoutubeLyrics.exe ($((Get-Item dist\YoutubeLyrics.exe).Length) bytes)"
+    Write-Host "SHA-256: $hash"
+    Write-Host 'development build: docs\downloads (the stable channel) was not changed'
+    exit 0
+}
+
 $hadPrevious = Test-Path $downloads
 if ($hadPrevious) { Copy-Item -Force $downloads $downloadsBackup }
 

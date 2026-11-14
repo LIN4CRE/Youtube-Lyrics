@@ -2,7 +2,59 @@
 
 User-visible changes to Youtube-Lyrics are recorded here. The executable's version is shown in Windows file properties and in the About item in the tray menu.
 
-## 1.8.0 — unreleased
+## 2.0 development (builds numbered 1.9.0) — unreleased
+
+**Not released and not verified on Windows.** `RELEASE_CHANNEL` is
+`development`; these builds are never copied to the download folder. See
+`engineering/READINESS-2.0.md`.
+
+### Release channel
+
+- **The site briefly offered an unverified build as stable.** The 1.8.0 work
+  below was merged on 14 November 2026 and, because every build overwrote the
+  download folder, the site and the in-app updater served it as a stable
+  release although it had never been run on Windows. The download folder is
+  restored to the previous stable release, byte for byte.
+- Builds no longer publish. `docs/downloads` changes only when
+  `RELEASE_CHANNEL` says `stable`, and the release gate additionally requires a
+  recorded Windows sign-off (`release/acceptance.json`) for the exact binary.
+- Anyone who already received 1.8.0 keeps it until a later stable release; the
+  updater does not downgrade.
+
+### Desktop layer
+
+- **No substitute wallpaper.** The opaque scene fallback is removed. If Windows
+  will not draw the transparent layer, the layer is removed, nothing is shown,
+  and the reason is reported.
+- **Tested attachment state machine**: off, attaching, attached, restoring
+  after an Explorer restart, recovering after a display or power change,
+  failed. "Attached" is reached only after the real parent window and styles
+  have been read back.
+- **All displays.** One layer per display, chosen with *Show on* (all, main
+  only, or one display). Adding, removing or rearranging displays rebuilds the
+  layers. Displays of different sizes show a scaled copy of the largest
+  display's frame.
+- A layer that cannot be placed beneath the icons is now a failure, not a
+  warning.
+
+### Behaviour
+
+- On a song change the previous song's last frame fades out as a still and the
+  new song fades in afterwards; the two are never on screen together.
+- New settings: *Fade speed*, *Text shadow*, *Show on*, *Start with Windows*.
+
+### Testing
+
+- `--desktop-test` reports PASS, FAIL or SKIP per check, exits 0 / 1 / 2, checks
+  that a transparent frame actually reached the screen, and states what it
+  cannot show.
+- `scripts\verify.ps1`: one command for every automated check on Windows.
+- `engineering/WINDOWS_TEST_MATRIX.md`: the manual matrix.
+
+## 1.8.0 — withdrawn, never verified
+
+This build was served as "stable" for a short time by mistake (see above). It
+is superseded by the 2.0 development line and is not offered any more.
 
 Desktop mode is rebuilt to be what the program was meant to be: lyrics that are
 part of the desktop while music plays, and nothing at all when it does not.

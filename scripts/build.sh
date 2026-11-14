@@ -125,6 +125,20 @@ fi
 
 PUBLISH_DIR="$OUT_DIR/YoutubeLyrics.exe"
 DOWNLOADS="docs/downloads/YoutubeLyrics.exe"
+
+# docs/downloads is the STABLE CHANNEL: the site serves it and the in-app
+# updater installs from it. A build only replaces it when RELEASE_CHANNEL says
+# "stable", which is set once, by hand, for a release that has passed the gate
+# in scripts/verify_release.py. Every other build is a development build and
+# stays in dist/.
+CHANNEL="$(tr -d '[:space:]' < RELEASE_CHANNEL 2>/dev/null || true)"
+if [ "$CHANNEL" != "stable" ]; then
+  mv "$TEMP_EXE" "$PUBLISH_DIR"
+  echo "built $PUBLISH_DIR ($(wc -c < "$PUBLISH_DIR") bytes)"
+  echo "SHA-256: $HASH"
+  echo "development build: docs/downloads (the stable channel) was not changed"
+  exit 0
+fi
 DOWNLOADS_BACKUP=""
 if [ -f "$DOWNLOADS" ]; then
   DOWNLOADS_BACKUP="$BUILD_DIR/YoutubeLyrics.exe.previous"
