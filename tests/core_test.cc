@@ -913,6 +913,328 @@ static void test_report_redaction() {
   CHECK(clean.find("Key Largo") != std::string::npos);
 }
 
+// Every spelling of a profile path and every common way a credential shows up
+// in a URL, a header or a JSON body. Nothing in the program sends credentials;
+// these guard the text a proxy, a provider or a future change could put into
+// an error message or the log.
+static void test_report_redaction_hardening() {
+  const std::string profile = "C:\\Users\\Jo Bloggs";
+  auto clean = [&](const std::string& text) { return redact_report(text, profile, "Jo Bloggs"); };
+  auto hidden = [&](const std::string& text, const char* secret) {
+    return clean(text).find(secret) == std::string::npos;
+  };
+
+  // Profile path spellings.
+  CHECK(hidden("art: C:/Users/Jo Bloggs/AppData/Local/Temp/a.jpg", "Jo Bloggs"));
+  CHECK(hidden("{\"art\":\"C:\\\\Users\\\\Jo Bloggs\\\\AppData\\\\x.jpg\"}", "Jo Bloggs"));
+  CHECK(hidden("tmp: C:\\Users\\JOBLOG~1\\AppData\\Local\\Temp\\x", "JOBLOG~1"));
+  CHECK(hidden("other: D:\\Users\\someone.else\\Music\\a.mp3", "someone.else"));
+  CHECK(hidden("xp: C:\\Documents and Settings\\Old Name\\x", "Old Name"));
+  CHECK(hidden("c:\\users\\jo bloggs\\x", "jo bloggs"));
+  CHECK_STR(clean("C:\\Users\\Public\\Music"), "C:\\Users\\Public\\Music");
+  CHECK(clean("C:\\Users\\Jo Bloggs\\AppData").find("%USERPROFILE%\\AppData") !=
+        std::string::npos);
+  CHECK(clean("file:///C:/Users/JOBLOG~1/x.txt").find("/Users/<user>/x.txt") !=
+        std::string::npos);
+
+  // Query parameters and form fields, including compound names.
+  CHECK(hidden("GET /a?access_token=AAA111&x=1", "AAA111"));
+  CHECK(hidden("GET /a?refresh_token=BBB222", "BBB222"));
+  CHECK(hidden("GET /a?client_secret=CCC333&track=Hello", "CCC333"));
+  CHECK(hidden("GET /a?api-key=DDD444", "DDD444"));
+  CHECK(hidden("GET /a?apiKey=EEE555", "EEE555"));
+  CHECK(hidden("GET /a?sessionid=FFF666", "FFF666"));
+  CHECK(hidden("password = hunter2", "hunter2"));
+  CHECK(hidden("pwd=hunter3;", "hunter3"));
+  CHECK(clean("GET /a?client_secret=CCC333&track=Hello").find("track=Hello") !=
+        std::string::npos);
+
+  // Headers.
+  CHECK(hidden("Authorization: Bearer abc.def.ghi", "abc.def.ghi"));
+  CHECK(hidden("Proxy-Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"));
+  CHECK(hidden("X-Api-Key: KKK777", "KKK777"));
+  CHECK(hidden("Cookie: sid=LLL888; theme=dark", "LLL888"));
+  CHECK(hidden("Set-Cookie: session=MMM999", "MMM999"));
+  CHECK(hidden("sent Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig to host", "eyJhbGciOiJIUzI1NiJ9"));
+
+  // JSON bodies.
+  CHECK(hidden("{\"token\": \"NNN000\", \"title\": \"Song\"}", "NNN000"));
+  CHECK(hidden("{\"password\":\"with space\"}", "with space"));
+  CHECK(hidden("{'accessToken':'OOO111'}", "OOO111"));
+  CHECK(clean("{\"token\": \"NNN000\", \"title\": \"Song\"}").find("\"title\": \"Song\"") !=
+        std::string::npos);
+
+  // Credentials inside a URL's authority.
+  CHECK(hidden("proxy http://jo:s3cret@proxy.local:8080/x", "s3cret"));
+  CHECK(hidden("proxy http://jo:s3cret@proxy.local:8080/x", "jo:"));
+  CHECK(clean("proxy http://jo:s3cret@proxy.local:8080/x").find("proxy.local:8080/x") !=
+        std::string::npos);
+  CHECK_STR(clean("https://lrclib.net/api/get?track_name=At%40Home"),
+            "https://lrclib.net/api/get?track_name=At%40Home");
+
+  // What must survive: ordinary words and the troubleshooting content itself.
+  for (const char* keep :
+       {"lookup: The Monkees \xE2\x80\x94 Monkey: Man", "Turkey: live in 1999",
+        "Key Largo", "Secret Garden", "The Password Is Love", "Lines: 42",
+        "LRCLIB exact -> HTTP 404", "Sync correction: +0.25 s for all songs",
+        "Position: 01:23 (playing)", "media: session gone for 3s; clearing 'x'",
+        "https://api.lyrics.ovh/v1/The%20Beatles/Yesterday",
+        "update: version 1.7.1 is available", "Windows 11, version 10.0 build 22631, x64"}) {
+    CHECK_STR(clean(keep), keep);
+  }
+
+  // Redaction is stable: a second pass changes nothing.
+  const std::string once = clean("C:\\Users\\Jo Bloggs\\a?token=abc&k=1 Authorization: Bearer zzzzzzzzzzzzzz");
+  CHECK_STR(clean(once), once);
+
+  // Arbitrary bytes never crash, loop or grow without bound (run under ASan).
+  uint32_t seed = 0x1234567u;
+  static const char* kPieces[] = {"\\Users\\", "/Users/", "://", "@", "token", "=", ":", "\"",
+                                  "Bearer ", "key", "\n", " ", "\\", "a", "Z", "9", "'", "&",
+                                  "password", "\xC3\xA9", "\xFF", "_", "-", "."};
+  for (int round = 0; round < 400; ++round) {
+    std::string text;
+    const int pieces = 1 + static_cast<int>(seed % 40);
+    for (int i = 0; i < pieces; ++i) {
+      seed = seed * 1664525u + 1013904223u;
+      text += kPieces[(seed >> 8) % (sizeof(kPieces) / sizeof(kPieces[0]))];
+    }
+    const std::string result = redact_report(text, profile, "Jo Bloggs");
+    CHECK(result.size() <= text.size() * 12 + 64);
+  }
+  CHECK_STR(redact_report("", "", ""), "");
+}
+
+// The on-disk cache: a round trip is exact, and a damaged file is refused as a
+// whole instead of being half-read into the wrong lyrics.
+static void test_cache_format() {
+  Lyrics timed;
+  timed.title = "Song";
+  timed.artist = "Artist";
+  timed.album = "Album";
+  timed.source = "LRCLIB";
+  timed.variant = "live";
+  CHECK(lrc_parse("[00:01.00]one\n[00:05.50]two\n[00:09.00]three\n", timed.lines));
+  timed.synced = true;
+  const std::string stored = serialize_cached_lyrics(timed);
+  Lyrics back;
+  CHECK(parse_cached_lyrics(stored, back));
+  CHECK(back.synced);
+  CHECK_STR(back.title, "Song");
+  CHECK_STR(back.artist, "Artist");
+  CHECK_STR(back.album, "Album");
+  CHECK_STR(back.source, "LRCLIB");
+  CHECK_STR(back.variant, "live");
+  CHECK_EQ(back.lines.size(), timed.lines.size());
+  CHECK_EQ(back.lines[1].t_ms, timed.lines[1].t_ms);
+  CHECK_STR(back.lines[2].text, "three");
+
+  Lyrics plain;
+  plain.title = "Song";
+  plain.source = "lyrics.ovh";
+  plain.plain = "first line\nsecond line\n--plain--\nfourth line";
+  Lyrics plain_back;
+  CHECK(parse_cached_lyrics(serialize_cached_lyrics(plain), plain_back));
+  CHECK(!plain_back.synced);
+  // A lyric line that looks like a section marker stays part of the lyrics.
+  CHECK_STR(plain_back.plain, plain.plain);
+
+  // A line break in a title cannot forge a header field.
+  Lyrics forged = plain;
+  forged.title = "Song\nsynced=1\nsource=trusted";
+  Lyrics forged_back;
+  CHECK(parse_cached_lyrics(serialize_cached_lyrics(forged), forged_back));
+  CHECK(!forged_back.synced);
+  CHECK_STR(forged_back.source, "lyrics.ovh");
+  // A title that contains the marker text does not move the sections.
+  Lyrics marker = timed;
+  marker.title = "Odd --lrc-- title";
+  Lyrics marker_back;
+  CHECK(parse_cached_lyrics(serialize_cached_lyrics(marker), marker_back));
+  CHECK_STR(marker_back.title, "Odd --lrc-- title");
+  CHECK_EQ(marker_back.lines.size(), timed.lines.size());
+
+  // Damage: every truncation of a timed sheet is either refused or yields a
+  // well-formed timed sheet with no more lines than were stored; never a crash.
+  int refused = 0;
+  for (size_t cut = 0; cut < stored.size(); ++cut) {
+    Lyrics damaged;
+    if (!parse_cached_lyrics(stored.substr(0, cut), damaged)) {
+      ++refused;
+      continue;
+    }
+    CHECK(damaged.synced);
+    CHECK(!damaged.lines.empty());
+    CHECK(damaged.lines.size() <= timed.lines.size());
+  }
+  CHECK(refused > 0);
+  Lyrics none;
+  CHECK(!parse_cached_lyrics("", none));
+  CHECK(!parse_cached_lyrics("YTLY1\ntitle=x\nsynced=1\n--lrc--\n[00:01.00]a\n--plain--\n\n", none));
+  CHECK(!parse_cached_lyrics("YTLY2\n", none));
+  CHECK(!parse_cached_lyrics("YTLY2\ntitle=x\n--lrc--\n[00:01.00]a\n--plain--\n\n", none));
+  CHECK(!parse_cached_lyrics("YTLY2\nsynced=maybe\n--lrc--\n[00:01.00]a\n--plain--\n\n", none));
+  CHECK(!parse_cached_lyrics("YTLY2\nsynced=1\n--lrc--\nnot timed at all\n--plain--\n\n", none));
+  CHECK(!parse_cached_lyrics("YTLY2\nsynced=0\n--lrc--\n--plain--\n\n\n", none));
+  CHECK(!parse_cached_lyrics("YTLY2\nsynced=1\n--plain--\nx\n--lrc--\n[00:01.00]a\n", none));
+  CHECK(!parse_cached_lyrics(std::string("YTLY2\nsynced=1\n\0\0\0\0", 19), none));
+  // Random corruption of single bytes.
+  uint32_t seed = 99u;
+  for (int round = 0; round < 600; ++round) {
+    std::string broken = stored;
+    seed = seed * 1664525u + 1013904223u;
+    broken[(seed >> 8) % broken.size()] = static_cast<char>(seed >> 24);
+    Lyrics damaged;
+    if (parse_cached_lyrics(broken, damaged)) {
+      CHECK(damaged.synced ? !damaged.lines.empty() : !damaged.plain.empty());
+    }
+  }
+}
+
+// Which provider answers end a lookup, which are retried, and when an untimed
+// cache entry is looked up again.
+static void test_lookup_policy() {
+  CHECK(classify_provider_response(false, 200).message.empty());
+  CHECK(!classify_provider_response(false, 200).transient);
+  CHECK(!classify_provider_response(false, 404).transient);
+  CHECK(!classify_provider_response(false, 404).message.empty());
+  for (int status : {408, 425, 429, 500, 502, 503, 504, 599}) {
+    CHECK(classify_provider_response(false, status).transient);
+  }
+  for (int status : {400, 401, 403, 410, 301}) {
+    CHECK(!classify_provider_response(false, status).transient);
+    CHECK(!classify_provider_response(false, status).message.empty());
+  }
+  CHECK(classify_provider_response(true, 0).transient);
+  CHECK(classify_provider_response(true, 200).transient);  // body cut short
+
+  CHECK(!untimed_cache_entry_expired(true, 0));
+  CHECK(!untimed_cache_entry_expired(true, 10000));   // timed sheets do not expire
+  CHECK(!untimed_cache_entry_expired(false, 0));
+  CHECK(!untimed_cache_entry_expired(false, kUntimedCacheDays - 1));
+  CHECK(untimed_cache_entry_expired(false, kUntimedCacheDays));
+  CHECK(!untimed_cache_entry_expired(false, -1));     // unreadable timestamp
+}
+
+// Per-song corrections survive a save and a reload, do not leak between songs
+// or editions, and a damaged file costs at most the damaged lines.
+static void test_offset_persistence() {
+  TrackInfo studio{"Hello", "Adele", "25", 295.0, "Hello"};
+  TrackInfo other_length = studio;
+  other_length.duration_s = 301.0;   // another player rounds the length differently
+  TrackInfo live{"Hello", "Adele", "", 320.0, "Hello (Live at the BBC)"};
+  TrackInfo cover{"Hello", "Lionel Richie", "", 250.0, "Hello"};
+  TrackInfo spaced{"  hello ", "ADELE", "", 0.0, "  hello "};
+
+  CHECK_STR(track_preference_key(studio), track_preference_key(other_length));
+  CHECK_STR(track_preference_key(clean_track(spaced, false)),
+            track_preference_key(clean_track(studio, false)));
+  CHECK(track_preference_key(clean_track(live, false)) !=
+        track_preference_key(clean_track(studio, false)));
+  CHECK(track_preference_key(cover) != track_preference_key(studio));
+
+  OffsetStore store;
+  store.set(track_preference_key(studio), 750);
+  store.set(track_preference_key(clean_track(live, false)), -1250);
+  store.set(track_preference_key(cover), 250);
+  const std::string saved = serialize_offset_store(store);
+  const OffsetStore loaded = parse_offset_store(saved);
+  CHECK_EQ(loaded.entries.size(), 3u);
+  CHECK_EQ(loaded.get(track_preference_key(other_length)), 750);
+  CHECK_EQ(loaded.get(track_preference_key(clean_track(live, false))), -1250);
+  CHECK_EQ(loaded.get(track_preference_key(cover)), 250);
+  CHECK_EQ(loaded.get("never|stored"), 0);
+  CHECK_STR(serialize_offset_store(loaded), saved);   // stable across runs
+
+  // Non-ASCII titles round-trip byte for byte.
+  OffsetStore unicode;
+  const TrackInfo jp{"\xE5\xA4\x9C\xE3\x81\xAB\xE9\xA7\x86\xE3\x81\x91\xE3\x82\x8B", "YOASOBI", "", 261, ""};
+  unicode.set(track_preference_key(jp), -500);
+  CHECK_EQ(parse_offset_store(serialize_offset_store(unicode)).get(track_preference_key(jp)), -500);
+
+  // A file cut off mid-write, with junk and Windows line endings.
+  const OffsetStore damaged = parse_offset_store(
+      "750\thello|adele\r\n"
+      "garbage line\n"
+      "\t\n"
+      "99999999999999\toverflow|x\n"
+      "abc\tnot a number|x\n"
+      "-250\tgood|one\n"
+      "500\ttrunca");
+  CHECK_EQ(damaged.get("hello|adele"), 750);
+  CHECK_EQ(damaged.get("good|one"), -250);
+  CHECK_EQ(damaged.get("not a number|x"), 0);
+  CHECK_EQ(damaged.get("overflow|x"), 0);
+  CHECK(std::abs(damaged.get("trunca")) <= OffsetStore::kMaxOffsetMs);
+  CHECK_EQ(parse_offset_store("").entries.size(), 0u);
+  CHECK_EQ(parse_offset_store(std::string(4096, '\t')).entries.size(), 0u);
+}
+
+// What the updater accepts as a replacement executable.
+static std::string update_image(unsigned machine = 0x8664, unsigned characteristics = 0x0022,
+                                unsigned magic = 0x20B, unsigned subsystem = 2) {
+  std::string image(4096, '\0');
+  image[0] = 'M';
+  image[1] = 'Z';
+  image[0x3C] = static_cast<char>(0x80);
+  const size_t pe = 0x80;
+  image[pe] = 'P';
+  image[pe + 1] = 'E';
+  auto put16 = [&](size_t at, unsigned value) {
+    image[at] = static_cast<char>(value & 0xFF);
+    image[at + 1] = static_cast<char>((value >> 8) & 0xFF);
+  };
+  put16(pe + 4, machine);
+  put16(pe + 20, 240);  // SizeOfOptionalHeader
+  put16(pe + 22, characteristics);
+  put16(pe + 24, magic);
+  put16(pe + 24 + 68, subsystem);
+  return image;
+}
+
+static void test_update_image_validation() {
+  const uint64_t size = 1u << 20;
+  CHECK(pe_is_x64_gui_application(update_image(), size));
+  CHECK(!pe_is_x64_gui_application(update_image(0x014C), size));          // 32-bit x86
+  CHECK(!pe_is_x64_gui_application(update_image(0xAA64), size));          // ARM64
+  CHECK(!pe_is_x64_gui_application(update_image(0x8664, 0x2022), size));  // a DLL
+  CHECK(!pe_is_x64_gui_application(update_image(0x8664, 0x0020), size));  // not executable
+  CHECK(!pe_is_x64_gui_application(update_image(0x8664, 0x0022, 0x10B), size));     // PE32
+  CHECK(!pe_is_x64_gui_application(update_image(0x8664, 0x0022, 0x20B, 3), size));  // console
+  // Size limits: an interrupted download or an absurd file.
+  CHECK(!pe_is_x64_gui_application(update_image(), 0));
+  CHECK(!pe_is_x64_gui_application(update_image(), (128u << 10) - 1));
+  CHECK(pe_is_x64_gui_application(update_image(), 128u << 10));
+  CHECK(!pe_is_x64_gui_application(update_image(), (64u << 20) + 1));
+  // Not an image at all: an HTML error page, an empty file, a short read.
+  CHECK(!pe_is_x64_gui_application("<!doctype html><html>503</html>", size));
+  CHECK(!pe_is_x64_gui_application("", size));
+  CHECK(!pe_is_x64_gui_application("MZ", size));
+  CHECK(!pe_is_x64_gui_application(update_image().substr(0, 0x90), size));
+  // A header offset pointing outside what was read, or before the DOS header.
+  std::string far_header = update_image();
+  far_header[0x3C] = static_cast<char>(0xF0);
+  far_header[0x3D] = static_cast<char>(0xFF);
+  CHECK(!pe_is_x64_gui_application(far_header, size));
+  std::string huge_offset = update_image();
+  huge_offset[0x3E] = static_cast<char>(0xFF);
+  huge_offset[0x3F] = static_cast<char>(0xFF);
+  CHECK(!pe_is_x64_gui_application(huge_offset, size));
+  std::string low_offset = update_image();
+  low_offset[0x3C] = 0x10;
+  CHECK(!pe_is_x64_gui_application(low_offset, size));
+  std::string bad_signature = update_image();
+  bad_signature[0x82] = 'X';
+  CHECK(!pe_is_x64_gui_application(bad_signature, size));
+  // Every truncation of a valid header is refused or accepted, never a crash.
+  const std::string valid = update_image();
+  for (size_t cut = 0; cut < 0x120; ++cut) {
+    const bool accepted = pe_is_x64_gui_application(valid.substr(0, cut), size);
+    CHECK(accepted == (cut >= 0x80 + 94));
+  }
+
+}
+
 int main() {
   test_utf8();
   test_json();
@@ -932,6 +1254,11 @@ int main() {
   test_edition_context();
   test_offset_store();
   test_report_redaction();
+  test_report_redaction_hardening();
+  test_cache_format();
+  test_lookup_policy();
+  test_offset_persistence();
+  test_update_image_validation();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

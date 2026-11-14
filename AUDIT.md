@@ -2,13 +2,13 @@
 
 **Reviewed:** 14 November 2026
 
-**Version under review:** 1.7.0
+**Version under review:** 1.7.1
 
 **Repository:** `LIN4CRE/Youtube-Lyrics`
 
-**Baseline reviewed:** `main` at `4f70a0c6afbdec03a0698ce8197c253eca18ea6e` (the published 1.6.0)
+**Baseline reviewed:** `main` at `6bc6525efa2f5cfbba53a00323674717b6c16bfe` (the published 1.7.0). The 1.7.0 audit, which started from `4f70a0c` (1.6.0), is kept below.
 
-**Changes made on:** branch `arena/3ccd64c0-youtube-lyrics`, branched from that commit; the Git history of that branch is the record of each change.
+**Changes made on:** branch `arena/1a165e35-youtube-lyrics`, branched from that commit; the Git history of that branch is the record of each change.
 
 > **Scope of this audit.** Everything below was measured in a Linux sandbox with
 > the Zig/MinGW-w64 cross toolchain. There was no Windows machine, no VM and no
@@ -16,6 +16,144 @@
 > package registries. **No Windows runtime claim and no live-provider claim is
 > made anywhere in this document.** The status table below separates what was
 > tested from what was only compiled.
+
+## 1.7.1: second independent review
+
+1.7.1 is a second pass over the merged 1.7.0 source by fresh reading of the
+code, not a repeat of the first audit. It changes no architecture and no
+feature. Status words mean the same as in the table further down: **Tested** =
+executed here and passed; **Compiled only** = built for Windows, never run.
+
+### Defects found and fixed
+
+| # | Severity | Defect | Fix | Evidence |
+| --- | --- | --- | --- | --- |
+| A1 | High | Superseding a lookup aborted whatever request was on the wire, including the *new* song's first request if the worker had already moved on. The new song then saw a "transport error", LRCLIB's exact match was skipped and the result could be shown as an outage. | Each request records the lookup that owns it; an abort applies only to older lookups. | Compiled only |
+| A2 | High | Cache file format: a lyric line equal to the internal separator split the entry early; a line break in a title could inject header fields; an entry with no `synced` marker was accepted as timed. | Reader/writer moved into the portable core and rewritten; malformed entries are rejected and refetched. | Tested (core) |
+| A3 | High | The stable-release workflow published whatever it had just built. It never compared the build with the site's download, did not check the manifest's fields, and created the release in one step, so an upload failure could leave a public release without its executable (this is what happened to the manual 1.6.0 attempt). | `scripts/verify_release.py` + `scripts/publish_release.sh`, see "Release process" below. | Tested (scripts, 13 tests); workflow never executed |
+| A4 | Medium | Report redaction missed: forward-slash and URL-encoded profile paths, case differences, other users' folders, `Authorization`/`Cookie`/`X-Api-Key` headers, bearer tokens, `user:password@` in URLs, `key=value` secrets. Redacting twice corrupted the text. | Rewritten; idempotent. | Tested (core) |
+| A5 | Medium | `media_stop` closed the stop event after a 3 s wait even if the thread was still running and would use the handle again. `update_stop` waited without limit. A stuck worker then had its globals destroyed underneath it by normal process exit. | Bounded waits everywhere; handles are kept if a thread is still alive; the process ends with `ExitProcess` in that case and the log says so. | Compiled only |
+| A6 | Medium | The updater's file check accepted any x64 PE: a DLL or console program with the right checksum in a tampered manifest would have been staged. | Requires an executable, non-DLL, PE32+, GUI-subsystem image; logic moved to the core. | Tested (core, incl. every header truncation) |
+| A7 | Medium | Saving a per-song correction or the settings could fail silently; the toast still said "remembered". | Result checked; honest toast; logged once. | Compiled only |
+| A8 | Medium | Diagnostic export: file failure and clipboard failure were not told apart, the clipboard was tried once, and the user was not told the report names songs. | Three outcomes, clipboard retried, privacy statement at the top of the report and in the toast. | Compiled only |
+| A9 | Low | Helper start failure logged `GetLastError()` after `CloseHandle` had overwritten it, and logged on every retry; `swprintf` of the helper command line was unchecked; worker threads posted messages to a null window handle in headless runs. | Fixed. | Compiled only |
+
+### Reviewed and found sound (no change)
+
+Log rotation; atomic file replacement; the read-size cap; the single-instance
+mutex; update download, checksum and staging; provider classification of
+outages versus misses; and **diagnostic report generation's reads of shared
+state** — the report is built on the UI thread, which owns everything it reads
+except the media snapshot (copied under `app.mu`), the lookup trail
+(`g_trace_mu`), the cache listing (`g_cache_mu`) and the listener counters
+(atomics).
+
+### Release process (stable-release.yml)
+
+A tag push (or manual dispatch) now runs, in this order, and stops at the first
+failure with nothing published:
+
+1. `VERSION` is a stable version and the tag is `v<VERSION>`.
+2. The commit is on `main`, and an existing tag of that name points at it.
+3. `./scripts/test.sh` on the committed files.
+4. `./scripts/build.sh` with the pinned toolchain (which itself gates on icon,
+   PE, resource and version-resource verification).
+5. `git diff --exit-code`: the rebuild must not change one tracked byte.
+6. `scripts/verify_release.py`: structural verification again; the rebuilt
+   executable must equal `docs/downloads/YoutubeLyrics.exe` **as committed**
+   (read with `git show`, because the build overwrites the working copy); its
+   SHA-256 must equal the sidecar; `release.json` must state exactly this
+   schema, repository, tag, version, channel, architecture, asset name, size
+   and checksum, with no extra field. The three assets are then generated from
+   the verified file and compared byte-for-byte with the committed ones.
+7. `scripts/publish_release.sh`: create a **draft**, upload, download the
+   assets back and compare, then make it public. Re-running reuses a leftover
+   draft; an already-public release with identical assets is a no-op; one with
+   different assets is refused.
+
+`ci.yml` runs step 6 as a dry run on every push, so a commit that could not be
+released is caught before anyone tags it.
+
+### GitHub Actions status and the owner action
+
+Re-checked on 14 November 2026: runs 43585063304 (CI) and 43585063261 (Publish
+documentation site) for `6bc6525` failed with jobs that have **zero steps** and
+the annotation *"The job was not started because your account is locked due to
+a billing issue."* No runner is ever allocated. This cannot be fixed, worked
+around or hidden from the repository, and no workflow was changed to ignore it.
+
+**Action for the account owner:** GitHub → profile picture → *Settings* →
+*Billing and licensing* → resolve the outstanding payment or spending-limit
+problem shown there. Then re-run the failed CI run on `main` (Actions → CI →
+*Re-run all jobs*). Only once CI is green: `git tag v1.7.1 <commit on main>`
+and `git push origin v1.7.1`, which starts the release workflow.
+
+Until then **no v1.7.1 tag or GitHub Release exists or should be created**; the
+site download (served by Vercel, which does not depend on Actions) is the
+distribution channel, and the in-app updater reads it first.
+
+### Verification performed for 1.7.1
+
+Run on 14 November 2026 in the Linux sandbox:
+
+- `./scripts/test.sh`, exit status 0:
+  - **4,783 portable-core checks, 0 failures** under
+    `-fsanitize=address,undefined`, `-Wall -Wextra` (3,483 before); new groups:
+    redaction hardening, cache format, lookup policy, offset persistence,
+    update-image validation;
+  - **17 release tests** (4 before): 7 for the release gate (every manifest
+    field wrong and missing, checksum-file variants, a one-bit different
+    rebuild, tag/version/repository mismatches, step order in the workflow) and
+    6 that run `publish_release.sh` against a stand-in `gh` (draft-first order,
+    idempotent re-run, corrupted upload stays a draft and can be retried,
+    published release never replaced, inconsistent asset folder refused);
+  - 15 build-tooling tests, 5 settings-layout tests, `check_docs.py`,
+    `release_facts.py --check`.
+- `./scripts/build.sh` (Zig 0.17.1, MinGW-w64, x86-64 GUI), no compiler
+  warnings: **1,099,264 bytes (1074 KiB)**, SHA-256
+  `fcba7110414ac6f40cc8e033310d8af06f052cf711cc6fde9292acd5c715cf3b`,
+  `0x8664 windows-gui`, version `1.7.1`, icon frames
+  `[16, 20, 24, 32, 40, 48, 64, 96, 128, 256]`.
+- **Reproducibility:** `.build` and the compiler cache were deleted and the
+  build repeated; byte-identical.
+- `scripts/verify_release.py --tag v1.7.1` against the commit: see the pull
+  request for the recorded output.
+
+**Not executed:** anything on Windows. The new `--self-test`, `--quit`, the
+three-way export result, the owner-aware abort and the shutdown changes are
+compiled and linked only.
+
+### Automated Windows checks (written, never executed)
+
+The `windows-native` CI job will, once Actions can run: build natively; load
+the image; run `--diagnostics` (version, redaction, provider reachability,
+Windows version and monitor detection); run `--self-test` (data-folder
+write/replace/read/delete, settings in range, media listener starts, reports
+and stops, worker stops during a lyric request, redaction of a planted
+credential); then start the real program, confirm it stays up for 8 s, that a
+second copy exits, that `--quit` ends it within 20 s with exit code 0 and a
+`stopped (clean)` log line and no process left. These prove process-level
+behaviour only. **They do not show that anything is drawn correctly**, and
+until a run exists they are evidence of nothing.
+
+### Manual Windows test matrix (all outstanding)
+
+None of these has been done by anyone. Each needs a person at a Windows PC.
+
+| # | Area | Steps | Pass when |
+| --- | --- | --- | --- |
+| M1 | Windows 10 (1809+) and Windows 11 | Run `--self-test r.txt`, then start normally on each | `RESULT: PASS`; tray icon and display appear |
+| M2 | Players | YouTube Music in a browser, then one other player (Spotify, Media Player) | Track, artist and position are picked up from each |
+| M3 | Transport | Pause, resume, seek forwards and back, skip mid-lookup, skip quickly several times | Lines follow within about a second; never the previous song's lyrics; no "provider unavailable" after a skip (A1) |
+| M4 | Desktop mode | Lyrics behind icons; click and drag icons through the display | Clicks pass through; focus never taken |
+| M5 | Modes | `Ctrl+Alt+F`, `F11`, double-click, `Esc` across desktop / full screen / window | Each switch is immediate and reversible |
+| M6 | Monitors | Two monitors at different scaling; move, then unplug one | Text stays sharp and on a live monitor |
+| M7 | Explorer restart | End `explorer.exe` in Task Manager and start it again | Desktop display and tray icon return |
+| M8 | Sleep / resume | Sleep during playback, wake | Listener recovers within 45 s; position correct |
+| M9 | Per-song sync | Nudge with arrows, skip away and back, restart the app; then make the data folder read-only and nudge | Correction returns for that song only; read-only case says it is *not* remembered (A7) |
+| M10 | Diagnostics | `D`; then with the diagnostics folder read-only | File + clipboard; second case says clipboard only (A8); no account name in the text |
+| M11 | Quit under load | Quit from the tray during a lookup on a slow connection; shut Windows down while it runs | Exits within seconds; log ends `stopped (clean)` |
+| M12 | Updater | Older build beside a newer site release: accept; cancel mid-download; pull the network mid-download; make the exe folder read-only | New version starts; otherwise the old one keeps working and no `.part` files remain after the next start |
 
 ## Summary
 
@@ -31,7 +169,7 @@ architecture and every feature, fixes the defects listed below, adds a
 diagnostic report and per-song sync correction, and makes the published
 executable reproducible from source.
 
-## Findings and plan (1.7.0)
+## History: findings and plan of the 1.7.0 audit
 
 Ordered by priority. "Done" means implemented in this release; the evidence
 column says how far each was verified.
@@ -90,6 +228,11 @@ steps were written but, for the reason above, have never been executed.
 
 ## Verification status
 
+This table was written for 1.7.0 and still holds for 1.7.1, with these
+changes: cache read/write format and the updater's image check are now
+**Tested** (moved into the core); everything added in 1.7.1 on the Windows side
+is **Unverified**.
+
 **Tested** = executed here and passed. **Partly tested** = the decision logic
 is covered by portable tests, the Windows code that calls it was only compiled.
 **Unverified** = compiled and linked, never executed.
@@ -116,7 +259,7 @@ is covered by portable tests, the Windows code that calls it was only compiled.
 | LRCLIB and lyrics.ovh live behaviour | Unverified | the sandbox network cannot reach either; no request was made |
 | Rendering quality, contrast and typography on a real display | Unverified | no screenshot of the running app exists |
 
-## Verification performed
+## History: verification performed for 1.7.0
 
 Run on 14 November 2026 in this sandbox, on the 1.7.0 source:
 
@@ -187,6 +330,9 @@ it is still removed, and that case is now recorded as a known limitation below.
   specific binary; making the site cite them by hand guarantees drift.
 
 ## Recommended Windows checks
+
+The full matrix is in "Manual Windows test matrix" near the top; the shorter
+list below is the 1.7.0 version, kept for reference.
 
 The quickest first step on any Windows machine is
 `YoutubeLyrics.exe --diagnostics report.txt`: it proves the program starts,

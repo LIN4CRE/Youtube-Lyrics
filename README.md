@@ -105,7 +105,7 @@ Optional integrity check (PowerShell):
 Get-FileHash .\YoutubeLyrics.exe -Algorithm SHA256
 ```
 
-Expected SHA-256 for the current 1.7.0 download is listed in [`YoutubeLyrics.exe.sha256`](docs/downloads/YoutubeLyrics.exe.sha256) and beside the download on the [project website](https://youtube-lyrics-seven.vercel.app/). Compare it before running the file. The checksum is served over HTTPS; it is an integrity check, not a code signature.
+Expected SHA-256 for the current 1.7.1 download is listed in [`YoutubeLyrics.exe.sha256`](docs/downloads/YoutubeLyrics.exe.sha256) and beside the download on the [project website](https://youtube-lyrics-seven.vercel.app/). Compare it before running the file. The checksum is served over HTTPS; it is an integrity check, not a code signature.
 
 Windows may show **"Windows protected your PC"** because the file is not
 code-signed. The source is public; continue only if you trust the download. If
@@ -234,6 +234,10 @@ src/win/           Win32 window, tray, GDI+ renderer, WinHTTP, media listener
 src/win/smtc.ps1   the PowerShell media-session listener (embedded in the exe)
 scripts/build.sh   cross-compiles to dist/YoutubeLyrics.exe
 scripts/generate_release.py creates strict stable-release metadata and checksum
+scripts/verify_release.py  release gate: the rebuilt exe must equal the site's
+                   download, checksum file and manifest before anything is published
+scripts/publish_release.sh publishes the verified assets (draft, upload, read
+                   back, then public); safe to run again after a failure
 docs/index.html    responsive no-terminal download page for GitHub Pages
 docs/brand/        custom icon, vector logo, banner, badges and Windows .ico
 src/win/wallpapers/ original procedural desktop scenes embedded in the app
@@ -326,12 +330,23 @@ menu or Settings. A text file is written to
 in Explorer. It lists the app and Windows versions, monitors, the display mode,
 what the media session reported, each lyric request and why its result was
 accepted or refused, the cache, the updater and the end of the log. It is not
-sent anywhere. Your Windows account name is replaced with a placeholder, but it
-does contain the titles of recently played songs, so read it before posting.
+sent anywhere. Your Windows account name and anything that looks like a
+password or token are replaced with a placeholder. **It does contain the titles
+and artists of recently played songs, the name of the player app and the lyric
+searches made for them**, so read it before posting; it is plain text and you
+can delete any line. If the file cannot be written the app says so, and tells
+you whether the report at least reached the clipboard.
 
 If the app will not start, run `YoutubeLyrics.exe --diagnostics report.txt`
 from a terminal; that writes the report without opening a window and also
 checks whether the lyric providers and update servers can be reached.
+
+Two more switches exist for scripts and testing. `YoutubeLyrics.exe --self-test
+result.txt` runs the checks that need no window (data folder, settings, media
+listener start and stop, leaving during a lyric request, report redaction),
+writes `PASS`/`FAIL` lines and exits 0 only if all passed; it does not change
+your settings, cache or sync corrections. `YoutubeLyrics.exe --quit` asks the
+running copy to close, exactly as **Quit** in the tray menu does.
 
 </details>
 

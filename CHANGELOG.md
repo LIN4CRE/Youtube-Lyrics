@@ -2,6 +2,37 @@
 
 User-visible changes to Youtube-Lyrics are recorded here. The executable's version is shown in Windows file properties and in the About item in the tray menu.
 
+## 1.7.1 — 2026-11-14
+
+A second, independent review of the previous release: reliability fixes in the
+lookup, cache, updater and shutdown paths, stricter privacy in diagnostic
+reports, and a release process that refuses to publish anything that is not
+byte-for-byte the verified build. No features were added or removed. It was
+cross-compiled and its portable logic is tested, but **it still has not been run
+on a Windows machine**; `AUDIT.md` separates what was tested from what was only
+compiled.
+
+### Fixed
+
+- **Skipping to a new song could show "provider unavailable" for the new song.** Cancelling the previous song's request also cancelled the new song's first request, which was then treated as an outage and skipped LRCLIB's exact match. A cancellation now only ever applies to requests of older lookups.
+- **Cached lyrics could be misread.** A lyric line that happened to look like the cache's internal separator split the entry in the wrong place, a title containing a line break could inject cache header fields, and an entry without its timed/untimed marker was accepted. The cache reader and writer were rewritten in the tested core; malformed entries are discarded and fetched again.
+- **"Remembered for this song" was shown even when the correction could not be saved** (read-only or full data folder). The app now says the correction applies until it closes, and logs the reason. Failed settings saves are logged too.
+- **Diagnostic report export reported success or one generic failure.** It now distinguishes "saved", "could not save the file, but the report is on the clipboard" and "failed", and the clipboard is retried when another program is holding it.
+- **Diagnostic reports could leak more than intended.** Redaction now also covers the account name in forward-slash, URL-encoded and differently-cased paths, other users' profile folders, `Authorization`/`Cookie`/API-key headers, bearer tokens, credentials inside URLs and key=value secrets, and applying it twice no longer damages the text.
+- **Shutdown.** Stopping the media listener could close an event handle its thread was still using; stopping the updater waited without limit for a stuck download. Every worker now has a bounded stop, the log records whether the stop was clean, and the process no longer runs normal teardown underneath a thread that is still alive.
+- **Updater file check.** A downloaded update must now be an x64 Windows *application*: a DLL, a console program or a truncated header is refused before it can replace the running copy (size and SHA-256 were already checked).
+- **Media listener.** A failed helper start logged the wrong error code and could flood the log; an over-long profile path could produce a truncated helper command line. Both fixed.
+
+### Changed
+
+- The diagnostic report opens with a plain statement of what it contains (song titles and artists, player name, lookup activity, Windows version, monitors, settings, log) and what it does not, and now includes the media listener's health.
+- `YoutubeLyrics.exe --self-test [file]` and `YoutubeLyrics.exe --quit` were added for automated checks; see the README.
+
+### Release process
+
+- A GitHub Release can be published only by `scripts/verify_release.py` passing: the tag must equal `VERSION`, the commit must be on `main`, a rebuild must leave every tracked file unchanged, and the rebuilt executable must be identical to the site's download and agree with its checksum file and every field of `release.json`. The three release assets are generated from that verified file. Publishing goes draft → upload → download and compare → public, and can be re-run safely; a published release is never overwritten.
+- GitHub Actions still cannot run on this repository (account billing lock), so these workflows have not been executed there; the scripts behind them are covered by tests that were run locally.
+
 ## 1.7.0 — 2026-11-14
 
 An audit release: fewer wrong or missing lyric matches, sync corrections that

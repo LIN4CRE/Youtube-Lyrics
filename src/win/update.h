@@ -35,6 +35,8 @@ void update_cancel_download();
 // close immediately after this succeeds.
 bool update_apply_staged(App& app, const UpdateStage& stage, std::string* error);
 void update_stop();
+// True when update_stop() had to give up waiting for the worker thread.
+bool update_worker_stuck();
 // One line describing the last check or download, for the diagnostic report.
 std::string update_status_text();
 

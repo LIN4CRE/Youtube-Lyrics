@@ -22,7 +22,11 @@ static const wchar_t* kUserAgent =
 namespace {
 std::mutex g_http_handle_mu;
 HINTERNET g_active_http_request = nullptr;
+// Which lookup the request on the wire belongs to (0 = not a lookup).
+int g_active_http_owner = 0;
 bool g_http_cancelled = false;
+// The lookup the worker thread is running; read by http_get() on that thread.
+std::atomic<int> g_worker_job_id{0};
 
 void cancel_active_http_request() {
   HINTERNET request = nullptr;
@@ -38,12 +42,20 @@ void cancel_active_http_request() {
 
 // Aborts the request in flight without latching the "shutting down" flag: used
 // when a newer track supersedes the lookup that is currently on the wire.
-void abort_active_http_request() {
+//
+// Only a request that belongs to an *older* lookup is aborted. The worker can
+// pick the new job up the instant it is published, before this runs; closing
+// whatever happened to be on the wire then killed the new song's own first
+// request, which was reported as a provider outage and skipped LRCLIB for
+// that song.
+void abort_http_requests_older_than(int job_id) {
   HINTERNET request = nullptr;
   {
     std::lock_guard<std::mutex> lock(g_http_handle_mu);
-    request = g_active_http_request;
-    g_active_http_request = nullptr;
+    if (g_active_http_request && g_active_http_owner != job_id) {
+      request = g_active_http_request;
+      g_active_http_request = nullptr;
+    }
   }
   if (request) WinHttpCloseHandle(request);
 }
@@ -132,6 +144,7 @@ std::string http_get(const std::wstring& url, int timeout_ms, int* status_out,
       return fail("HTTP request cancelled", ERROR_OPERATION_ABORTED);
     }
     g_active_http_request = request;
+    g_active_http_owner = g_worker_job_id.load();
   }
   auto close_request = [&]() {
     bool should_close = false;
@@ -307,67 +320,6 @@ std::string cache_path(const TrackInfo& t) {
   return appdata_dir() + "\\cache\\" + fnv_hex(track_key(t)) + ".txt";
 }
 
-std::string serialize_lyrics(const Lyrics& l) {
-  std::string s = "YTLY2\n";
-  s += "title=" + l.title + "\n";
-  s += "artist=" + l.artist + "\n";
-  s += "album=" + l.album + "\n";
-  s += "source=" + l.source + "\n";
-  s += "variant=" + l.variant + "\n";
-  s += std::string("synced=") + (l.synced ? "1" : "0") + "\n";
-  s += "--lrc--\n";
-  s += lyrics_to_lrc(l.lines);
-  s += "--plain--\n";
-  s += l.plain;
-  s += "\n";
-  return s;
-}
-
-bool parse_cache(const std::string& data, Lyrics& out) {
-  // "YTLY1" sheets were stored by builds whose matching accepted look-alike
-  // titles and other cuts of a song; they are ignored and fetched again.
-  if (!starts_with(data, "YTLY2\n")) return false;
-  out = Lyrics();
-  size_t pos = 6;
-  bool synced = false;
-  std::string lrc_section, plain_section;
-  size_t lrc_at = data.find("--lrc--\n");
-  size_t plain_at = data.find("--plain--\n");
-  if (lrc_at == std::string::npos || plain_at == std::string::npos ||
-      plain_at < lrc_at + 8) return false;
-
-  // header key=value block
-  size_t line_end = lrc_at;
-  while (pos < line_end) {
-    size_t nl = data.find('\n', pos);
-    if (nl == std::string::npos || nl > line_end) break;
-    std::string kv = data.substr(pos, nl - pos);
-    pos = nl + 1;
-    size_t eq = kv.find('=');
-    if (eq == std::string::npos) continue;
-    std::string k = kv.substr(0, eq), v = kv.substr(eq + 1);
-    if (k == "title") out.title = v;
-    else if (k == "artist") out.artist = v;
-    else if (k == "album") out.album = v;
-    else if (k == "source") out.source = v;
-    else if (k == "variant") out.variant = v;
-    else if (k == "synced") synced = (v == "1");
-  }
-  lrc_section = data.substr(lrc_at + 8, plain_at - (lrc_at + 8));
-  plain_section = data.substr(plain_at + 10);
-
-  if (synced) {
-    if (!lrc_parse(lrc_section, out.lines) || out.lines.empty()) return false;
-    out.synced = true;
-    return true;
-  }
-  out.synced = false;
-  out.plain = plain_section;
-  while (!out.plain.empty() && (out.plain.back() == '\n' || out.plain.back() == '\r'))
-    out.plain.pop_back();
-  return !out.plain.empty();
-}
-
 namespace {
 
 // The edition word LRCLIB itself uses in track titles, appended to queries so a
@@ -460,24 +412,23 @@ std::string build_query_url(const TrackInfo& t) {
 
 // One attempt: fetch `url`, parse, and store the lyrics on success.
 bool try_fetch(const TrackInfo& track, const std::string& url, Lyrics& out,
-               std::string& why) {
+               std::string& why, bool& transient) {
   int status = 0;
   std::string err;
   std::string body = http_get(utf8_to_wide(url), 8000, &status, &err);
+  transient = false;
   if (!err.empty()) {
-    why = "Lyrics provider transport error: " + err;
+    const ProviderFailure failure = classify_provider_response(true, status);
+    transient = failure.transient;
+    why = failure.message + ": " + err;
     logf("lyrics: %s -> transport error: %s", url.c_str(), err.c_str());
     return false;
   }
   logf("lyrics: %s -> HTTP %d (%zu bytes)", url.c_str(), status, body.size());
   if (status != 200) {
-    if (status == 404) {
-      why = "No lyrics in the database for this track.";
-    } else if (status == 429 || (status >= 500 && status <= 599)) {
-      why = "Provider is temporarily rate-limited or unavailable; try again later.";
-    } else {
-      why = "Lookup failed (HTTP " + std::to_string(status) + ").";
-    }
+    const ProviderFailure failure = classify_provider_response(false, status);
+    transient = failure.transient;
+    why = failure.message;
     return false;
   }
   Lyrics parsed;
@@ -552,19 +503,18 @@ LyricsState do_lookup(const TrackInfo& track, bool force, int job_id, Lyrics& ou
       cached = read_file(cache_path(track));
     }
     Lyrics l;
-    if (!cached.empty() && parse_cache(cached, l)) {
+    if (!cached.empty() && parse_cached_lyrics(cached, l)) {
       // A cached sheet is re-checked against the track it is about to be shown
       // for; a stale or mismatched entry is dropped rather than trusted.
       // An untimed sheet is the fallback answer. Catalogues gain timed lyrics
       // all the time, so an old untimed entry is looked up again instead of
       // pinning the song to the fallback for ever.
-      constexpr int kUntimedCacheDays = 7;
       const int age = l.synced ? 0 : file_age_days(cache_path(track));
       if (!sheet_fits(l, track)) {
         trace("  cache -> entry no longer fits this recording; looking again");
         logf("lyrics: cached sheet no longer fits %s; refetching",
              track_key(track).c_str());
-      } else if (!l.synced && age >= kUntimedCacheDays) {
+      } else if (untimed_cache_entry_expired(l.synced, age)) {
         trace("  cache -> untimed entry is " + std::to_string(age) +
               " days old; looking for timed lyrics again");
         stale_untimed = l;
@@ -609,11 +559,9 @@ LyricsState do_lookup(const TrackInfo& track, bool force, int job_id, Lyrics& ou
     ++tried;
     Lyrics l;
     std::string detail;
-    if (!try_fetch(t, url, l, detail)) {
+    bool transient = false;
+    if (!try_fetch(t, url, l, detail, transient)) {
       if (!detail.empty()) why = detail;
-      const bool transient =
-          detail.find("transport error") != std::string::npos ||
-          detail.find("rate-limited or unavailable") != std::string::npos;
       if (transient && transient_why.empty()) transient_why = detail;
       if (lrclib && transient) lrclib_blocked = true;
       trace(std::string("  ") + request_kind(url) + " -> " +
@@ -766,6 +714,7 @@ DWORD WINAPI thread_main(LPVOID) {
       g_has_job = false;
     }
 
+    g_worker_job_id.store(job.id);
     Lyrics lyr;
     std::string msg;
     bool cacheable = true;
@@ -778,7 +727,7 @@ DWORD WINAPI thread_main(LPVOID) {
     if (state == LyricsState::Ready && cacheable && lyr.source != "local file") {
       std::lock_guard<std::mutex> lock(g_cache_mu);
       if (ensure_cache_dir())
-        write_file_atomic(cache_path(job.track), serialize_lyrics(lyr));
+        write_file_atomic(cache_path(job.track), serialize_cached_lyrics(lyr));
     }
 
     {
@@ -790,7 +739,7 @@ DWORD WINAPI thread_main(LPVOID) {
     }
     {
       std::lock_guard<std::mutex> lock(g_lyrics_app_mu);
-      if (g_app_for_lyrics)
+      if (g_app_for_lyrics && g_app_for_lyrics->hwnd)
         PostMessageW(g_app_for_lyrics->hwnd, WM_APP_LYRICS, 0, 0);
     }
   }
@@ -808,8 +757,8 @@ void lyrics_enqueue(const TrackInfo& track, int req_id, bool force) {
     g_has_job = true;
     g_latest_job_id.store(req_id);
   }
-  // Whatever is on the wire is for an older track now.
-  abort_active_http_request();
+  // Whatever an older lookup has on the wire is for a track that is gone.
+  abort_http_requests_older_than(req_id);
   if (g_wake) SetEvent(g_wake);
 }
 
@@ -841,7 +790,7 @@ void lyrics_start(App& app) {
   }
 }
 
-void lyrics_stop() {
+bool lyrics_stop() {
   {
     std::lock_guard<std::mutex> lock(g_lyrics_app_mu);
     g_app_for_lyrics = nullptr;
@@ -857,7 +806,7 @@ void lyrics_stop() {
       // already detached, and process teardown will reclaim these handles.
       logf("lyrics: worker did not stop within five seconds (wait=%lu)",
            static_cast<unsigned long>(wait));
-      return;
+      return false;
     }
     CloseHandle(g_thread);
     g_thread = nullptr;
@@ -869,7 +818,9 @@ void lyrics_stop() {
     std::lock_guard<std::mutex> lock(g_job_mu);
     g_has_job = false;
   }
+  return true;
 }
+
 std::vector<std::string> lyrics_recent_lookups() {
   std::lock_guard<std::mutex> lock(g_trace_mu);
   return std::vector<std::string>(g_trace.begin(), g_trace.end());

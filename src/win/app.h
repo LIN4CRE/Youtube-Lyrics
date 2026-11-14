@@ -297,14 +297,24 @@ const wchar_t* wallpaper_name(int index);
 
 // Implemented in media.cc
 bool media_start(App& app);      // spawns the helper thread
-void media_stop();
+bool media_stop();               // false if the listener did not stop in time
+// Listener health for the diagnostic report.
+struct MediaHelperStatus {
+  int starts = 0;            // times the PowerShell helper was started
+  int start_failures = 0;    // times it could not be started at all
+  int lines = 0;             // usable reports received
+  int bad_lines = 0;         // reports that could not be parsed
+  bool running = false;
+  int64_t ms_since_last_line = -1;  // -1 = nothing received yet
+};
+MediaHelperStatus media_helper_status();
 // Parses one JSON line from the helper into `out`. Returns false when the line
 // is not usable.
 bool media_parse_line(const std::string& line, MediaState& out, int64_t now);
 
 // Implemented in lyrics.cc
 void lyrics_start(App& app);
-void lyrics_stop();
+bool lyrics_stop();              // false if the worker did not stop in time
 void lyrics_enqueue(const TrackInfo& track, int req_id, bool force);
 bool lyrics_take_result(int req_id, LyricsState* state, Lyrics* lyrics, std::string* msg);
 int lyrics_clear_cache();  // returns deleted file count, or -1 on failure
@@ -320,7 +330,17 @@ std::string build_diagnostic_report(App& app, bool with_connectivity);
 bool write_diagnostic_report(const std::string& report, const std::string& path);
 // Writes a report into the data folder, copies it to the clipboard and shows
 // it in Explorer.
-bool export_diagnostic_report(App& app, std::string* saved_path);
+enum class ReportExport {
+  Saved,          // file written, copied to the clipboard
+  ClipboardOnly,  // the file could not be written; the text is on the clipboard
+  Failed,         // neither worked
+};
+ReportExport export_diagnostic_report(App& app, std::string* saved_path);
+// Headless checks of everything that can be checked without a window or a
+// user: file access, configuration, the media listener, cancelling a network
+// request, and report redaction. Writes its findings to `path` and returns
+// true when every check passed.
+bool run_self_test(App& app, const std::string& path);
 
 // Implemented in app.cc, used by the other modules
 // True when Explorer's WorkerW desktop layer can be found right now.
