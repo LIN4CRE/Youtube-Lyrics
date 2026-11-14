@@ -118,9 +118,15 @@ void draw_text(Graphics& g, const std::wstring& s, Font* font, const RectF& box,
 // a soft dark edge is built up on every side (the layer has per-pixel alpha,
 // so the overlapping faint copies blend into a blur) and a drop shadow is
 // added beneath it.
+int g_halo_level = 1;  // Config::shadow for the frame being drawn
+
 void draw_text_backing(Graphics& g, const std::wstring& s, Font* font,
                        const RectF& box, int alpha, bool halo) {
   if (s.empty() || alpha <= 0) return;
+  if (halo) {
+    if (g_halo_level <= 0) return;
+    if (g_halo_level >= 2) alpha = std::min(255, alpha * 8 / 5);
+  }
   const REAL d = std::max(1.0f, font->GetSize() * 0.045f);
   if (halo) {
     const int edge_alpha = std::min(96, alpha * 3 / 8);
@@ -1288,6 +1294,7 @@ void render_frame(App& app, Graphics& g, int w, int h) {
   // Desktop mode keeps the user's own wallpaper unless a scene was asked for
   // (or the layer could not be given per-pixel transparency).
   const bool see_through = app.view.layer_transparent && !app.cfg.desktop_scene;
+  g_halo_level = app.cfg.shadow;
 
   if (see_through) {
     // ClearType's coloured sub-pixels are only correct against an opaque

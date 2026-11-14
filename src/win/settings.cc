@@ -382,6 +382,10 @@ constexpr int kIdDesktopRestore = 2022;
 constexpr int kIdShowTrack = 2023;
 constexpr int kIdDimPaused = 2024;
 constexpr int kIdDesktopScene = 2025;
+constexpr int kIdMonitors = 2026;
+constexpr int kIdFade = 2027;
+constexpr int kIdShadow = 2028;
+constexpr int kIdAutostart = 2029;
 constexpr int kIdClose = 2100;
 
 // One table drives the controls, their labels and their vertical rhythm. They
@@ -419,16 +423,23 @@ const RowSpec kRows[] = {
     {kIdWipe, 0, kCheck, nullptr, false},
     {kIdShowTrack, 0, kCheck, nullptr, false},
     {kIdDimPaused, 0, kCheck, nullptr, false},
+    {0, 0, kLabelOnly, L"Fade speed", false},
+    {kIdFade, 0, kValue, nullptr, true},
+    {0, 0, kLabelOnly, L"Text shadow", false},
+    {kIdShadow, 0, kValue, nullptr, true},
     {0, 0, kSubHead, L"LOCAL LYRICS AND UPDATES", false},
     {kIdOpenLyrics, 0, kButton, nullptr, false},
     {kIdClearCache, 0, kButton, nullptr, false},
     {kIdCheckUpdates, 0, kButton, nullptr, false},
     {kIdDiagnostics, 0, kButton, nullptr, false},
     {kIdResetOffset, 0, kButton, nullptr, false},
+    {kIdAutostart, 0, kCheck, nullptr, false},
 
     {kIdModeWallpaper, 1, kCheck, nullptr, false},
     {0, 1, kLabelOnly, nullptr, false},
     {kIdDesktopRestore, 1, kButton, nullptr, false},
+    {0, 1, kLabelOnly, L"Show on", false},
+    {kIdMonitors, 1, kValue, nullptr, true},
     {kIdFullscreen, 1, kCheck, nullptr, false},
     {kIdModeWindow, 1, kCheck, nullptr, false},
     {kIdTopmost, 1, kCheck, nullptr, false},
@@ -527,14 +538,22 @@ void refresh_values(SettingsWindow& s) {
   set_checked(kIdShowTrack, cfg.show_track);
   set_checked(kIdDimPaused, cfg.dim_paused);
   set_checked(kIdDesktopScene, cfg.desktop_scene);
+  set_checked(kIdAutostart, autostart_enabled());
+  set_label(kIdFade, cfg.fade_ms <= 350 ? L"Fast" : (cfg.fade_ms >= 1000 ? L"Slow" : L"Normal"));
+  set_label(kIdShadow, cfg.shadow <= 0 ? L"Off" : (cfg.shadow >= 2 ? L"Strong" : L"Soft"));
   {
-    const DesktopAttach state = s.app->desktop.state;
+    const MonitorChoice choice = parse_monitor_choice(cfg.desktop_monitors);
+    std::wstring label = L"All displays";
+    if (choice.primary_only) label = L"Main display only";
+    else if (!choice.all) label = L"Display " + utf8_to_wide(format_monitor_choice(choice));
+    set_label(kIdMonitors, label.c_str());
+  }
+  {
     set_label(kIdDesktopRestore,
               cfg.mode() != DisplayMode::Desktop
                   ? L"Restore desktop mode"
-                  : ((state == DesktopAttach::Attached || state == DesktopAttach::Restored)
-                         ? L"Check attachment again"
-                         : L"Try attaching again"));
+                  : (desktop_layer_attached(*s.app) ? L"Check attachment again"
+                                                    : L"Try attaching again"));
   }
   set_checked(kIdTopmost, cfg.topmost && cfg.mode() != DisplayMode::Desktop);
   set_checked(kIdCover, cfg.cover);
@@ -686,9 +705,8 @@ void paint(SettingsWindow& s, HWND hwnd) {
           s.app->cfg.mode() == DisplayMode::Desktop
               ? utf8_to_wide(desktop_layer_status(*s.app))
               : std::wstring(L"Desktop mode is off: lyrics are in a window");
-      const DesktopAttach state = s.app->desktop.state;
       const bool trouble = s.app->cfg.mode() == DisplayMode::Desktop &&
-                           (state == DesktopAttach::Retrying || state == DesktopAttach::Failed);
+                           desktop_layer_trouble(*s.app);
       SelectObject(mem, s.small);
       SetTextColor(mem, trouble ? RGB(240, 170, 90) : p.muted);
       RECT r{x + 28, y, x + column_w_paint, y + kRowH};
@@ -826,13 +844,41 @@ void handle_command(SettingsWindow& s, int id) {
       if (app.cfg.mode() != DisplayMode::Desktop) {
         app.set_display_mode(DisplayMode::Desktop);
       } else {
-        app.desktop.attempts = 0;
-        app.desktop.failure_notified = false;
-        if (app.desktop.state == DesktopAttach::Failed)
-          app.desktop.state = DesktopAttach::Retrying;
-        app.desktop.next_retry_at = 0;
-        desktop_layer_tick(app, true);
+        desktop_layer_retry(app);
       }
+      refresh_values(s);
+      repaint_all(s);
+      return;
+    }
+    case kIdMonitors: {
+      // All -> main only -> display 1 -> display 2 ... -> all. The layer
+      // notices the new choice on its next check and rebuilds itself.
+      const int count = std::max(1, desktop_layer_display_count());
+      const MonitorChoice now_choice = parse_monitor_choice(app.cfg.desktop_monitors);
+      std::string next = "all";
+      if (now_choice.all) {
+        next = "primary";
+      } else if (now_choice.primary_only) {
+        next = count > 1 ? "1" : "all";
+      } else if (now_choice.numbers.size() == 1 && now_choice.numbers[0] < count) {
+        next = std::to_string(now_choice.numbers[0] + 1);
+      }
+      app.cfg.desktop_monitors = next;
+      app.cfg.save();
+      desktop_layer_tick(app, true);
+      refresh_values(s);
+      repaint_all(s);
+      return;
+    }
+    case kIdFade:
+      app.cfg.fade_ms = app.cfg.fade_ms <= 350 ? 600 : (app.cfg.fade_ms >= 1000 ? 300 : 1200);
+      break;
+    case kIdShadow:
+      app.cfg.shadow = (app.cfg.shadow + 1) % 3;
+      break;
+    case kIdAutostart: {
+      const bool want = find_control(kIdAutostart)->checked;
+      if (!set_autostart(want)) app.show_toast("Windows did not allow the startup entry to be changed");
       refresh_values(s);
       repaint_all(s);
       return;
@@ -902,6 +948,9 @@ void handle_command(SettingsWindow& s, int id) {
       app.cfg.desktop_scene = defaults.desktop_scene;
       app.cfg.show_track = defaults.show_track;
       app.cfg.dim_paused = defaults.dim_paused;
+      app.cfg.fade_ms = defaults.fade_ms;
+      app.cfg.shadow = defaults.shadow;
+      app.cfg.desktop_monitors = defaults.desktop_monitors;
       app.view.bg_wallpaper = -1;
       app.view.wallpaper_changed_at = app.now_ms();
       app.set_display_mode(DisplayMode::Desktop);
@@ -950,6 +999,10 @@ LRESULT CALLBACK settings_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
       add_control(s, kIdDesktopRestore, ControlKind::Button, L"Restore desktop mode");
       add_control(s, kIdFullscreen, ControlKind::Check, L"Full screen (in front)");
       add_control(s, kIdModeWindow, ControlKind::Check, L"Ordinary window");
+      add_control(s, kIdMonitors, ControlKind::Button, L"All displays");
+      add_control(s, kIdFade, ControlKind::Button, L"Normal");
+      add_control(s, kIdShadow, ControlKind::Button, L"Soft");
+      add_control(s, kIdAutostart, ControlKind::Check, L"Start with Windows");
       add_control(s, kIdShowTrack, ControlKind::Check, L"Show artist and title");
       add_control(s, kIdDimPaused, ControlKind::Check, L"Dim the lyrics while paused");
       add_control(s, kIdDesktopScene, ControlKind::Check,

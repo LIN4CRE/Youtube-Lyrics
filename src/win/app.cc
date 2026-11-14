@@ -213,6 +213,9 @@ void invalidate_window(App& app) {
 }
 
 void reset_document(App& app) {
+  // Whatever is on the desktop now belongs to the sheet being withdrawn. It
+  // is faded out as a still picture; nothing more is drawn from it.
+  if (app.cfg.mode() == DisplayMode::Desktop && app.presence > 0.0) app.fade_frozen = true;
   app.lyrics = Lyrics();
   app.disp.clear();
   app.pending_plain_lines.clear();
@@ -593,7 +596,7 @@ RECT usable_window_rect(const App& app, const MONITORINFO& fallback_monitor) {
 void apply_window_mode(App& app, bool activate = true) {
   if (!app.hwnd) return;
   const DisplayMode mode = app.cfg.mode();
-  const bool was_desktop = app.desktop.state != DesktopAttach::Inactive;
+  const bool was_desktop = app.desktop.machine.phase != DesktopPhase::Off;
   if (!was_desktop) remember_window_rect(app);
   app.windowed = mode == DisplayMode::Window;
   app.hidden_to_tray = false;
@@ -606,16 +609,14 @@ void apply_window_mode(App& app, bool activate = true) {
     ShowWindow(app.hwnd, SW_HIDE);
     if (!was_desktop) {
       app.presence = 0.0;
-      app.desktop.state = DesktopAttach::Retrying;
-      app.desktop.attempts = 0;
-      app.desktop.next_retry_at = 0;
-      app.desktop.failure_notified = false;
+      desktop_layer_enable(app);
+    } else {
+      desktop_layer_tick(app, true);
     }
-    desktop_layer_tick(app, true);
     return;
   }
 
-  desktop_layer_detach(app);
+  desktop_layer_disable(app);
 
   // Where should a foreground window appear? Coming from the desktop layer
   // there is no window position to go by, so use the monitor the user is on.
@@ -841,8 +842,7 @@ void show_tray_menu(App& app) {
     // What is actually true right now, not what the setting hopes for.
     AppendMenuW(menu, MF_STRING | MF_GRAYED, 0,
                 (L"   " + utf8_to_wide(desktop_layer_status(app))).c_str());
-    if (app.desktop.state == DesktopAttach::Retrying ||
-        app.desktop.state == DesktopAttach::Failed)
+    if (!desktop_layer_attached(app))
       AppendMenuW(menu, MF_STRING, 22, L"   Try attaching to the desktop again");
   }
   CheckMenuRadioItem(menu, 0, 0, 0, MF_BYCOMMAND);
@@ -913,10 +913,7 @@ void show_tray_menu(App& app) {
       app.set_display_mode(DisplayMode::Desktop);
       break;
     case 22:
-      app.desktop.attempts = 0;
-      app.desktop.failure_notified = false;
-      app.desktop.state = DesktopAttach::Retrying;
-      desktop_layer_tick(app, true);
+      desktop_layer_retry(app);
       settings_refresh(app);
       break;
     case 23:
@@ -1027,9 +1024,9 @@ void on_timer(App& app) {
 
   // Desktop layer: health check, repositioning, and retries while detached.
   {
-    const DesktopAttach before = app.desktop.state;
+    const DesktopPhase before = app.desktop.machine.phase;
     desktop_layer_tick(app, false);
-    if (before != app.desktop.state) settings_refresh(app);
+    if (before != app.desktop.machine.phase) settings_refresh(app);
   }
 
   // Automatic second try after a network or provider failure.
@@ -1149,14 +1146,27 @@ void on_timer(App& app) {
         app.lstate == LyricsState::Ready && now - app.paused_since < 1500)
       wanted = app.presence;
     if (app.hidden_to_tray) wanted = 0.0;
-    // Linear fades: about 0.6 s in, 0.9 s out.
-    const double step = dt / (wanted > app.presence ? 0.6 : 0.9);
+    const bool attached = desktop_layer_attached(app);
+    const double fade_in = std::max(0.15, app.cfg.fade_ms / 1000.0);
+    if (app.fade_frozen) {
+      // The previous sheet is leaving. Its last frame fades quickly, as it
+      // stands; the new song's words wait until it has gone, so two songs are
+      // never on screen together.
+      app.presence = std::max(0.0, app.presence - dt / (fade_in * 0.6));
+      if (app.presence <= 0.0 || !attached ||
+          !desktop_layer_refade(app, static_cast<int>(std::lround(app.presence * 255.0)))) {
+        app.presence = 0.0;
+        app.fade_frozen = false;
+        desktop_layer_hide(app);
+      }
+      SetTimer(app.hwnd, kFrameTimer, 33u, nullptr);
+      return;
+    }
+    const double step = dt / (wanted > app.presence ? fade_in : fade_in * 1.5);
     if (app.presence < wanted) app.presence = std::min(wanted, app.presence + step);
     else if (app.presence > wanted) app.presence = std::max(wanted, app.presence - step);
     const bool fading = std::fabs(app.presence - wanted) > 0.0005;
 
-    const bool attached = app.desktop.state == DesktopAttach::Attached ||
-                          app.desktop.state == DesktopAttach::Restored;
     if (attached && app.presence > 0.0) {
       desktop_layer_present(app, static_cast<int>(std::lround(app.presence * 255.0)));
     } else {
@@ -1384,6 +1394,12 @@ void Config::load() {
     else if (k == "desktop_scene") desktop_scene = (v == "1");
     else if (k == "show_track") show_track = (v == "1");
     else if (k == "dim_paused") dim_paused = (v == "1");
+    else if (k == "fade_ms" && parse_config_integer(v, &integer))
+      fade_ms = static_cast<int>(std::max<long long>(200, std::min<long long>(2000, integer)));
+    else if (k == "shadow" && parse_config_integer(v, &integer))
+      shadow = static_cast<int>(std::max<long long>(0, std::min<long long>(2, integer)));
+    else if (k == "desktop_monitors")
+      desktop_monitors = format_monitor_choice(parse_monitor_choice(v));
     else if (k == "win_x" && parse_config_integer(v, &integer))
       win_x = static_cast<int>(std::max<int64_t>(-100000, std::min<int64_t>(100000, integer)));
     else if (k == "win_y" && parse_config_integer(v, &integer))
@@ -1430,6 +1446,9 @@ void Config::save() const {
   data += std::string("desktop_scene=") + (desktop_scene ? "1" : "0") + "\n";
   data += std::string("show_track=") + (show_track ? "1" : "0") + "\n";
   data += std::string("dim_paused=") + (dim_paused ? "1" : "0") + "\n";
+  data += "desktop_monitors=" + desktop_monitors + "\n";
+  data += "fade_ms=" + std::to_string(fade_ms) + "\n";
+  data += "shadow=" + std::to_string(shadow) + "\n";
   data += "win_x=" + std::to_string(win_x) + "\n";
   data += "win_y=" + std::to_string(win_y) + "\n";
   data += "win_w=" + std::to_string(win_w) + "\n";
@@ -1481,6 +1500,67 @@ void App::request_lyrics(const TrackInfo& track, bool force) {
   lmessage.clear();
   lyrics_enqueue(track, lyrics_req_id, force);
   invalidate_window(*this);
+}
+
+// ------------------------------------------------------------------ autostart
+
+namespace {
+const wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+const wchar_t kRunValue[] = L"YoutubeLyrics";
+
+std::wstring run_command() {
+  wchar_t path[MAX_PATH * 4] = L"";
+  const DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH * 4);
+  if (n == 0 || n >= MAX_PATH * 4) return std::wstring();
+  return L"\"" + std::wstring(path) + L"\"";
+}
+
+std::wstring run_entry() {
+  wchar_t value[MAX_PATH * 4] = L"";
+  DWORD bytes = sizeof(value) - sizeof(wchar_t);
+  DWORD type = 0;
+  if (RegGetValueW(HKEY_CURRENT_USER, kRunKey, kRunValue, RRF_RT_REG_SZ, &type, value, &bytes) !=
+      ERROR_SUCCESS)
+    return std::wstring();
+  return value;
+}
+}  // namespace
+
+bool autostart_enabled() { return !run_entry().empty(); }
+
+bool set_autostart(bool on) {
+  HKEY key = nullptr;
+  if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_SET_VALUE, &key) != ERROR_SUCCESS) {
+    logf("autostart: the Run key could not be opened (error %lu)",
+         static_cast<unsigned long>(GetLastError()));
+    return false;
+  }
+  LONG result = ERROR_SUCCESS;
+  if (on) {
+    const std::wstring command = run_command();
+    result = command.empty()
+                 ? ERROR_BAD_PATHNAME
+                 : RegSetValueExW(key, kRunValue, 0, REG_SZ,
+                                  reinterpret_cast<const BYTE*>(command.c_str()),
+                                  static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)));
+  } else {
+    result = RegDeleteValueW(key, kRunValue);
+    if (result == ERROR_FILE_NOT_FOUND) result = ERROR_SUCCESS;
+  }
+  RegCloseKey(key);
+  logf("autostart: %s %s (code %ld)", on ? "enable" : "disable",
+       result == ERROR_SUCCESS ? "ok" : "FAILED", static_cast<long>(result));
+  return result == ERROR_SUCCESS;
+}
+
+// The executable is portable. If it was moved since the entry was written,
+// point the entry at where it is now; a stale path would silently stop the
+// program starting with Windows.
+void autostart_refresh_path() {
+  const std::wstring entry = run_entry();
+  if (entry.empty()) return;
+  const std::wstring command = run_command();
+  if (!command.empty() && _wcsicmp(entry.c_str(), command.c_str()) != 0) set_autostart(true);
 }
 
 SIZE App::surface_size() const {
@@ -1553,8 +1633,7 @@ void App::set_display_mode(DisplayMode mode) {
     if (mode == DisplayMode::Desktop) {
       // Nothing is drawn on an idle desktop, so say where the lyrics went.
       view.hint_until = 0;
-      const bool ok = desktop.state == DesktopAttach::Attached ||
-                      desktop.state == DesktopAttach::Restored;
+      const bool ok = desktop_layer_attached(*this);
       tray_balloon(*this, L"Lyrics are now part of the desktop",
                    ok ? L"They appear behind your icons when music with lyrics plays, and "
                         L"vanish when it stops. Ctrl+Alt+S opens Settings; Ctrl+Alt+W "
@@ -2034,7 +2113,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                      suggested->bottom - suggested->top,
                      SWP_NOZORDER | SWP_NOACTIVATE);
       } else if (app->cfg.mode() == DisplayMode::Desktop) {
-        desktop_layer_tick(*app, true);
+        desktop_layer_display_changed(*app);
       } else if (!app->windowed) {
         HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         MONITORINFO info{};
@@ -2055,7 +2134,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       if (app->hidden_to_tray) {
         // Nothing to move while hidden; show_window() re-applies the mode.
       } else if (app->cfg.mode() == DisplayMode::Desktop) {
-        desktop_layer_tick(*app, true);
+        desktop_layer_display_changed(*app);
       } else if (app->cfg.mode() == DisplayMode::Fullscreen) {
         // Stay on the monitor the window is on; only snap to its new size.
         HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
@@ -2233,7 +2312,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       UnregisterHotKey(hwnd, kHotkeyWallpaper);
       UnregisterHotKey(hwnd, kHotkeySettings);
       UnregisterHotKey(hwnd, kHotkeyFullscreen);
-      desktop_layer_detach(*app);
+      desktop_layer_disable(*app);
       close_update_progress(*app);
       update_stop();
       remove_tray_icon(*app);
@@ -2264,7 +2343,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         app->view.last_frame = now;
         // Displays are often re-enumerated on wake; check the desktop layer
         // is still where it should be instead of waiting for the next poll.
-        desktop_layer_tick(*app, true);
+        desktop_layer_power_resumed(*app);
         invalidate_window(*app);
       }
       return TRUE;
@@ -2367,7 +2446,7 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR command_line, int show_cm
       headless.inst = inst;
       std::string path = wide_to_utf8(target);
       if (path.empty()) path = appdata_dir() + "\\desktop-test.txt";
-      result = run_desktop_test(headless, path) ? 0 : 1;
+      result = run_desktop_test(headless, path);
     }
     GdiplusShutdown(test_gdi_token);
     return result;
@@ -2506,6 +2585,7 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, PWSTR command_line, int show_cm
   app.view.last_mouse = 0;
   // The desktop layer stays clean on an ordinary launch; the hint is shown
   // there only the first time, and whenever the mode is changed.
+  autostart_refresh_path();
   // Nothing is ever written across an idle desktop. A first launch says where
   // the program went from the tray instead.
   app.view.hint_until = app.cfg.mode() != DisplayMode::Desktop ? app.now_ms() + 9000 : 0;
