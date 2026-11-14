@@ -44,7 +44,11 @@ jobs:
       - name: Confirm the downloadable copy is the verified build
         run: |
           sha256sum dist/YoutubeLyrics.exe docs/downloads/YoutubeLyrics.exe
-          cmp dist/YoutubeLyrics.exe docs/downloads/YoutubeLyrics.exe
+          if [ "$(tr -d '[:space:]' < RELEASE_CHANNEL)" = stable ]; then
+            cmp dist/YoutubeLyrics.exe docs/downloads/YoutubeLyrics.exe
+          else
+            echo "development channel: docs/downloads keeps the last stable release"
+          fi
       # The build is reproducible, so rebuilding this commit must give back
       # exactly the download that is committed and served by the site.
       - name: Confirm the committed download is the build of this commit
@@ -56,7 +60,12 @@ jobs:
       # The same gate the stable-release workflow runs before publishing, so a
       # commit that could not be released is caught here, not at tag time.
       - name: Dry-run the release gate (nothing is published)
-        run: python3 scripts/verify_release.py --tag "v$(cat VERSION)" --built dist/YoutubeLyrics.exe --ref HEAD --output-dir .build/release
+        run: |
+          if [ "$(tr -d '[:space:]' < RELEASE_CHANNEL)" = stable ]; then
+            python3 scripts/verify_release.py --tag "v$(cat VERSION)" --built dist/YoutubeLyrics.exe --ref HEAD --output-dir .build/release
+          else
+            echo "development channel: nothing to release"
+          fi
 
   windows-native:
     name: Windows native build and resource check

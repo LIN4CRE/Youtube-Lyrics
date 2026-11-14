@@ -26,7 +26,11 @@ README_VERSION = re.compile(r"(current )\d+\.\d+\.\d+( download)")
 
 
 def facts() -> dict[str, str]:
-    version = (ROOT / "VERSION").read_text(encoding="ascii").strip()
+    # The site and README describe the published stable download, which is not
+    # necessarily the version under development in VERSION.
+    import json as _json
+    version = _json.loads(
+        (ROOT / "docs" / "downloads" / "release.json").read_text(encoding="utf-8"))["version"]
     exe = ROOT / "docs" / "downloads" / "YoutubeLyrics.exe"
     if not exe.is_file():
         raise SystemExit("docs/downloads/YoutubeLyrics.exe is missing; run scripts/build.sh first")

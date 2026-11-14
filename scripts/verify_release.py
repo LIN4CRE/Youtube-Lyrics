@@ -181,7 +181,48 @@ def git_show(ref: str, path: str) -> bytes:
     return result.stdout
 
 
+ACCEPTANCE_CHECKS = ("desktop_test", "manual_matrix")
+
+
+def check_acceptance(text: str, version: str, sha256: str) -> dict:
+    """The human sign-off: this exact binary was run on a real Windows PC.
+
+    release/acceptance.json is written by a person after running
+    scripts/verify.ps1 and the manual matrix in engineering/WINDOWS_TEST_MATRIX.md.
+    It names the binary by hash, so it cannot be carried over to another build.
+    """
+    try:
+        record = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ReleaseError(f"release/acceptance.json is not valid JSON: {exc}") from exc
+    if not isinstance(record, dict):
+        raise ReleaseError("release/acceptance.json is not a JSON object")
+    if record.get("version") != version:
+        raise ReleaseError(
+            f"release/acceptance.json is for version {record.get('version')!r}, not {version!r}")
+    if record.get("sha256") != sha256:
+        raise ReleaseError(
+            "release/acceptance.json was recorded for a different binary "
+            f"({record.get('sha256')!r}); the Windows checks must be repeated on this build")
+    for key in ("windows_build", "tested_by", "date"):
+        if not isinstance(record.get(key), str) or not record[key].strip():
+            raise ReleaseError(f"release/acceptance.json has no {key!r}")
+    for key in ACCEPTANCE_CHECKS:
+        if record.get(key) != "pass":
+            raise ReleaseError(
+                f"release/acceptance.json: {key} is {record.get(key)!r}, not 'pass'")
+    return record
+
+
+def check_channel(text: str) -> None:
+    if text.strip() != "stable":
+        raise ReleaseError(
+            f"RELEASE_CHANNEL is {text.strip()!r}: this commit is a development build "
+            "and cannot be published as a stable release")
+
+
 def run(tag: str, built_path: Path, ref: str, output_dir: Path, repository: str) -> dict[str, object]:
+    check_channel(git_show(ref, "RELEASE_CHANNEL").decode("ascii", "replace"))
     version = git_show(ref, "VERSION").decode("ascii", "replace").strip()
     working_version = (ROOT / "VERSION").read_text(encoding="ascii").strip()
     if working_version != version:
@@ -203,6 +244,8 @@ def run(tag: str, built_path: Path, ref: str, output_dir: Path, repository: str)
         )
 
     built = built_path.read_bytes()
+    check_acceptance(git_show(ref, "release/acceptance.json").decode("utf-8", "replace"),
+                     version, hashlib.sha256(built).hexdigest())
     published_exe = git_show(ref, f"docs/downloads/{ASSET}")
     published_sidecar = git_show(ref, f"docs/downloads/{SIDECAR}").decode("utf-8", "replace")
     published_manifest = git_show(ref, f"docs/downloads/{MANIFEST}").decode("utf-8", "replace")
